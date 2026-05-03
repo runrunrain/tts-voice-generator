@@ -1,0 +1,162 @@
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  /* Colors */
+  --color-bg-base: #131316;
+  --color-bg-elevated: #1c1c20;
+  --color-bg-sunken: #0a0a0c;
+  --color-bg-surface: #222226;
+  --color-bg-hover: #2c2c32;
+  --color-bg-active: #34343a;
+  --color-border: #3a3a42;
+  --color-border-subtle: #2a2a30;
+  --color-border-focus: #c9944a;
+  --color-text-primary: #eaeaec;
+  --color-text-secondary: #9898a0;
+  --color-text-tertiary: #6a6a72;
+  --color-text-inverse: #131316;
+  --color-accent: #c9944a;
+  --color-accent-hover: #dba85e;
+  --color-accent-active: #b5842e;
+  --color-accent-muted: rgba(201, 148, 74, 0.12);
+  --color-accent-subtle: rgba(201, 148, 74, 0.06);
+  --color-success: #3d9e8f;
+  --color-success-muted: rgba(61, 158, 143, 0.12);
+  --color-warning: #d4a030;
+  --color-warning-muted: rgba(212, 160, 48, 0.12);
+  --color-error: #d44848;
+  --color-error-muted: rgba(212, 72, 72, 0.12);
+
+  /* Typography */
+  --font-display: "Playfair Display", "Noto Serif SC", Georgia, serif;
+  --font-body: "DM Sans", "Noto Sans SC", sans-serif;
+  --font-mono: "JetBrains Mono", "Source Code Pro", monospace;
+
+  /* Font Sizes */
+  --text-2xl: 28px;
+  --text-xl: 20px;
+  --text-lg: 16px;
+  --text-md: 14px;
+  --text-sm: 12px;
+  --text-xs: 11px;
+  --leading-2xl: 36px;
+  --leading-xl: 28px;
+  --leading-lg: 24px;
+  --leading-md: 22px;
+  --leading-sm: 18px;
+  --leading-xs: 16px;
+
+  /* Font Weights */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Spacing */
+  --space-2xs: 2px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+  --space-2xl: 32px;
+  --space-3xl: 48px;
+
+  /* Radius */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-full: 9999px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.4);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.5);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,0.6);
+  --shadow-glow: 0 0 16px rgba(201,148,74,0.3);
+  --shadow-inset: inset 0 1px 2px rgba(0,0,0,0.3);
+
+  /* Transitions */
+  --duration-instant: 80ms;
+  --duration-fast: 160ms;
+  --duration-normal: 240ms;
+  --duration-slow: 400ms;
+  --easing-default: cubic-bezier(0.4, 0, 0.2, 1);
+  --easing-decelerate: cubic-bezier(0, 0, 0.2, 1);
+  --easing-accelerate: cubic-bezier(0.4, 0, 1, 1);
+
+  /* Reset Tailwind background to match our dark console theme */
+  --background: var(--color-bg-base);
+  --foreground: var(--color-text-primary);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg-base: var(--color-bg-base);
+  --color-bg-elevated: var(--color-bg-elevated);
+  --color-bg-sunken: var(--color-bg-sunken);
+  --color-bg-surface: var(--color-bg-surface);
+  --color-bg-hover: var(--color-bg-hover);
+  --color-bg-active: var(--color-bg-active);
+  
+  --color-border: var(--color-border);
+  --color-border-subtle: var(--color-border-subtle);
+  --color-border-focus: var(--color-border-focus);
+  
+  --color-text-primary: var(--color-text-primary);
+  --color-text-secondary: var(--color-text-secondary);
+  --color-text-tertiary: var(--color-text-tertiary);
+  --color-text-inverse: var(--color-text-inverse);
+  
+  --color-accent: var(--color-accent);
+  --color-accent-hover: var(--color-accent-hover);
+  --color-accent-active: var(--color-accent-active);
+  --color-accent-muted: var(--color-accent-muted);
+  --color-accent-subtle: var(--color-accent-subtle);
+  
+  --color-success: var(--color-success);
+  --color-success-muted: var(--color-success-muted);
+  --color-warning: var(--color-warning);
+  --color-warning-muted: var(--color-warning-muted);
+  --color-error: var(--color-error);
+  --color-error-muted: var(--color-error-muted);
+
+  --font-display: var(--font-display);
+  --font-body: var(--font-body);
+  --font-mono: var(--font-mono);
+
+  --text-2xl: var(--text-2xl);
+  --text-xl: var(--text-xl);
+  --text-lg: var(--text-lg);
+  --text-md: var(--text-md);
+  --text-sm: var(--text-sm);
+  --text-xs: var(--text-xs);
+
+  --font-weight-regular: var(--weight-regular);
+  --font-weight-medium: var(--weight-medium);
+  --font-weight-semibold: var(--weight-semibold);
+  --font-weight-bold: var(--weight-bold);
+
+  --spacing-2xs: var(--space-2xs);
+  --spacing-xs: var(--space-xs);
+  --spacing-sm: var(--space-sm);
+  --spacing-md: var(--space-md);
+  --spacing-lg: var(--space-lg);
+  --spacing-xl: var(--space-xl);
+  --spacing-2xl: var(--space-2xl);
+  --spacing-3xl: var(--space-3xl);
+
+  --radius-xs: var(--radius-xs);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+  --radius-full: var(--radius-full);
+}
+
+@layer base {
+  body {
+    @apply bg-bg-base text-text-primary font-body;
+  }
+}
