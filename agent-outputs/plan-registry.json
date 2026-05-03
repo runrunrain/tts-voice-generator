@@ -1,0 +1,21 @@
+[
+  {
+    "id": "execution-plan-20260503",
+    "type": "execution-plan",
+    "path": "D:/workpace-maorun/Database/AI技术/AI语音生成工具/Gemini-OpenRouter-TTS-Web项目后续开发执行计划.md",
+    "timestamp": "2026-05-03T18:30:00Z",
+    "status": "active",
+    "summary": "8 Phase路线图：P0(MVP后端+API闭环/持久化/前端对接/质量门禁)4Phase共8-10天，P1(Director多说话者/Agent集成/音色探针)3Phase共5.5天，P2(生产化增强)1Phase共2天。总计16-20天。",
+    "phases": [
+      {"phase": "Phase 1: MVP后端基建+真实API闭环", "taskCount": 8, "status": "pending"},
+      {"phase": "Phase 2: 持久化+设置+音色管理", "taskCount": 4, "status": "pending"},
+      {"phase": "Phase 3: 前端状态机对接+错误处理", "taskCount": 4, "status": "pending"},
+      {"phase": "Phase 4: MVP端到端测试+质量门禁", "taskCount": 4, "status": "pending"},
+      {"phase": "Phase 5: Director模式+多说话者", "taskCount": 2, "status": "pending"},
+      {"phase": "Phase 6: Agent集成(OpenCode契约)", "taskCount": 2, "status": "pending"},
+      {"phase": "Phase 7: 音色探针增强+高级设置", "taskCount": 2, "status": "pending"},
+      {"phase": "Phase 8: 生产化增强", "taskCount": 4, "status": "pending"}
+    ],
+    "relatedPlanId": ""
+  }
+]

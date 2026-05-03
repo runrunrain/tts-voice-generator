@@ -46,9 +46,9 @@ export function TopBar() {
       </div>
 
       <div className="flex-1 flex items-center justify-end gap-4">
-        <div className="flex items-center gap-2 text-sm text-text-secondary">
-          <div className="w-2 h-2 rounded-full bg-success shadow-[0_0_8px_rgba(61,158,143,0.5)]" />
-          API: OK
+        <div className="flex items-center gap-2 text-sm text-text-tertiary">
+          <div className="w-2 h-2 rounded-full bg-warning shadow-[0_0_8px_rgba(197,158,49,0.4)]" />
+          Demo API: simulated
         </div>
         <button className="px-3 py-1.5 text-sm font-medium rounded-md hover:bg-bg-hover transition-colors">
           快捷操作

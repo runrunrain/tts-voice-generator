@@ -1,0 +1,22 @@
+{
+  "taskId": "20260503-191000-fix-three-major-blockers",
+  "timestamp": "2026-05-03T19:10:00Z",
+  "agent": "designer",
+  "projectId": "tts-voice-generator",
+  "taskBrief": "修复谛听审核发现的3个Major阻塞问题：History数据源不一致、RightPanel错误重试绕过校验、Demo API状态文案误导",
+  "status": "completed",
+  "tags": ["bugfix", "data-consistency", "defensive-programming", "ux-copy"],
+  "relatedFiles": [
+    "src/app/state/AppContext.tsx",
+    "src/app/services/demoAdapter.ts",
+    "src/app/pages/HistoryPage.tsx",
+    "src/app/components/RightPanel.tsx",
+    "src/app/components/TopBar.tsx",
+    "src/app/components/BottomBar.tsx",
+    "src/app/pages/SettingsPage.tsx"
+  ],
+  "nextSteps": {
+    "suggestedAgent": "reviewer",
+    "suggestedAction": "审核7个文件的变更，验证3个阻塞问题的修复效果"
+  }
+}
