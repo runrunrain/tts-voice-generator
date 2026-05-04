@@ -30,8 +30,14 @@ import {
   getMimeType,
   getExtension,
 } from "../utils/audio-fs.js";
+import {
+  resolveTtsFormat,
+  wrapPcm16LeToWav,
+  type AudioFormat,
+} from "../utils/audio-format.js";
 import { canonicalizeVoice } from "../utils/voice.js";
 import { acquireSlot, releaseSlot } from "../services/concurrency.js";
+import { sanitizeText } from "../services/openrouter-provider.js";
 
 const app = new Hono();
 
@@ -41,7 +47,7 @@ const GenerateSchema = z.object({
   model: z.string().min(1),
   input: z.string().min(1),
   voice: z.string().min(1),
-  responseFormat: z.enum(["mp3", "pcm"]).optional().default("mp3"),
+  responseFormat: z.enum(["wav", "pcm", "mp3"]).optional().default("wav"),
   providerOptions: z.record(z.unknown()).optional().nullable(),
   directorSnapshot: z.object({
     audioProfile: z.string().optional(),
@@ -89,6 +95,9 @@ app.post("/api/tts/generate", async (c) => {
   // Canonicalize voice: map legacy aliases (e.g. alloy -> Zephyr)
   const canonicalVoice = canonicalizeVoice(req.voice);
 
+  // Resolve format: determine upstream format, output format, and whether to wrap PCM to WAV
+  const formatPlan = resolveTtsFormat(req.model, req.responseFormat as AudioFormat);
+
   // 2. Check API Key
   if (!isOpenRouterConfigured()) {
     // Save a failed job record for traceability
@@ -98,7 +107,7 @@ app.post("/api/tts/generate", async (c) => {
       id: jobId,
       model: req.model,
       voice: canonicalVoice,
-      responseFormat: req.responseFormat,
+      responseFormat: formatPlan.outputFormat,
       input: req.input,
       inputCharCount: req.input.length,
       status: "failed",
@@ -136,7 +145,7 @@ app.post("/api/tts/generate", async (c) => {
       id: jobId,
       model: req.model,
       voice: canonicalVoice,
-      responseFormat: req.responseFormat,
+      responseFormat: formatPlan.outputFormat,
       input: req.input,
       inputCharCount: req.input.length,
       status: "failed",
@@ -185,7 +194,7 @@ app.post("/api/tts/generate", async (c) => {
     id: jobId,
     model: req.model,
     voice: canonicalVoice,
-    responseFormat: req.responseFormat,
+    responseFormat: formatPlan.outputFormat,
     input: req.input,
     inputCharCount: req.input.length,
     status: "running",
@@ -205,19 +214,25 @@ app.post("/api/tts/generate", async (c) => {
       model: req.model,
       input: req.input,
       voice: canonicalVoice,
-      responseFormat: req.responseFormat,
+      responseFormat: formatPlan.upstreamFormat,
       providerOptions: req.providerOptions || undefined,
     });
 
     if (result.ok) {
       // ─── Success path ─────────────────────────────────────────────
-      const ext = getExtension(req.responseFormat);
-      const mimeType = getMimeType(req.responseFormat);
+      // Wrap PCM to WAV if needed
+      let audioBuffer = result.audioBuffer;
+      if (formatPlan.wrapPcmToWav) {
+        audioBuffer = wrapPcm16LeToWav(audioBuffer);
+      }
+
+      const ext = formatPlan.extension;
+      const mimeType = formatPlan.mimeType;
       const now = new Date();
 
       // Write audio file atomically (temp file + rename)
-      const filePath = writeAudioFile(jobId, ext, result.audioBuffer, now);
-      const sha256 = computeSha256(result.audioBuffer);
+      const filePath = writeAudioFile(jobId, ext, audioBuffer, now);
+      const sha256 = computeSha256(audioBuffer);
 
       // Estimate duration (rough: ~150 chars/sec for Gemini TTS)
       const durationSec = Math.max(0.5, req.input.length * 0.007).toFixed(1);
@@ -240,7 +255,7 @@ app.post("/api/tts/generate", async (c) => {
         fileName: `${jobId}.${ext}`,
         filePath,
         mimeType,
-        sizeBytes: result.audioBuffer.length,
+        sizeBytes: audioBuffer.length,
         sha256,
         duration,
         createdAt: now,
@@ -261,10 +276,13 @@ app.post("/api/tts/generate", async (c) => {
         audioUrl: `/api/audio/${assetId}`,
         contentType: mimeType,
         duration,
-        sizeBytes: result.audioBuffer.length,
+        sizeBytes: audioBuffer.length,
         charCount: req.input.length,
         estimatedCost,
         createdAt: now.toISOString(),
+        requestedFormat: req.responseFormat,
+        upstreamFormat: formatPlan.upstreamFormat,
+        outputFormat: formatPlan.outputFormat,
       });
     } else {
       // ─── Failure path (API error) ─────────────────────────────────
@@ -272,7 +290,7 @@ app.post("/api/tts/generate", async (c) => {
         .set({
           status: "failed",
           errorCode: result.errorCode,
-          errorMessage: result.errorMessage,
+          errorMessage: sanitizeText(result.errorMessage),
           errorMetadata: result.errorMetadata ? JSON.stringify(result.errorMetadata) : null,
           completedAt: new Date(),
         })
@@ -289,7 +307,7 @@ app.post("/api/tts/generate", async (c) => {
         status: "failed",
         error: {
           code: result.errorCode,
-          message: result.errorMessage,
+          message: sanitizeText(result.errorMessage),
           category: classifyErrorCategory(result.errorCode),
           retryable: result.retryable,
           metadata: result.errorMetadata || undefined,
@@ -304,11 +322,14 @@ app.post("/api/tts/generate", async (c) => {
     // Release concurrency slot
     releaseSlot(slotResult.slotId);
 
+    const rawErrMsg = err instanceof Error ? err.message : "Unknown error";
+    const safeErrMsg = sanitizeText(rawErrMsg);
+
     db.update(generationJob)
       .set({
         status: "failed",
         errorCode: "INTERNAL_ERROR",
-        errorMessage: err instanceof Error ? err.message : "Unknown error",
+        errorMessage: safeErrMsg,
         completedAt: new Date(),
       })
       .where(eq(generationJob.id, jobId))
@@ -321,7 +342,7 @@ app.post("/api/tts/generate", async (c) => {
       status: "failed",
       error: {
         code: "INTERNAL_ERROR",
-        message: err instanceof Error ? err.message : "An unexpected error occurred",
+        message: safeErrMsg,
         category: "internal" as const,
         retryable: false,
       },

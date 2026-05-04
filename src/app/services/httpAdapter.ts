@@ -184,7 +184,7 @@ export const httpAdapter: TtsServiceAdapter = {
         body: JSON.stringify({
           voice: voiceName,
           model: "google/gemini-3.1-flash-tts-preview",
-          format: "mp3",
+          format: "wav",
         }),
       });
 

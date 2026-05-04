@@ -52,7 +52,7 @@ export function initSchema() {
       open_router_api_key TEXT,
       default_model TEXT NOT NULL DEFAULT 'google/gemini-3.1-flash-tts-preview',
       default_voice TEXT NOT NULL DEFAULT 'Zephyr',
-      default_format TEXT NOT NULL DEFAULT 'mp3',
+      default_format TEXT NOT NULL DEFAULT 'wav',
       audio_output_dir TEXT NOT NULL DEFAULT './data/audio',
       max_chars_per_request INTEGER NOT NULL DEFAULT 5000,
       max_concurrent_jobs INTEGER NOT NULL DEFAULT 2,

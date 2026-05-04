@@ -190,10 +190,10 @@ export function SettingsPage() {
                       <input
                         type="radio"
                         name="format"
-                        checked={defaultFormat === "mp3"}
-                        onChange={() => setDefaultFormat("mp3")}
+                        checked={defaultFormat === "wav"}
+                        onChange={() => setDefaultFormat("wav")}
                         className="accent-accent"
-                      /> mp3
+                      /> WAV (推荐)
                     </label>
                     <label className="flex items-center gap-2 text-sm cursor-pointer text-text-primary">
                       <input
@@ -202,7 +202,7 @@ export function SettingsPage() {
                         checked={defaultFormat === "pcm"}
                         onChange={() => setDefaultFormat("pcm")}
                         className="accent-accent"
-                      /> pcm
+                      /> PCM (raw)
                     </label>
                   </div>
                 </div>

@@ -380,18 +380,18 @@ export function DirectorPage() {
 
             <div className="flex items-center bg-bg-surface border border-border rounded-md overflow-hidden text-sm">
               <button
-                className={`px-3 py-1.5 transition-colors ${format === "mp3" ? "bg-bg-active text-text-primary" : "text-text-tertiary hover:bg-bg-hover hover:text-text-secondary"}`}
-                onClick={() => setFormat("mp3")}
+                className={`px-3 py-1.5 transition-colors ${format === "wav" ? "bg-bg-active text-text-primary" : "text-text-tertiary hover:bg-bg-hover hover:text-text-secondary"}`}
+                onClick={() => setFormat("wav")}
                 disabled={assemblePhase === "loading"}
               >
-                mp3
+                WAV
               </button>
               <button
                 className={`px-3 py-1.5 transition-colors ${format === "pcm" ? "bg-bg-active text-text-primary" : "text-text-tertiary hover:bg-bg-hover hover:text-text-secondary"}`}
                 onClick={() => setFormat("pcm")}
                 disabled={assemblePhase === "loading"}
               >
-                pcm
+                PCM (raw)
               </button>
             </div>
 

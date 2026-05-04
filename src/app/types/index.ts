@@ -21,7 +21,7 @@ export interface VoiceProfile {
 
 // ─── Generation Request / Result ─────────────────────────────────────────────
 
-export type AudioFormat = "mp3" | "pcm";
+export type AudioFormat = "wav" | "pcm" | "mp3";
 
 export interface GenerateRequest {
   text: string;

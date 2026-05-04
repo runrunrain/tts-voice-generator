@@ -12,7 +12,9 @@ import { voiceProfile } from "../db/schema.js";
 import { eq, sql } from "drizzle-orm";
 import { isOpenRouterConfigured, requireApiKey } from "../services/key-resolver.js";
 import { OpenRouterProvider } from "../services/openrouter-provider.js";
+import { sanitizeText } from "../services/openrouter-provider.js";
 import { canonicalizeVoice } from "../utils/voice.js";
+import { resolveTtsFormat, type AudioFormat } from "../utils/audio-format.js";
 
 const app = new Hono();
 
@@ -39,7 +41,7 @@ app.get("/api/voices", (c) => {
 const ProbeSchema = z.object({
   voice: z.string().min(1),
   model: z.string().optional().default("google/gemini-3.1-flash-tts-preview"),
-  format: z.enum(["mp3", "pcm"]).optional().default("mp3"),
+  format: z.enum(["wav", "pcm", "mp3"]).optional().default("wav"),
 });
 
 app.post("/api/voices/probe", async (c) => {
@@ -64,6 +66,9 @@ app.post("/api/voices/probe", async (c) => {
   const canonicalName = canonicalizeVoice(voiceName);
   const db = getDb();
 
+  // Resolve format for upstream: for Gemini TTS, always use upstream "pcm"
+  const formatPlan = resolveTtsFormat(model, format as AudioFormat);
+
   const start = Date.now();
   try {
     const apiKey = requireApiKey();
@@ -74,7 +79,7 @@ app.post("/api/voices/probe", async (c) => {
       model,
       input: "Hello, this is a voice test.",
       voice: canonicalName,
-      responseFormat: format,
+      responseFormat: formatPlan.upstreamFormat,
     });
 
     const latencyMs = Date.now() - start;
@@ -110,7 +115,7 @@ app.post("/api/voices/probe", async (c) => {
           verifiedStatus: "failed",
           lastVerified: new Date(),
           verifyDuration: latencyMs,
-          verifyError: result.errorMessage,
+          verifyError: sanitizeText(result.errorMessage),
           updatedAt: new Date(),
         })
         .where(eq(voiceProfile.name, canonicalName))
@@ -121,17 +126,18 @@ app.post("/api/voices/probe", async (c) => {
         verifiedStatus: "failed",
         latencyMs,
         probeJobId: null,
-        error: result.errorMessage,
+        error: sanitizeText(result.errorMessage),
       });
     }
   } catch (err) {
     const latencyMs = Date.now() - start;
+    const rawMsg = err instanceof Error ? err.message : "Probe failed";
     return c.json({
       voice: canonicalName,
       verifiedStatus: "failed",
       latencyMs,
       probeJobId: null,
-      error: err instanceof Error ? err.message : "Probe failed",
+      error: sanitizeText(rawMsg),
     });
   }
 });

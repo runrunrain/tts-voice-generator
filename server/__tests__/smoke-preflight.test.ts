@@ -322,7 +322,7 @@ describe("Smoke Preflight Checks", () => {
       // getAudioDir() includes date subdirs that may not exist yet.
       // The base directory is created on first write. Verify write+read works.
       const testBuffer = Buffer.from("preflight-dir-check");
-      const filePath = writeAudioFile("preflight-dir-check", "mp3", testBuffer);
+      const filePath = writeAudioFile("preflight-dir-check", "wav", testBuffer);
       expect(filePath).toBeTruthy();
 
       // The directory for today's date should now exist
@@ -332,7 +332,7 @@ describe("Smoke Preflight Checks", () => {
 
     it("can write and read a test file", () => {
       const testBuffer = Buffer.from("preflight-audio-test");
-      const filePath = writeAudioFile("preflight-test-rw", "mp3", testBuffer);
+      const filePath = writeAudioFile("preflight-test-rw", "wav", testBuffer);
       expect(filePath).toBeTruthy();
 
       // Verify file was written and can be read back

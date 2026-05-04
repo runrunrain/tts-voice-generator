@@ -33,7 +33,26 @@ import promptsRoutes from "./routes/prompts.js";
 const app = new Hono();
 
 // Global middleware
-app.use("*", cors());
+
+// CORS: only allow local dev frontend origins. No-origin requests (curl, SSR)
+// pass through without CORS headers, which is correct for same-host or
+// programmatic access. Non-whitelisted origins receive no allow headers,
+// causing browsers to block the response.
+const ALLOWED_ORIGINS = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:5174",
+  "http://127.0.0.1:5174",
+];
+
+app.use("*", cors({
+  origin: ALLOWED_ORIGINS,
+  allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowHeaders: ["Content-Type", "Authorization"],
+  exposeHeaders: ["Content-Length"],
+  maxAge: 86400,
+  credentials: true,
+}));
 app.use("*", logger());
 
 // ─── Register Routes ─────────────────────────────────────────────────────────

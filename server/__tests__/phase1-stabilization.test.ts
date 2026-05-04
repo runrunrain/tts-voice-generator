@@ -147,7 +147,7 @@ function validGenerateBody(overrides: Record<string, unknown> = {}) {
     model: "google/gemini-3.1-flash-tts-preview",
     input: "Hello, this is a test.",
     voice: "Zephyr",
-    responseFormat: "mp3",
+    responseFormat: "wav",
     ...overrides,
   });
 }
@@ -305,12 +305,12 @@ describe("Phase 1: Concurrency in TTS Route", () => {
     await seedKey(app);
     await setConcurrency(app, 2);
 
-    const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00]);
+    const fakeAudio = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
     mockFetch.mockResolvedValueOnce(
       new Response(fakeAudio, {
         status: 200,
         headers: {
-          "content-type": "audio/mpeg",
+          "content-type": "audio/pcm",
           "x-generation-id": "gen-concurrency-test",
         },
       })
@@ -334,7 +334,7 @@ describe("Phase 1: Concurrency in TTS Route", () => {
 describe("Phase 1: Atomic Audio Write", () => {
   it("writes file successfully and content matches", () => {
     const buffer = Buffer.from("atomic-write-test-data");
-    const filePath = writeAudioFile("atomic-test-1", "mp3", buffer);
+    const filePath = writeAudioFile("atomic-test-1", "wav", buffer);
 
     const readBack = readAudioFile(filePath.replace(/\\/g, "/"));
     expect(readBack).toEqual(buffer);
@@ -342,7 +342,7 @@ describe("Phase 1: Atomic Audio Write", () => {
 
   it("no temp file remains after successful write", () => {
     const buffer = Buffer.from("temp-file-check");
-    const relPath = writeAudioFile("atomic-test-temp", "mp3", buffer);
+    const relPath = writeAudioFile("atomic-test-temp", "wav", buffer);
 
     // Resolve full path relative to audio base dir
     const baseDir = getAudioBaseDir();
@@ -357,10 +357,9 @@ describe("Phase 1: Atomic Audio Write", () => {
   it("sha256 is consistent between write and compute", () => {
     const buffer = Buffer.from("sha256-consistency-test");
     const shaBefore = computeSha256(buffer);
-    writeAudioFile("atomic-test-sha", "mp3", buffer);
+    writeAudioFile("atomic-test-sha", "wav", buffer);
 
-    // Read back and verify hash
-    const readPath = writeAudioFile("atomic-test-sha2", "mp3", buffer);
+    const readPath = writeAudioFile("atomic-test-sha2", "wav", buffer);
     const readBuffer = readAudioFile(readPath.replace(/\\/g, "/"));
     const shaAfter = computeSha256(readBuffer);
     expect(shaAfter).toBe(shaBefore);
@@ -368,7 +367,7 @@ describe("Phase 1: Atomic Audio Write", () => {
 
   it("path traversal in jobId is sanitized", () => {
     const buffer = Buffer.from("traversal-test");
-    const filePath = writeAudioFile("../../etc/passwd", "mp3", buffer);
+    const filePath = writeAudioFile("../../etc/passwd", "wav", buffer);
 
     // The path should not contain traversal
     expect(filePath).not.toContain("..");
@@ -477,10 +476,10 @@ describe("Phase 1: Error Response Normalization", () => {
 
     mockFetch.mockImplementationOnce(() =>
       Promise.resolve(
-        new Response(new Uint8Array([0xff, 0xfb, 0x90, 0x00]), {
+        new Response(new Uint8Array([0x00, 0x01, 0x02, 0x03]), {
           status: 200,
           headers: {
-            "content-type": "audio/mpeg",
+            "content-type": "audio/pcm",
             "x-generation-id": "gen-norm-test",
           },
         })
@@ -579,10 +578,10 @@ describe("Phase 1: Error Response Normalization", () => {
 
     mockFetch.mockImplementationOnce(() =>
       Promise.resolve(
-        new Response(new Uint8Array([0xff, 0xfb, 0x90, 0x00]), {
+        new Response(new Uint8Array([0x00, 0x01, 0x02, 0x03]), {
           status: 200,
           headers: {
-            "content-type": "audio/mpeg",
+            "content-type": "audio/pcm",
             "x-generation-id": "gen-leak-test",
           },
         })
@@ -741,17 +740,17 @@ describe("Phase 1: Health Endpoint Enhanced", () => {
 describe("Major-fix: AudioFS path contract (audio-base-relative)", () => {
   it("writeAudioFile returns path relative to audio base dir (YYYY/MM/DD/jobId.ext)", () => {
     const buffer = Buffer.from("path-contract-test");
-    const relPath = writeAudioFile("path-contract-test", "mp3", buffer);
+    const relPath = writeAudioFile("path-contract-test", "wav", buffer);
 
     // Path must NOT contain data/audio prefix (that's the base dir)
     expect(relPath).not.toContain("data/audio");
-    // Path must match YYYY/MM/DD/jobId.mp3 pattern
-    expect(relPath).toMatch(/^\d{4}\/\d{2}\/\d{2}\/path-contract-test\.mp3$/);
+    // Path must match YYYY/MM/DD/jobId.wav pattern
+    expect(relPath).toMatch(/^\d{4}\/\d{2}\/\d{2}\/path-contract-test\.wav$/);
   });
 
   it("readAudioFile resolves the base-relative path correctly", () => {
     const buffer = Buffer.from("round-trip-contract");
-    const relPath = writeAudioFile("round-trip-test", "mp3", buffer);
+    const relPath = writeAudioFile("round-trip-test", "wav", buffer);
 
     // readAudioFile must find the file using only the base-relative path
     const readBack = readAudioFile(relPath);
@@ -760,7 +759,7 @@ describe("Major-fix: AudioFS path contract (audio-base-relative)", () => {
 
   it("full file path on disk matches base + relative path", () => {
     const buffer = Buffer.from("disk-path-verify");
-    const relPath = writeAudioFile("disk-path-verify", "mp3", buffer);
+    const relPath = writeAudioFile("disk-path-verify", "wav", buffer);
     const baseDir = getAudioBaseDir();
     const fullPath = path.join(baseDir, relPath);
 
@@ -770,7 +769,7 @@ describe("Major-fix: AudioFS path contract (audio-base-relative)", () => {
 
   it("path traversal in jobId does not affect returned path", () => {
     const buffer = Buffer.from("traversal-path-test");
-    const relPath = writeAudioFile("../../etc/passwd", "mp3", buffer);
+    const relPath = writeAudioFile("../../etc/passwd", "wav", buffer);
 
     expect(relPath).not.toContain("..");
     // Verify round-trip works

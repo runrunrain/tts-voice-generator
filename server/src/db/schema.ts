@@ -18,7 +18,7 @@ export const settings = sqliteTable("settings", {
   openRouterApiKey: text("open_router_api_key"),
   defaultModel: text("default_model").notNull().default("google/gemini-3.1-flash-tts-preview"),
   defaultVoice: text("default_voice").notNull().default("Zephyr"),
-  defaultFormat: text("default_format").notNull().default("mp3"),
+  defaultFormat: text("default_format").notNull().default("wav"),
   audioOutputDir: text("audio_output_dir").notNull().default("./data/audio"),
   maxCharsPerRequest: integer("max_chars_per_request").notNull().default(5000),
   maxConcurrentJobs: integer("max_concurrent_jobs").notNull().default(2),

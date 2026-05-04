@@ -112,7 +112,7 @@ export function HistoryDetailPage() {
       generate({
         text: detail.job.input,
         voice: detail.job.voice,
-        format: detail.job.responseFormat as "mp3" | "pcm",
+        format: detail.job.responseFormat as "wav" | "pcm" | "mp3",
         audioProfile: ds?.audioProfile,
         scene: ds?.scene,
         directorNotes: ds?.directorNotes,

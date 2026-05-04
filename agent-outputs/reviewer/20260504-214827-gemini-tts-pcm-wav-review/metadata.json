@@ -1,0 +1,25 @@
+﻿{
+    "taskBrief":  "gemini-tts-pcm-wav-review",
+    "nextSteps":  {
+                      "suggestedAction":  "Fix M1 and request rereview"
+                  },
+    "projectId":  "tts-voice-generator",
+    "tags":  [
+                 "review",
+                 "gemini-tts",
+                 "pcm",
+                 "wav"
+             ],
+    "agent":  "reviewer",
+    "taskId":  "20260504-214827-gemini-tts-pcm-wav-review",
+    "relatedFiles":  [
+                         "server/src/utils/audio-format.ts",
+                         "server/src/routes/tts.ts",
+                         "server/src/routes/settings.ts",
+                         "server/src/routes/voices.ts",
+                         "src/app/services/httpAdapter.ts",
+                         "src/app/components/RightPanel.tsx"
+                     ],
+    "status":  "completed",
+    "timestamp":  "2026-05-04T13:48:27.9903425Z"
+}

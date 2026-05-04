@@ -14,6 +14,7 @@ import { encryptApiKey, decryptApiKey, maskApiKey } from "../config/env.js";
 import { isOpenRouterConfigured, requireApiKey } from "../services/key-resolver.js";
 import { OpenRouterProvider } from "../services/openrouter-provider.js";
 import { canonicalizeVoice } from "../utils/voice.js";
+import { normalizeFormat, type AudioFormat } from "../utils/audio-format.js";
 
 const app = new Hono();
 
@@ -23,7 +24,7 @@ const SettingsSchema = z.object({
   openRouterApiKey: z.string().optional(),
   defaultModel: z.string().optional(),
   defaultVoice: z.string().optional(),
-  defaultFormat: z.enum(["mp3", "pcm"]).optional(),
+  defaultFormat: z.enum(["wav", "pcm", "mp3"]).optional(),
   audioOutputDir: z.string().optional(),
   maxCharsPerRequest: z.number().int().min(100).max(50000).optional(),
   maxConcurrentJobs: z.number().int().min(1).max(10).optional(),
@@ -41,7 +42,7 @@ app.get("/api/settings", (c) => {
       keyMask: null,
       defaultModel: "google/gemini-3.1-flash-tts-preview",
       defaultVoice: "Zephyr",
-      defaultFormat: "mp3",
+      defaultFormat: "wav",
       audioOutputDir: "./data/audio",
       maxCharsPerRequest: 5000,
       maxConcurrentJobs: 2,
@@ -72,7 +73,7 @@ app.get("/api/settings", (c) => {
     openRouterApiKey: hasKey ? keyMask : null,
     defaultModel: row.defaultModel,
     defaultVoice: canonicalizeVoice(row.defaultVoice),
-    defaultFormat: row.defaultFormat,
+    defaultFormat: normalizeFormat(row.defaultFormat),
     audioOutputDir: row.audioOutputDir,
     maxCharsPerRequest: row.maxCharsPerRequest,
     maxConcurrentJobs: row.maxConcurrentJobs,
@@ -107,7 +108,7 @@ app.put("/api/settings", async (c) => {
   }
   if (data.defaultModel !== undefined) updateValues.defaultModel = data.defaultModel;
   if (data.defaultVoice !== undefined) updateValues.defaultVoice = canonicalizeVoice(data.defaultVoice);
-  if (data.defaultFormat !== undefined) updateValues.defaultFormat = data.defaultFormat;
+  if (data.defaultFormat !== undefined) updateValues.defaultFormat = normalizeFormat(data.defaultFormat);
   if (data.audioOutputDir !== undefined) updateValues.audioOutputDir = data.audioOutputDir;
   if (data.maxCharsPerRequest !== undefined) updateValues.maxCharsPerRequest = data.maxCharsPerRequest;
   if (data.maxConcurrentJobs !== undefined) updateValues.maxConcurrentJobs = data.maxConcurrentJobs;

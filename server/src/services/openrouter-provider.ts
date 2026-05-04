@@ -21,7 +21,7 @@ export interface OpenRouterTtsRequest {
   model: string;
   input: string;
   voice: string;
-  responseFormat?: "mp3" | "pcm";
+  responseFormat?: "mp3" | "pcm" | "wav";
   speed?: number;
   providerOptions?: Record<string, unknown>;
 }
@@ -189,7 +189,7 @@ export class OpenRouterProvider {
             ok: false,
             statusCode: response.status,
             errorCode: "UNEXPECTED_RESPONSE_TYPE",
-            errorMessage: `Expected audio response but got ${contentType}: ${text.slice(0, 500)}`,
+            errorMessage: sanitizeText(`Expected audio response but got ${contentType}: ${text.slice(0, 500)}`),
             retryable: false,
           };
         }
@@ -232,7 +232,7 @@ export class OpenRouterProvider {
         errorCode: isTimeout ? "REQUEST_TIMEOUT" : "NETWORK_ERROR",
         errorMessage: isTimeout
           ? `Request timed out after ${this.timeoutMs}ms`
-          : (err instanceof Error ? err.message : "Unknown network error"),
+          : sanitizeText(err instanceof Error ? err.message : "Unknown network error"),
         retryable: true,
       };
     }
@@ -301,34 +301,70 @@ export class OpenRouterProvider {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
+ * Sensitive key names for metadata redaction.
+ * Any object property matching one of these (case-insensitive) will be fully redacted.
+ */
+const SENSITIVE_KEYS = new Set([
+  "authorization",
+  "api_key",
+  "apikey",
+  "key",
+  "token",
+  "secret",
+  "password",
+  "credential",
+  "access_token",
+  "refresh_token",
+  "id_token",
+  "client_secret",
+]);
+
+/**
  * Sanitize error metadata: remove sensitive fields like Authorization headers,
  * API keys, or other credentials from error data before storing/returning.
+ * Uses unified recursive sanitization for arbitrary-depth objects/arrays/strings.
  */
 function sanitizeErrorMetadata(data: Record<string, unknown>): Record<string, unknown> {
-  const SENSITIVE_KEYS = new Set([
-    "authorization",
-    "api_key",
-    "apikey",
-    "key",
-    "token",
-    "secret",
-    "password",
-    "credential",
-  ]);
+  return sanitizeObject(data);
+}
 
-  const sanitized: Record<string, unknown> = {};
-
-  for (const [key, value] of Object.entries(data)) {
-    if (SENSITIVE_KEYS.has(key.toLowerCase())) {
-      sanitized[key] = "[REDACTED]";
-    } else if (value && typeof value === "object" && !Array.isArray(value)) {
-      sanitized[key] = sanitizeErrorMetadata(value as Record<string, unknown>);
-    } else {
-      sanitized[key] = value;
-    }
+/**
+ * Recursively sanitize an object's entries.
+ * Sensitive key names are redacted; string values are sanitized for credential patterns.
+ */
+function sanitizeObject(obj: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    result[key] = sanitizeEntry(key, value);
   }
+  return result;
+}
 
-  return sanitized;
+/**
+ * Unified recursive sanitization for a single key-value pair.
+ * - Sensitive key -> [REDACTED] regardless of value type
+ * - String -> sanitizeText() for credential pattern redaction
+ * - Object -> recurse into properties
+ * - Array -> recurse into each element
+ * - Primitives (number, boolean, null, undefined) -> pass through
+ */
+function sanitizeEntry(key: string, value: unknown): unknown {
+  if (SENSITIVE_KEYS.has(key.toLowerCase())) {
+    return "[REDACTED]";
+  }
+  if (typeof value === "string") {
+    return sanitizeText(value);
+  }
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeEntry("", item));
+  }
+  if (typeof value === "object") {
+    return sanitizeObject(value as Record<string, unknown>);
+  }
+  return value;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -337,13 +373,54 @@ function sleep(ms: number): Promise<void> {
 
 function extractErrorMessage(data: Record<string, unknown>): string {
   // OpenRouter error format: { error: { message: "..." } }
+  let raw: string;
   if (data.error && typeof data.error === "object") {
     const err = data.error as Record<string, unknown>;
-    if (typeof err.message === "string") return err.message;
+    if (typeof err.message === "string") {
+      raw = err.message;
+    } else {
+      raw = typeof data.message === "string" ? data.message
+        : typeof data.error === "string" ? data.error
+        : JSON.stringify(sanitizeErrorMetadata(data)).slice(0, 300);
+    }
+  } else if (typeof data.message === "string") {
+    raw = data.message;
+  } else if (typeof data.error === "string") {
+    raw = data.error;
+  } else {
+    raw = JSON.stringify(sanitizeErrorMetadata(data)).slice(0, 300);
   }
-  if (typeof data.message === "string") return data.message;
-  if (typeof data.error === "string") return data.error;
-  return JSON.stringify(data).slice(0, 300);
+  return sanitizeText(raw);
+}
+
+/**
+ * Sanitize text by redacting sensitive patterns that could leak API keys
+ * or auth tokens from upstream error messages.
+ *
+ * Patterns covered:
+ *   - "Bearer sk-..." / "Bearer ..."
+ *   - "sk-..." (OpenAI-style keys)
+ *   - "apiKey=..." / "api_key=..."
+ *   - "access_token=..."
+ *   - "authorization_header=..."
+ *
+ * Designed to be conservative: only removes known credential patterns,
+ * preserving ordinary error messages for debugging.
+ */
+export function sanitizeText(text: string): string {
+  return text
+    // "Bearer sk-<secret>" or "Bearer <long-token>"
+    .replace(/Bearer\s+[A-Za-z0-9_\-]{8,}/gi, "Bearer [REDACTED]")
+    // "Bearer <anything-looking-like-token>"
+    .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
+    // sk-<key> (OpenAI / OpenRouter key prefix)
+    .replace(/\bsk-[A-Za-z0-9_\-]{8,}\b/g, "sk-[REDACTED]")
+    // apiKey=... / api_key=...
+    .replace(/\bapi[_-]?key\s*=\s*\S+/gi, "api_key=[REDACTED]")
+    // access_token=...
+    .replace(/\baccess_token\s*=\s*\S+/gi, "access_token=[REDACTED]")
+    // authorization_header=...
+    .replace(/\bauthorization_header\s*=\s*\S+/gi, "authorization_header=[REDACTED]");
 }
 
 function classifyErrorCode(status: number, data: Record<string, unknown>): string {

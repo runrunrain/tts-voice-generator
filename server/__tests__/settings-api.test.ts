@@ -148,7 +148,7 @@ describe("Settings API", () => {
       expect(body.keyMask).toBeNull();
       expect(body.defaultModel).toBe("google/gemini-3.1-flash-tts-preview");
       expect(body.defaultVoice).toBe("Zephyr");
-      expect(body.defaultFormat).toBe("mp3");
+      expect(body.defaultFormat).toBe("wav");
     });
 
     it("never exposes plaintext API key in any response field", async () => {
@@ -201,7 +201,7 @@ describe("Settings API", () => {
         id: 1,
         defaultVoice: "alloy",
         defaultModel: "google/gemini-3.1-flash-tts-preview",
-        defaultFormat: "mp3",
+        defaultFormat: "wav",
         audioOutputDir: "./data/audio",
         maxCharsPerRequest: 5000,
         maxConcurrentJobs: 2,

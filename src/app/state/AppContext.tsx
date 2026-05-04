@@ -221,7 +221,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     openRouterApiKey: "",
     defaultModel: "google/gemini-3.1-flash-tts-preview",
     defaultVoice: "Zephyr",
-    defaultFormat: "mp3",
+    defaultFormat: "wav",
     audioDir: "./data/audio",
     maxChars: 5000,
     maxConcurrent: 2,

@@ -1,0 +1,28 @@
+{
+  "taskId": "20260504-214200-pcm-to-wav-format-fix",
+  "timestamp": "2026-05-04T21:42:00Z",
+  "agent": "coder",
+  "projectId": "tts-voice-generator",
+  "taskBrief": "Fix Gemini TTS format compatibility: PCM-to-WAV wrapping, default format change from mp3 to wav",
+  "status": "completed",
+  "tags": ["format-fix", "pcm-to-wav", "gemini-tts", "openrouter", "breaking-change"],
+  "relatedFiles": [
+    "server/src/utils/audio-format.ts",
+    "server/src/routes/tts.ts",
+    "server/src/routes/settings.ts",
+    "server/src/routes/voices.ts",
+    "server/src/db/schema.ts",
+    "server/src/db/index.ts",
+    "src/app/types/index.ts",
+    "src/app/state/AppContext.tsx",
+    "src/app/services/httpAdapter.ts",
+    "src/app/pages/GeneratePage.tsx",
+    "src/app/pages/DirectorPage.tsx",
+    "src/app/pages/SettingsPage.tsx",
+    "src/app/pages/HistoryDetailPage.tsx"
+  ],
+  "nextSteps": {
+    "suggestedAgent": "tester",
+    "suggestedAction": "Main Agent executes real OpenRouter smoke with authorized key to verify end-to-end WAV generation"
+  }
+}

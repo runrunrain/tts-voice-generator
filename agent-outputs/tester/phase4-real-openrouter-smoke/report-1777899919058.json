@@ -1,0 +1,7 @@
+{
+  "realOpenRouterVerified": false,
+  "reason": "OPENROUTER_API_KEY not set in environment",
+  "timestamp": "2026-05-04T13:05:19.057Z",
+  "status": "blocked",
+  "precondition": "OPENROUTER_API_KEY must be set for real smoke verification"
+}

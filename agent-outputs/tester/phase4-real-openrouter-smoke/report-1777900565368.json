@@ -1,0 +1,6 @@
+{
+  "realOpenRouterVerified": true,
+  "reason": "OPENROUTER_API_KEY is set; blocked precondition check skipped",
+  "timestamp": "2026-05-04T13:16:05.368Z",
+  "status": "key_available"
+}

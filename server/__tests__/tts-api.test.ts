@@ -122,7 +122,7 @@ function validGenerateBody(overrides: Record<string, unknown> = {}) {
     model: "google/gemini-3.1-flash-tts-preview",
     input: "Hello, this is a test.",
     voice: "Zephyr",
-    responseFormat: "mp3",
+    responseFormat: "wav",
     ...overrides,
   });
 }
@@ -194,11 +194,26 @@ describe("TTS Generate API", () => {
       expect(body.error.code).toBe("VALIDATION_ERROR");
     });
 
-    it("rejects invalid responseFormat", async () => {
+    it("accepts wav as valid responseFormat", async () => {
       const res = await r(app, "/api/tts/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: validGenerateBody({ responseFormat: "wav" }),
+      });
+
+      // "wav" is now a valid format -- should not be 400
+      // It will be 200 with MISSING_API_KEY since no key is seeded
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("failed");
+      expect(body.error.code).toBe("MISSING_API_KEY");
+    });
+
+    it("rejects invalid responseFormat (e.g. flac)", async () => {
+      const res = await r(app, "/api/tts/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: validGenerateBody({ responseFormat: "flac" }),
       });
 
       expect(res.status).toBe(400);
@@ -271,13 +286,14 @@ describe("TTS Generate API", () => {
     it("returns succeeded with asset info when provider returns audio", async () => {
       await seedKey(app);
 
-      // Mock OpenRouter to return audio
-      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00, 0x00, 0x00]);
+      // Mock OpenRouter to return PCM audio (Gemini TTS upstream format)
+      // The route should wrap it to WAV
+      const fakePcm = new Uint8Array([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
       mockFetch.mockResolvedValueOnce(
-        new Response(fakeAudio, {
+        new Response(fakePcm, {
           status: 200,
           headers: {
-            "content-type": "audio/mpeg",
+            "content-type": "audio/pcm",
             "x-generation-id": "gen-test-123",
           },
         })
@@ -296,7 +312,9 @@ describe("TTS Generate API", () => {
       expect(body.generationId).toBe("gen-test-123");
       expect(body.assetId).toBeDefined();
       expect(body.audioUrl).toMatch(/^\/api\/audio\/\d+$/);
-      expect(body.contentType).toBe("audio/mpeg");
+      expect(body.contentType).toBe("audio/wav");
+      expect(body.outputFormat).toBe("wav");
+      expect(body.upstreamFormat).toBe("pcm");
       expect(body.charCount).toBe("Hello, this is a test.".length);
 
       // Verify mock was called with the real key
@@ -304,6 +322,10 @@ describe("TTS Generate API", () => {
       const [url, init] = mockFetch.mock.calls[0];
       expect(url).toContain("/audio/speech");
       expect((init as RequestInit).headers).toHaveProperty("Authorization");
+
+      // Verify the upstream request used response_format "pcm"
+      const reqBody = JSON.parse((init as RequestInit).body as string);
+      expect(reqBody.response_format).toBe("pcm");
     });
   });
 
@@ -420,19 +442,20 @@ describe("TTS Generate API", () => {
   // ── Real file I/O chain ──────────────────────────────────────────────────
 
   describe("Real file I/O chain", () => {
-    it("writes audio to disk and /api/audio/:assetId returns correct MIME and bytes", async () => {
+    it("writes WAV-wrapped audio to disk and /api/audio/:assetId returns correct MIME and bytes", async () => {
       await seedKey(app);
 
-      // Mock OpenRouter to return specific audio bytes
-      const audioBytes = new Uint8Array([
-        0x49, 0x44, 0x33, 0x03, 0x00, 0x00, 0x00, 0x00, // ID3 header (MP3-like)
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      // Mock OpenRouter to return raw PCM bytes (Gemini TTS upstream format)
+      const pcmBytes = new Uint8Array([
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+        0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+        0x0C, 0x0D, 0x0E, 0x0F,
       ]);
       mockFetch.mockResolvedValueOnce(
-        new Response(audioBytes, {
+        new Response(pcmBytes, {
           status: 200,
           headers: {
-            "content-type": "audio/mpeg",
+            "content-type": "audio/pcm",
             "x-generation-id": "gen-real-io-test",
           },
         })
@@ -459,32 +482,30 @@ describe("TTS Generate API", () => {
       expect(job).toBeTruthy();
       expect(job!.status).toBe("succeeded");
       expect(job!.generationId).toBe("gen-real-io-test");
+      expect(job!.responseFormat).toBe("wav");
 
       // 3. Verify audio_asset record in DB
       const asset = db.select().from(audioAsset).where(eq(audioAsset.id, assetId)).get();
       expect(asset).toBeTruthy();
-      expect(asset!.mimeType).toBe("audio/mpeg");
-      expect(asset!.sizeBytes).toBe(audioBytes.length);
+      expect(asset!.mimeType).toBe("audio/wav");
+      // WAV file = 44 header bytes + PCM data
+      expect(asset!.sizeBytes).toBe(44 + pcmBytes.length);
       expect(asset!.filePath).toBeTruthy();
 
-      // 4. Verify the file actually exists on disk
-      const fullFilePath = path.resolve(testState.tmpDir, "audio", path.relative(
-        path.resolve(testState.tmpDir, "audio"),
-        path.resolve(asset!.filePath)
-      ).replace(/\\/g, "/"));
-      // The file path in DB is relative to CWD; with env mock, audioOutputDir = tmp/audio
-      // readAudioFile resolves relative to audioOutputDir, so just verify via the API
-
-      // 5. Read audio back via /api/audio/:assetId
+      // 4. Read audio back via /api/audio/:assetId
       const audioRes = await r(app, `/api/audio/${assetId}`);
       expect(audioRes.status).toBe(200);
-      expect(audioRes.headers.get("Content-Type")).toBe("audio/mpeg");
+      expect(audioRes.headers.get("Content-Type")).toBe("audio/wav");
       expect(audioRes.headers.get("Content-Disposition")).toContain("inline");
 
-      // 6. Verify the returned bytes match the original audio
+      // 5. Verify the returned bytes contain WAV header + PCM data
       const returnedBuffer = Buffer.from(await audioRes.arrayBuffer());
-      expect(returnedBuffer.length).toBe(audioBytes.length);
-      expect(returnedBuffer).toEqual(Buffer.from(audioBytes));
+      expect(returnedBuffer.length).toBe(44 + pcmBytes.length);
+      // Verify RIFF header
+      expect(returnedBuffer.toString("ascii", 0, 4)).toBe("RIFF");
+      expect(returnedBuffer.toString("ascii", 8, 12)).toBe("WAVE");
+      // Verify PCM data is appended after header
+      expect(returnedBuffer.subarray(44)).toEqual(Buffer.from(pcmBytes));
     });
 
     it("returns 404 for non-existent asset ID", async () => {
@@ -500,12 +521,12 @@ describe("TTS Generate API", () => {
     it("sets Content-Disposition to attachment when ?download=1", async () => {
       await seedKey(app);
 
-      const audioBytes = new Uint8Array([0xff, 0xfb, 0x90, 0x00]);
+      const pcmBytes = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
       mockFetch.mockResolvedValueOnce(
-        new Response(audioBytes, {
+        new Response(pcmBytes, {
           status: 200,
           headers: {
-            "content-type": "audio/mpeg",
+            "content-type": "audio/pcm",
             "x-generation-id": "gen-dl-test",
           },
         })
@@ -526,17 +547,18 @@ describe("TTS Generate API", () => {
       const dlRes = await r(app, `/api/audio/${assetId}?download=1`);
       expect(dlRes.status).toBe(200);
       expect(dlRes.headers.get("Content-Disposition")).toContain("attachment");
+      expect(dlRes.headers.get("Content-Disposition")).toContain(".wav");
     });
 
     it("history list includes audio asset info for succeeded jobs", async () => {
       await seedKey(app);
 
-      const audioBytes = new Uint8Array([0xff, 0xfb, 0x90, 0x00, 0x00, 0x00]);
+      const pcmBytes = new Uint8Array([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
       mockFetch.mockResolvedValueOnce(
-        new Response(audioBytes, {
+        new Response(pcmBytes, {
           status: 200,
           headers: {
-            "content-type": "audio/mpeg",
+            "content-type": "audio/pcm",
             "x-generation-id": "gen-history-test",
           },
         })
@@ -565,8 +587,9 @@ describe("TTS Generate API", () => {
       expect(succeededRecord.audioUrl).toMatch(/^\/api\/audio\/\d+$/);
       expect(succeededRecord.downloadUrl).toMatch(/^\/api\/audio\/\d+\?download=1$/);
       expect(succeededRecord.durationMs).toBeGreaterThan(0);
-      expect(succeededRecord.assetFormat).toBe("mp3");
-      expect(succeededRecord.sizeBytes).toBe(audioBytes.length);
+      expect(succeededRecord.assetFormat).toBe("wav");
+      // WAV size = 44 header + PCM data
+      expect(succeededRecord.sizeBytes).toBe(44 + pcmBytes.length);
     });
   });
 
@@ -576,12 +599,12 @@ describe("TTS Generate API", () => {
     it("accepts directorSnapshot with sampleContext and persists to job", async () => {
       await seedKey(app);
 
-      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00, 0x00, 0x00]);
+      const fakePcm = new Uint8Array([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
       mockFetch.mockResolvedValueOnce(
-        new Response(fakeAudio, {
+        new Response(fakePcm, {
           status: 200,
           headers: {
-            "content-type": "audio/mpeg",
+            "content-type": "audio/pcm",
             "x-generation-id": "gen-snapshot-test",
           },
         })
@@ -623,12 +646,12 @@ describe("TTS Generate API", () => {
     it("accepts directorSnapshot without sampleContext (backward compatible)", async () => {
       await seedKey(app);
 
-      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00]);
+      const fakePcm = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
       mockFetch.mockResolvedValueOnce(
-        new Response(fakeAudio, {
+        new Response(fakePcm, {
           status: 200,
           headers: {
-            "content-type": "audio/mpeg",
+            "content-type": "audio/pcm",
             "x-generation-id": "gen-no-samplectx",
           },
         })
@@ -662,12 +685,12 @@ describe("TTS Generate API", () => {
     it("strips unknown fields from directorSnapshot via Zod strip", async () => {
       await seedKey(app);
 
-      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00]);
+      const fakePcm = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
       mockFetch.mockResolvedValueOnce(
-        new Response(fakeAudio, {
+        new Response(fakePcm, {
           status: 200,
           headers: {
-            "content-type": "audio/mpeg",
+            "content-type": "audio/pcm",
             "x-generation-id": "gen-strip-test",
           },
         })
@@ -701,12 +724,12 @@ describe("TTS Generate API", () => {
     it("persists speakers in directorSnapshot", async () => {
       await seedKey(app);
 
-      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00, 0x00, 0x00]);
+      const fakePcm = new Uint8Array([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
       mockFetch.mockResolvedValueOnce(
-        new Response(fakeAudio, {
+        new Response(fakePcm, {
           status: 200,
           headers: {
-            "content-type": "audio/mpeg",
+            "content-type": "audio/pcm",
             "x-generation-id": "gen-speakers-snapshot",
           },
         })
@@ -767,12 +790,12 @@ describe("TTS Generate API", () => {
     it("persists directorSnapshot with transcript but no speakers", async () => {
       await seedKey(app);
 
-      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00]);
+      const fakePcm = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
       mockFetch.mockResolvedValueOnce(
-        new Response(fakeAudio, {
+        new Response(fakePcm, {
           status: 200,
           headers: {
-            "content-type": "audio/mpeg",
+            "content-type": "audio/pcm",
             "x-generation-id": "gen-transcript-no-speakers",
           },
         })
@@ -804,12 +827,12 @@ describe("TTS Generate API", () => {
     it("directorSnapshot speakers are retrievable via GET /api/jobs/:jobId", async () => {
       await seedKey(app);
 
-      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00]);
+      const fakePcm = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
       mockFetch.mockResolvedValueOnce(
-        new Response(fakeAudio, {
+        new Response(fakePcm, {
           status: 200,
           headers: {
-            "content-type": "audio/mpeg",
+            "content-type": "audio/pcm",
             "x-generation-id": "gen-retrieve-speakers",
           },
         })
@@ -852,12 +875,12 @@ describe("TTS Generate API", () => {
       // overwrite the original transcript.
       await seedKey(app);
 
-      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00]);
+      const fakePcm = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
       mockFetch.mockResolvedValueOnce(
-        new Response(fakeAudio, {
+        new Response(fakePcm, {
           status: 200,
           headers: {
-            "content-type": "audio/mpeg",
+            "content-type": "audio/pcm",
             "x-generation-id": "gen-transcript-vs-input",
           },
         })
