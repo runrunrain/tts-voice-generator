@@ -193,6 +193,27 @@ describe("Settings API", () => {
       expect(body.hasOpenRouterApiKey).toBe(false);
       expect(body.keyMask).toBeNull();
     });
+
+    it("canonicalizes legacy alloy to Zephyr when reading from DB", async () => {
+      // Simulate old DB that has "alloy" stored directly (bypassing PUT canonicalization)
+      const db = getDb();
+      db.insert(settings).values({
+        id: 1,
+        defaultVoice: "alloy",
+        defaultModel: "google/gemini-3.1-flash-tts-preview",
+        defaultFormat: "mp3",
+        audioOutputDir: "./data/audio",
+        maxCharsPerRequest: 5000,
+        maxConcurrentJobs: 2,
+        openRouterApiKey: null,
+      }).run();
+
+      const res = await req(app, "/api/settings");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      // GET must normalize alloy -> Zephyr for output
+      expect(body.defaultVoice).toBe("Zephyr");
+    });
   });
 
   // ── PUT /api/settings ────────────────────────────────────────────────────

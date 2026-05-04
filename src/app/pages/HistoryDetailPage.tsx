@@ -22,7 +22,15 @@ interface JobDetail {
       audioProfile?: string;
       scene?: string;
       directorNotes?: string;
+      sampleContext?: string;
       transcript?: string;
+      speakers?: Array<{
+        id: string;
+        label: string;
+        name?: string;
+        voice?: string;
+        style?: string;
+      }>;
     } | null;
     providerOptions: unknown;
     createdAt: string | null;
@@ -100,13 +108,25 @@ export function HistoryDetailPage() {
 
   const handleRegenerate = () => {
     if (detail?.job) {
+      const ds = detail.job.directorSnapshot;
       generate({
         text: detail.job.input,
         voice: detail.job.voice,
         format: detail.job.responseFormat as "mp3" | "pcm",
-        audioProfile: detail.job.directorSnapshot?.audioProfile,
-        scene: detail.job.directorSnapshot?.scene,
-        directorNotes: detail.job.directorSnapshot?.directorNotes,
+        audioProfile: ds?.audioProfile,
+        scene: ds?.scene,
+        directorNotes: ds?.directorNotes,
+        sampleContext: ds?.sampleContext,
+        // Preserve the original transcript from directorSnapshot.
+        // Only fall back to job.input if no snapshot transcript exists.
+        transcript: ds?.transcript || detail.job.input,
+        speakers: ds?.speakers?.map((s) => ({
+          id: s.id,
+          label: s.label,
+          name: s.name || "",
+          voice: s.voice || "Zephyr",
+          style: s.style || "",
+        })),
       });
     }
   };
@@ -237,6 +257,14 @@ export function HistoryDetailPage() {
                   {job.directorSnapshot.audioProfile && `<audio_profile>\n${job.directorSnapshot.audioProfile}\n</audio_profile>\n\n`}
                   {job.directorSnapshot.scene && `<scene>\n${job.directorSnapshot.scene}\n</scene>\n\n`}
                   {job.directorSnapshot.directorNotes && `<director_notes>\n${job.directorSnapshot.directorNotes}\n</director_notes>\n\n`}
+                  {job.directorSnapshot.sampleContext && `<sample_context>\n${job.directorSnapshot.sampleContext}\n</sample_context>\n\n`}
+                  {job.directorSnapshot.speakers && job.directorSnapshot.speakers.length > 0 && (
+                    `<speakers>\n` +
+                    job.directorSnapshot.speakers.map((s) =>
+                      `  ${s.label}${s.name ? ` (${s.name})` : ''} [Voice: ${s.voice || 'default'}]${s.style ? ` [Style: ${s.style}]` : ''}`
+                    ).join('\n') +
+                    `\n</speakers>\n\n`
+                  )}
                   {job.directorSnapshot.transcript && `<transcript>\n${job.directorSnapshot.transcript}\n</transcript>`}
                 </div>
               </div>

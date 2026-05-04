@@ -1,0 +1,19 @@
+{
+  "taskId": "20260504-143328-phase3-final-fix",
+  "timestamp": "2026-05-04T14:33:28Z",
+  "agent": "designer",
+  "projectId": "tts-voice-generator",
+  "taskBrief": "Fix Phase 3 final review findings: directorSnapshot completeness, HistoryDetailPage rendering, stale doc cleanup",
+  "status": "completed",
+  "tags": ["phase3", "director", "snapshot", "fix", "history"],
+  "relatedFiles": [
+    "server/src/routes/tts.ts",
+    "src/app/services/httpAdapter.ts",
+    "src/app/pages/HistoryDetailPage.tsx",
+    "server/__tests__/tts-api.test.ts"
+  ],
+  "nextSteps": {
+    "suggestedAgent": "reviewer",
+    "suggestedAction": "Review directorSnapshot five-element+speakers completeness and HistoryDetailPage rendering fix"
+  }
+}

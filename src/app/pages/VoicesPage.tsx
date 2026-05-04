@@ -1,24 +1,16 @@
 import { useState, useCallback, useEffect } from "react";
-import { Search, Filter, Play, Loader2, AlertTriangle } from "lucide-react";
+import { Search, Filter, Play, Loader2, AlertTriangle, AlertCircle, RefreshCw } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import type { VoiceStatus } from "../types";
 
 type TabFilter = "all" | "verified" | "candidate" | "custom" | "failed";
 
 export function VoicesPage() {
-  const { voices, adapter } = useAppState();
+  const { voices, adapter, voicesLoading, voicesError, refreshVoices, voicesLoaded } = useAppState();
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<TabFilter>("all");
-  const [selectedVoice, setSelectedVoice] = useState<string>("alloy");
+  const [selectedVoice, setSelectedVoice] = useState<string>("Zephyr");
   const [probeStatuses, setProbeStatuses] = useState<Record<string, "idle" | "loading" | "success" | "error" | "no-key">>({});
-  const [voicesLoading, setVoicesLoading] = useState(true);
-
-  // Track when voices are loaded
-  useEffect(() => {
-    if (voices.length > 0) {
-      setVoicesLoading(false);
-    }
-  }, [voices]);
 
   // Filter voices
   const filteredVoices = voices.filter((v) => {
@@ -106,18 +98,62 @@ export function VoicesPage() {
 
       {/* Grid */}
       <div className="flex-1 p-6 overflow-y-auto">
-        {voicesLoading ? (
+        {voicesLoading && voices.length === 0 ? (
+          /* Loading: first-time fetch or retry with no fallback data */
           <div className="flex flex-col items-center justify-center h-64 text-center">
             <Loader2 size={24} className="animate-spin text-text-tertiary mb-3" />
             <p className="text-text-tertiary text-sm">正在从后端加载音色列表...</p>
           </div>
-        ) : filteredVoices.length === 0 ? (
+        ) : voicesError && voices.length === 0 ? (
+          /* Error: fetch failed and no fallback data available */
           <div className="flex flex-col items-center justify-center h-64 text-center">
-            <p className="text-text-tertiary text-sm">没有匹配的音色</p>
-            <p className="text-text-tertiary text-xs mt-1">尝试调整筛选条件</p>
+            <AlertCircle size={24} className="text-error mb-3" />
+            <p className="text-error text-sm font-medium">加载音色列表失败</p>
+            <p className="text-text-tertiary text-xs mt-1">{voicesError}</p>
+            <button
+              className="mt-4 flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium bg-bg-surface border border-border hover:bg-bg-hover transition-colors"
+              onClick={refreshVoices}
+            >
+              <RefreshCw size={14} /> 重试
+            </button>
+          </div>
+        ) : voicesLoaded && voices.length === 0 && !voicesError ? (
+          /* Empty: successful fetch returned empty list */
+          <div className="flex flex-col items-center justify-center h-64 text-center">
+            <p className="text-text-tertiary text-sm">没有可用的音色</p>
+            <p className="text-text-tertiary text-xs mt-1">后端返回空列表，请检查后端配置</p>
           </div>
         ) : (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">
+          /* Data section: have voices (or filter cleared them all) */
+          <>
+            {/* Inline error banner when stale data is visible */}
+            {voicesError && voices.length > 0 && (
+              <div className="flex items-center gap-3 px-4 py-2 mb-4 rounded-md bg-error-muted/50 border border-error/20 text-sm">
+                <AlertCircle size={16} className="text-error shrink-0" />
+                <span className="text-error text-xs">刷新失败: {voicesError}</span>
+                <button
+                  className="ml-auto flex items-center gap-1 text-xs text-text-secondary hover:text-text-primary transition-colors"
+                  onClick={refreshVoices}
+                >
+                  <RefreshCw size={12} /> 重试
+                </button>
+              </div>
+            )}
+            {/* Inline loading indicator when refreshing with existing data */}
+            {voicesLoading && voices.length > 0 && (
+              <div className="flex items-center gap-2 px-4 py-1.5 mb-4 rounded-md bg-accent-muted/30 border border-accent/10 text-xs text-text-tertiary">
+                <Loader2 size={12} className="animate-spin" />
+                正在刷新音色列表...
+              </div>
+            )}
+            {filteredVoices.length === 0 ? (
+              /* No match: filter produced no results */
+              <div className="flex flex-col items-center justify-center h-64 text-center">
+                <p className="text-text-tertiary text-sm">没有匹配的音色</p>
+                <p className="text-text-tertiary text-xs mt-1">尝试调整筛选条件</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">
             {filteredVoices.map((v) => (
               <div
                 key={v.name}
@@ -179,7 +215,9 @@ export function VoicesPage() {
                 </div>
               </div>
             ))}
-          </div>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

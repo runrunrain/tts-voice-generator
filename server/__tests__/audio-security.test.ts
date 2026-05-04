@@ -167,7 +167,7 @@ describe("Audio Path Security", () => {
       const result = db.insert(audioAsset).values({
         jobId: "test-job-audio-1",
         fileName: "test.mp3",
-        filePath: "data/audio/nonexistent/test.mp3",
+        filePath: "2026/01/01/nonexistent-test.mp3",
         mimeType: "audio/mpeg",
         sizeBytes: 100,
         sha256: "abc123",
@@ -204,10 +204,10 @@ describe("Audio Path Security", () => {
     });
 
     it("throws 'not found' for valid path but missing file", () => {
-      // This path is under ./data/audio/ so it passes traversal check
+      // This path is under the audio base dir so it passes traversal check
       // but the file doesn't exist
       expect(() =>
-        readAudioFile("data/audio/2026/01/01/nonexistent.mp3")
+        readAudioFile("2026/01/01/nonexistent.mp3")
       ).toThrow(/not found/i);
     });
   });

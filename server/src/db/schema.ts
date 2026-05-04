@@ -79,7 +79,7 @@ export const audioAsset = sqliteTable("audio_asset", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   jobId: text("job_id").notNull().references(() => generationJob.id, { onDelete: "cascade" }),
   fileName: text("file_name").notNull(),
-  filePath: text("file_path").notNull(), // relative: data/audio/YYYY/MM/DD/{jobId}.{ext}
+  filePath: text("file_path").notNull(), // relative to audio base dir: YYYY/MM/DD/{jobId}.{ext}
   mimeType: text("mime_type").notNull(),
   sizeBytes: integer("size_bytes").notNull(),
   sha256: text("sha256"),

@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useLocation, Link } from "react-router";
-import { X, Play, Download, Loader2, PlayCircle, AlertCircle, RefreshCw, Clock, Settings } from "lucide-react";
+import { X, Play, Download, Loader2, PlayCircle, AlertCircle, RefreshCw, Clock, Settings, CheckCircle2 } from "lucide-react";
 import { useAppState } from "../state/AppContext";
+import type { VoiceProfile } from "../types";
 
 interface RightPanelProps {
   isOpen: boolean;
@@ -37,68 +38,130 @@ export function RightPanel({ isOpen, onClose }: RightPanelProps) {
   );
 }
 
-// ─── Director Prompt Preview (reads from sessionStorage set by DirectorPage) ─
+// ─── Director Prompt Preview ──────────────────────────────────────────────────
 
 function DirectorPreview() {
-  const [prompt, setPrompt] = useState<string>("");
-  const [tokens, setTokens] = useState({ used: 0, total: 8192 });
+  const { assembleResult, assemblePhase } = useAppState();
 
-  useEffect(() => {
-    const update = () => {
-      try {
-        const raw = sessionStorage.getItem("director-prompt");
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          setPrompt(parsed.fullPrompt || "");
-          setTokens({ used: parsed.tokenEstimate ?? 0, total: 8192 });
-        }
-      } catch {
-        // ignore
-      }
-    };
-    update();
-    const interval = setInterval(update, 500);
-    return () => clearInterval(interval);
-  }, []);
+  // Show assemble result if available
+  const assembleSuccess = assembleResult?.phase === "success" && assembleResult.response?.ok
+    ? (assembleResult.response as import("../types").AssemblePromptSuccess)
+    : null;
 
-  const [copied, setCopied] = useState(false);
+  const assembleError = assembleResult?.phase === "error"
+    ? assembleResult.error
+    : null;
 
-  const handleCopy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(prompt);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // ignore
-    }
-  }, [prompt]);
-
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-medium">提示词预览</span>
-        <button
-          className="text-xs text-accent hover:text-accent-hover transition-colors"
-          onClick={handleCopy}
-        >
-          {copied ? "已复制" : "复制"}
-        </button>
+  // Idle / no result state
+  if (assemblePhase === "idle" || !assembleResult) {
+    return (
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium">提示词预览</span>
+        </div>
+        <div className="bg-bg-sunken p-4 rounded-md border border-border font-mono text-xs text-text-secondary min-h-[200px] max-h-[60vh] overflow-y-auto whitespace-pre-wrap">
+          // 在 Director 页面点击「组装提示词」后，组装结果将在此处展示
+        </div>
+        <div className="text-[10px] text-text-tertiary text-center border-t border-border-subtle pt-3 mt-2">
+          组装提示词不会消耗 API 额度
+        </div>
       </div>
+    );
+  }
 
-      <div className="bg-bg-sunken p-4 rounded-md border border-border font-mono text-xs text-text-secondary min-h-[200px] max-h-[60vh] overflow-y-auto whitespace-pre-wrap">
-        {prompt || "// 在左侧编辑器中输入内容后，提示词将在此处实时更新"}
+  // Loading state
+  if (assemblePhase === "loading") {
+    return (
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium">提示词预览</span>
+        </div>
+        <div className="bg-bg-sunken p-4 rounded-md border border-accent/20 font-mono text-xs text-accent min-h-[200px] flex items-center justify-center">
+          <div className="flex items-center gap-2">
+            <Loader2 size={14} className="animate-spin" />
+            正在组装提示词...
+          </div>
+        </div>
       </div>
+    );
+  }
 
-      <div className="flex items-center justify-between text-xs">
-        <span className="text-text-tertiary">Token 估算:</span>
-        <span className="text-text-secondary">~{tokens.used} / {tokens.total}</span>
+  // Error state
+  if (assembleError) {
+    return (
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium">提示词预览</span>
+        </div>
+        <div className="bg-error-muted/50 p-4 rounded-md border border-error/20 text-xs text-error">
+          <div className="font-medium mb-1">{assembleError.code}</div>
+          <div>{assembleError.message}</div>
+        </div>
       </div>
+    );
+  }
 
-      <div className="text-[10px] text-text-tertiary text-center border-t border-border-subtle pt-3 mt-2">
-        Token 估算为粗略计算，不代表实际 API 消耗
+  // Success state
+  if (assembleSuccess) {
+    return (
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium">组装结果</span>
+          <span className="text-xs text-success flex items-center gap-1">
+            <CheckCircle2 size={12} /> 成功
+          </span>
+        </div>
+
+        {/* Warnings */}
+        {assembleSuccess.warnings.length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            {assembleSuccess.warnings.map((w, i) => (
+              <div key={i} className={`flex items-start gap-1.5 text-[10px] px-2 py-1.5 rounded ${
+                w.code === "LEGACY_VOICE_ALIAS"
+                  ? "bg-warning-muted text-warning"
+                  : "bg-accent-muted text-accent"
+              }`}>
+                <AlertCircle size={10} className="shrink-0 mt-0.5" />
+                <span>{w.message}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Prompt preview */}
+        <div className="bg-bg-sunken p-4 rounded-md border border-border font-mono text-xs text-text-secondary min-h-[120px] max-h-[50vh] overflow-y-auto whitespace-pre-wrap leading-relaxed">
+          {assembleSuccess.prompt}
+        </div>
+
+        {/* Speaker summary */}
+        {assembleSuccess.normalized.speakers.length > 0 && (
+          <div className="flex flex-col gap-1 text-xs">
+            <span className="text-text-tertiary">Speaker 规范化:</span>
+            {assembleSuccess.normalized.speakers.map((s) => (
+              <div key={s.id} className="flex items-center gap-2 text-text-secondary">
+                <span className="font-medium text-text-primary">{s.label}</span>
+                <span className="font-mono text-accent">{s.voice}</span>
+                {s.wasLegacyAlias && (
+                  <span className="text-warning text-[10px]">(legacy mapped)</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-center justify-between text-xs text-text-tertiary">
+          <span>{assembleSuccess.prompt.length} 字符</span>
+          <span>不消耗 Token</span>
+        </div>
+
+        <div className="text-[10px] text-text-tertiary text-center border-t border-border-subtle pt-3 mt-2">
+          提示词由后端 /api/prompts/assemble 生成
+        </div>
       </div>
-    </div>
-  );
+    );
+  }
+
+  return null;
 }
 
 // ─── Generate Output Panel ───────────────────────────────────────────────────
@@ -310,12 +373,28 @@ function GenerateOutputPanel() {
 // ─── Voices Detail Panel ─────────────────────────────────────────────────────
 
 function VoicesDetailPanel() {
-  const { voices, adapter } = useAppState();
-  const [selectedVoice, setSelectedVoice] = useState(voices[0]);
+  const { voices, adapter, voicesLoading, voicesError, voicesLoaded, refreshVoices } = useAppState();
+  const [selectedVoice, setSelectedVoice] = useState<VoiceProfile | null>(voices[0] ?? null);
   const [probeStatus, setProbeStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [probeLatency, setProbeLatency] = useState("");
 
+  // Sync selectedVoice when voices populate after initial empty state
+  useEffect(() => {
+    if (!selectedVoice && voices.length > 0) {
+      setSelectedVoice(voices[0]);
+    }
+  }, [voices, selectedVoice]);
+
+  // If selectedVoice was removed from the list (e.g. after a refresh that returns different data),
+  // fall back to the first available voice
+  useEffect(() => {
+    if (selectedVoice && voices.length > 0 && !voices.some((v) => v.name === selectedVoice.name)) {
+      setSelectedVoice(voices[0]);
+    }
+  }, [voices, selectedVoice]);
+
   const handleProbe = async () => {
+    if (!selectedVoice) return;
     setProbeStatus("loading");
     const result = await adapter.probeVoice(selectedVoice.name);
     setProbeLatency(result.latency);
@@ -323,8 +402,68 @@ function VoicesDetailPanel() {
     setTimeout(() => setProbeStatus("idle"), 3000);
   };
 
+  // --- Loading: first-time fetch, no data yet ---
+  if (voicesLoading && voices.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 text-center">
+        <Loader2 size={20} className="animate-spin text-text-tertiary mb-3" />
+        <p className="text-text-tertiary text-xs">正在加载音色列表...</p>
+      </div>
+    );
+  }
+
+  // --- Error: fetch failed and no fallback data ---
+  if (voicesError && voices.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 text-center">
+        <AlertCircle size={20} className="text-error mb-3" />
+        <p className="text-error text-xs font-medium">加载音色列表失败</p>
+        <p className="text-text-tertiary text-[10px] mt-1">{voicesError}</p>
+        <button
+          className="mt-3 flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-medium bg-bg-surface border border-border hover:bg-bg-hover transition-colors"
+          onClick={refreshVoices}
+        >
+          <RefreshCw size={12} /> 重试
+        </button>
+      </div>
+    );
+  }
+
+  // --- Empty: successful fetch returned empty list ---
+  if (voicesLoaded && voices.length === 0 && !voicesError) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 text-center">
+        <p className="text-text-tertiary text-xs">没有可用的音色</p>
+        <p className="text-text-tertiary text-[10px] mt-1">后端返回空列表</p>
+      </div>
+    );
+  }
+
+  // --- No selected voice (should not happen with sync effects above, but defensive) ---
+  if (!selectedVoice) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 text-center">
+        <p className="text-text-tertiary text-xs">请选择一个音色</p>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-6">
+      {/* Inline error banner when stale data is visible */}
+      {voicesError && voices.length > 0 && (
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-error-muted/50 border border-error/20 text-xs">
+          <AlertCircle size={12} className="text-error shrink-0" />
+          <span className="text-error text-[10px]">刷新失败: {voicesError}</span>
+          <button
+            className="ml-auto flex items-center gap-1 text-[10px] text-text-secondary hover:text-text-primary transition-colors"
+            onClick={refreshVoices}
+          >
+            <RefreshCw size={10} /> 重试
+          </button>
+        </div>
+      )}
+
       {/* Voice selector */}
       <select
         className="bg-bg-sunken border border-border rounded-md px-3 py-1.5 text-sm outline-none focus:border-border-focus"

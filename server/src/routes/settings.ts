@@ -13,6 +13,7 @@ import { eq } from "drizzle-orm";
 import { encryptApiKey, decryptApiKey, maskApiKey } from "../config/env.js";
 import { isOpenRouterConfigured, requireApiKey } from "../services/key-resolver.js";
 import { OpenRouterProvider } from "../services/openrouter-provider.js";
+import { canonicalizeVoice } from "../utils/voice.js";
 
 const app = new Hono();
 
@@ -70,7 +71,7 @@ app.get("/api/settings", (c) => {
     // Backward compat: also return openRouterApiKey field for older frontend
     openRouterApiKey: hasKey ? keyMask : null,
     defaultModel: row.defaultModel,
-    defaultVoice: row.defaultVoice,
+    defaultVoice: canonicalizeVoice(row.defaultVoice),
     defaultFormat: row.defaultFormat,
     audioOutputDir: row.audioOutputDir,
     maxCharsPerRequest: row.maxCharsPerRequest,
@@ -105,7 +106,7 @@ app.put("/api/settings", async (c) => {
     }
   }
   if (data.defaultModel !== undefined) updateValues.defaultModel = data.defaultModel;
-  if (data.defaultVoice !== undefined) updateValues.defaultVoice = data.defaultVoice;
+  if (data.defaultVoice !== undefined) updateValues.defaultVoice = canonicalizeVoice(data.defaultVoice);
   if (data.defaultFormat !== undefined) updateValues.defaultFormat = data.defaultFormat;
   if (data.audioOutputDir !== undefined) updateValues.audioOutputDir = data.audioOutputDir;
   if (data.maxCharsPerRequest !== undefined) updateValues.maxCharsPerRequest = data.maxCharsPerRequest;

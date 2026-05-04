@@ -1,33 +1,48 @@
 import { useState, useCallback, useEffect } from "react";
-import { ChevronDown, ChevronUp, Plus, Trash2, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Plus, Trash2, Loader2, AlertTriangle, AlertCircle, CheckCircle2, Copy, FileText, Zap } from "lucide-react";
 import { useAppState } from "../state/AppContext";
-import type { AudioFormat, SpeakerConfig } from "../types";
+import type { AudioFormat, SpeakerConfig, AssemblePromptRequest, AssemblePromptSuccess } from "../types";
+
+const MAX_SPEAKERS = 2;
 
 const EMOTION_TAGS = ["[happy]", "[sad]", "[excited]", "[calm]", "[angry]", "[nervous]", "[proud]"];
 const EXPRESS_TAGS = ["[slow]", "[fast]", "[pause]", "[whisper]", "[shout]", "[sigh]", "[laugh]"];
-const PARA_TAGS = {"情绪": EMOTION_TAGS, "表达": EXPRESS_TAGS, "副语言": ["[breath]", "[cough]", "[giggle]", "[gasp]", "[yawn]"]};
+const PARA_TAGS = { "情绪": EMOTION_TAGS, "表达": EXPRESS_TAGS, "副语言": ["[breath]", "[cough]", "[giggle]", "[gasp]", "[yawn]"] };
+
+type DirectorStep = "edit" | "preview" | "confirm";
 
 export function DirectorPage() {
-  const { generate, generatePhase, generateResult, resetGeneration, estimateCost, costEstimate, settings, voices } = useAppState();
+  const {
+    generate, generatePhase, generateResult, resetGeneration,
+    estimateCost, costEstimate,
+    assemblePhase, assembleResult, assemblePrompt: assembleAction, resetAssemble,
+    settings, voices,
+  } = useAppState();
 
   // Director fields
   const [audioProfile, setAudioProfile] = useState("");
   const [scene, setScene] = useState("");
   const [directorNotes, setDirectorNotes] = useState("");
+  const [sampleContext, setSampleContext] = useState("");
   const [transcript, setTranscript] = useState("");
 
   // Config
   const [voice, setVoice] = useState(settings.defaultVoice);
   const [format, setFormat] = useState<AudioFormat>(settings.defaultFormat);
 
+  // Step tracking
+  const [step, setStep] = useState<DirectorStep>("edit");
+  const [lastAssembledPrompt, setLastAssembledPrompt] = useState<string>("");
+  const [showCopiedToast, setShowCopiedToast] = useState(false);
+
   // Voice options from backend
   const voiceOptions = voices.length > 0
     ? voices.map((v) => v.name)
-    : ["alloy", "echo", "nova", "shimmer", "fable", "onyx"];
+    : ["Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda"];
 
   // Speakers
   const [speakers, setSpeakers] = useState<SpeakerConfig[]>([
-    { id: "a", label: "Speaker A", name: "主持人", voice: "alloy", style: "专业、沉稳" },
+    { id: "a", label: "Speaker A", name: "主持人", voice: "Zephyr", style: "专业、沉稳" },
   ]);
 
   // Collapse state for each section
@@ -43,28 +58,6 @@ export function DirectorPage() {
     setTranscript((prev) => prev + (prev.length > 0 && !prev.endsWith(" ") ? " " : "") + tag + " ");
   };
 
-  // Build prompt and store in sessionStorage for RightPanel
-  useEffect(() => {
-    const parts: string[] = [];
-    if (audioProfile.trim()) parts.push(`<audio_profile>\n${audioProfile.trim()}\n</audio_profile>`);
-    if (scene.trim()) parts.push(`<scene>\n${scene.trim()}\n</scene>`);
-    if (directorNotes.trim()) parts.push(`<director_notes>\n${directorNotes.trim()}\n</director_notes>`);
-    if (speakers.length > 0) {
-      const speakerLines = speakers.map((s) => `  ${s.label} (${s.name}): voice=${s.voice}, style="${s.style}"`).join("\n");
-      parts.push(`<speakers>\n${speakerLines}\n</speakers>`);
-    }
-    if (transcript.trim()) parts.push(`<transcript>\n${transcript.trim()}\n</transcript>`);
-
-    const fullPrompt = parts.join("\n\n");
-    const tokenEstimate = Math.ceil(fullPrompt.length / 4);
-
-    try {
-      sessionStorage.setItem("director-prompt", JSON.stringify({ fullPrompt, tokenEstimate }));
-    } catch {
-      // ignore
-    }
-  }, [audioProfile, scene, directorNotes, transcript, speakers]);
-
   // Cost estimation
   useEffect(() => {
     estimateCost(transcript.length, format);
@@ -72,10 +65,11 @@ export function DirectorPage() {
 
   // Speaker management
   const addSpeaker = useCallback(() => {
-    const id = String.fromCharCode(97 + speakers.length); // b, c, d...
+    if (speakers.length >= MAX_SPEAKERS) return;
+    const id = String.fromCharCode(97 + speakers.length); // b
     setSpeakers((prev) => [
       ...prev,
-      { id, label: `Speaker ${id.toUpperCase()}`, name: "", voice: "alloy", style: "" },
+      { id, label: `Speaker ${id.toUpperCase()}`, name: "", voice: "Zephyr", style: "" },
     ]);
   }, [speakers.length]);
 
@@ -87,26 +81,96 @@ export function DirectorPage() {
     setSpeakers((prev) => prev.map((s) => (s.id === id ? { ...s, [field]: value } : s)));
   }, []);
 
-  // Generate
+  // Speaker limit warning
+  const isSpeakerLimitReached = speakers.length >= MAX_SPEAKERS;
+
+  // Assemble handler -- calls POST /api/prompts/assemble
+  const handleAssemble = useCallback(async () => {
+    if (transcript.trim().length === 0) return;
+
+    const req: AssemblePromptRequest = {
+      audioProfile: audioProfile.trim() || undefined,
+      scene: scene.trim() || undefined,
+      directorNotes: directorNotes.trim() || undefined,
+      sampleContext: sampleContext.trim() || undefined,
+      transcript: transcript.trim(),
+      speakers: speakers.map((s) => ({
+        id: s.id,
+        label: s.label,
+        name: s.name || undefined,
+        voice: s.voice || undefined,
+        style: s.style || undefined,
+      })),
+    };
+
+    const result = await assembleAction(req);
+    if (result && result.ok) {
+      setLastAssembledPrompt((result as AssemblePromptSuccess).prompt);
+      setStep("preview");
+    }
+  }, [audioProfile, scene, directorNotes, sampleContext, transcript, speakers, assembleAction]);
+
+  // Generate handler -- uses the assembled prompt as input text
   const handleGenerate = useCallback(async () => {
-    if (transcript.trim().length === 0 || generatePhase === "loading") return;
+    if (!lastAssembledPrompt || generatePhase === "loading") return;
+
+    // Check if API Key is configured
+    if (!settings.openRouterApiKey) {
+      return;
+    }
+
     await generate({
-      text: transcript.trim(),
+      text: lastAssembledPrompt,
       voice,
       format,
       speakers,
-      audioProfile,
-      scene,
-      directorNotes,
+      audioProfile: audioProfile.trim(),
+      scene: scene.trim(),
+      directorNotes: directorNotes.trim(),
+      sampleContext: sampleContext.trim(),
+      transcript: transcript.trim(),
     });
-  }, [transcript, voice, format, speakers, audioProfile, scene, directorNotes, generatePhase, generate]);
+
+    setStep("confirm");
+  }, [lastAssembledPrompt, voice, format, speakers, audioProfile, scene, directorNotes, sampleContext, transcript, generatePhase, generate, settings.openRouterApiKey]);
 
   const handleReset = useCallback(() => {
     resetGeneration();
-  }, [resetGeneration]);
+    resetAssemble();
+    setStep("edit");
+    setLastAssembledPrompt("");
+  }, [resetGeneration, resetAssemble]);
 
-  // Section component
-  const Section = ({ id, icon, title, children }: { id: string; icon: React.ReactNode; title: string; children: React.ReactNode }) => {
+  const handleBackToEdit = useCallback(() => {
+    resetAssemble();
+    setStep("edit");
+  }, [resetAssemble]);
+
+  const handleCopyPrompt = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setShowCopiedToast(true);
+      setTimeout(() => setShowCopiedToast(false), 2000);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Derive assemble success data
+  const assembleSuccess = assembleResult?.phase === "success" && assembleResult.response?.ok
+    ? (assembleResult.response as AssemblePromptSuccess)
+    : null;
+
+  const assembleError = assembleResult?.phase === "error"
+    ? assembleResult.error
+    : null;
+
+  // Check if API key is configured
+  const hasApiKey = !!settings.openRouterApiKey;
+
+  // ─── Section component ──────────────────────────────────────────────────────
+
+  const Section = ({ id, icon, title, children, required }: { id: string; icon: React.ReactNode; title: string; children: React.ReactNode; required?: boolean }) => {
     const isCollapsed = collapsed[id] ?? false;
     return (
       <div className={`border rounded-lg bg-bg-surface overflow-hidden ${isCollapsed ? "" : "flex-1 flex flex-col min-h-[120px]"}`}>
@@ -125,224 +189,557 @@ export function DirectorPage() {
     );
   };
 
-  return (
-    <div className="flex flex-col h-full">
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Column: Editor */}
-        <div className="flex-1 p-6 overflow-y-auto flex flex-col gap-4">
-          <Section id="audioProfile" icon={<span className="text-accent text-xs">*</span>} title="Audio Profile">
-            <textarea
-              className="w-full min-h-[80px] bg-transparent outline-none resize-y text-sm text-text-primary placeholder:text-text-tertiary"
-              placeholder="A warm, middle-aged male voice with a calm, reassuring tone..."
-              value={audioProfile}
-              onChange={(e) => setAudioProfile(e.target.value)}
-              disabled={generatePhase === "loading"}
-            />
-          </Section>
+  // ─── Speaker Limit Banner ───────────────────────────────────────────────────
 
-          <Section id="scene" icon={<span className="text-text-tertiary text-xs">*</span>} title="Scene">
-            <textarea
-              className="w-full min-h-[80px] bg-transparent outline-none resize-y text-sm text-text-primary placeholder:text-text-tertiary"
-              placeholder="A cozy living room with a crackling fireplace..."
-              value={scene}
-              onChange={(e) => setScene(e.target.value)}
-              disabled={generatePhase === "loading"}
-            />
-          </Section>
+  const SpeakerLimitBanner = () => (
+    <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-warning-muted border border-warning/20 text-xs text-warning">
+      <AlertTriangle size={14} className="shrink-0" />
+      <span>MVP 阶段最多支持 {MAX_SPEAKERS} 位说话者。如需更多，请关注后续版本更新。</span>
+    </div>
+  );
 
-          <Section id="directorNotes" icon={<span className="text-text-tertiary text-xs">*</span>} title="Director's Notes">
-            <textarea
-              className="w-full min-h-[80px] bg-transparent outline-none resize-y text-sm text-text-primary placeholder:text-text-tertiary"
-              placeholder="Speak slowly and thoughtfully. Emphasize key words..."
-              value={directorNotes}
-              onChange={(e) => setDirectorNotes(e.target.value)}
-              disabled={generatePhase === "loading"}
-            />
-          </Section>
+  // ─── Render Steps ────────────────────────────────────────────────────────────
 
-          <div className={`border border-border-focus rounded-lg bg-bg-surface overflow-hidden flex-1 flex flex-col min-h-[200px]`}>
-            <div className="h-9 px-3 flex items-center justify-between border-b border-border-subtle bg-bg-hover">
-              <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
-                <span className="text-accent">*</span> Transcript
-              </div>
-              <span className="text-xs text-text-tertiary">{transcript.length} 字符</span>
-            </div>
-            <div className="p-3 bg-bg-sunken flex-1 flex flex-col">
+  // Step: Edit (initial state)
+  if (step === "edit") {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex-1 flex overflow-hidden">
+          {/* Left Column: Editor */}
+          <div className="flex-1 p-6 overflow-y-auto flex flex-col gap-4">
+            <Section id="audioProfile" icon={<span className="text-text-tertiary text-xs">*</span>} title="Audio Profile">
               <textarea
-                className="w-full flex-1 bg-transparent outline-none resize-none text-sm text-text-primary placeholder:text-text-tertiary"
-                placeholder="Type the exact transcript here..."
-                value={transcript}
-                onChange={(e) => setTranscript(e.target.value)}
-                disabled={generatePhase === "loading"}
+                className="w-full min-h-[80px] bg-transparent outline-none resize-y text-sm text-text-primary placeholder:text-text-tertiary"
+                placeholder="A warm, middle-aged male voice with a calm, reassuring tone..."
+                value={audioProfile}
+                onChange={(e) => setAudioProfile(e.target.value)}
+                disabled={assemblePhase === "loading"}
               />
+            </Section>
+
+            <Section id="scene" icon={<span className="text-text-tertiary text-xs">*</span>} title="Scene">
+              <textarea
+                className="w-full min-h-[80px] bg-transparent outline-none resize-y text-sm text-text-primary placeholder:text-text-tertiary"
+                placeholder="A cozy living room with a crackling fireplace..."
+                value={scene}
+                onChange={(e) => setScene(e.target.value)}
+                disabled={assemblePhase === "loading"}
+              />
+            </Section>
+
+            <Section id="directorNotes" icon={<span className="text-text-tertiary text-xs">*</span>} title="Director's Notes">
+              <textarea
+                className="w-full min-h-[80px] bg-transparent outline-none resize-y text-sm text-text-primary placeholder:text-text-tertiary"
+                placeholder="Speak slowly and thoughtfully. Emphasize key words..."
+                value={directorNotes}
+                onChange={(e) => setDirectorNotes(e.target.value)}
+                disabled={assemblePhase === "loading"}
+              />
+            </Section>
+
+            <Section id="sampleContext" icon={<span className="text-text-tertiary text-xs">*</span>} title="Sample Context">
+              <textarea
+                className="w-full min-h-[80px] bg-transparent outline-none resize-y text-sm text-text-primary placeholder:text-text-tertiary"
+                placeholder="Provide background context: previous episode summary, character backstory, world-building details..."
+                value={sampleContext}
+                onChange={(e) => setSampleContext(e.target.value)}
+                disabled={assemblePhase === "loading"}
+              />
+            </Section>
+
+            <div className="border border-border-focus rounded-lg bg-bg-surface overflow-hidden flex-1 flex flex-col min-h-[200px]">
+              <div className="h-9 px-3 flex items-center justify-between border-b border-border-subtle bg-bg-hover">
+                <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
+                  <span className="text-accent">*</span> Transcript
+                </div>
+                <span className="text-xs text-text-tertiary">{transcript.length} 字符</span>
+              </div>
+              <div className="p-3 bg-bg-sunken flex-1 flex flex-col">
+                <textarea
+                  className="w-full flex-1 bg-transparent outline-none resize-none text-sm text-text-primary placeholder:text-text-tertiary"
+                  placeholder="Type the exact transcript here..."
+                  value={transcript}
+                  onChange={(e) => setTranscript(e.target.value)}
+                  disabled={assemblePhase === "loading"}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Right Column: Config */}
+          <div className="w-[400px] border-l border-border-subtle bg-bg-base overflow-y-auto p-6 flex flex-col gap-6">
+            {/* Speakers */}
+            <div className="flex flex-col gap-4">
+              <h3 className="text-sm font-semibold text-text-primary flex items-center justify-between">
+                Speaker Config
+                <button
+                  className={`text-xs font-medium flex items-center gap-1 transition-colors ${
+                    isSpeakerLimitReached
+                      ? "text-text-tertiary cursor-not-allowed"
+                      : "text-accent hover:text-accent-hover"
+                  }`}
+                  onClick={addSpeaker}
+                  disabled={isSpeakerLimitReached}
+                  title={isSpeakerLimitReached ? `MVP 阶段最多 ${MAX_SPEAKERS} 位说话者` : "添加 Speaker"}
+                >
+                  <Plus size={14} /> 添加 Speaker
+                </button>
+              </h3>
+
+              {isSpeakerLimitReached && <SpeakerLimitBanner />}
+
+              {speakers.map((speaker) => (
+                <div key={speaker.id} className="border border-border rounded-md p-3 bg-bg-surface flex flex-col gap-3">
+                  <div className="flex justify-between items-center text-xs font-medium text-text-secondary">
+                    <span>{speaker.label}</span>
+                    {speaker.id !== "a" && (
+                      <button
+                        className="text-error hover:text-error/80 transition-colors"
+                        onClick={() => removeSpeaker(speaker.id)}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 text-sm">
+                    <label className="w-10 text-text-tertiary">名称:</label>
+                    <input
+                      className="flex-1 bg-bg-sunken border border-border rounded px-2 py-1 outline-none focus:border-border-focus text-text-primary"
+                      value={speaker.name}
+                      onChange={(e) => updateSpeaker(speaker.id, "name", e.target.value)}
+                    />
+                  </div>
+                  <div className="flex items-center gap-2 text-sm">
+                    <label className="w-10 text-text-tertiary">音色:</label>
+                    <select
+                      className="flex-1 bg-bg-sunken border border-border rounded px-2 py-1 outline-none focus:border-border-focus text-text-primary"
+                      value={speaker.voice}
+                      onChange={(e) => updateSpeaker(speaker.id, "voice", e.target.value)}
+                    >
+                      {voiceOptions.map((v) => <option key={v} value={v}>{v}</option>)}
+                    </select>
+                  </div>
+                  <div className="flex items-center gap-2 text-sm">
+                    <label className="w-10 text-text-tertiary">风格:</label>
+                    <input
+                      className="flex-1 bg-bg-sunken border border-border rounded px-2 py-1 outline-none focus:border-border-focus text-text-primary"
+                      value={speaker.style}
+                      onChange={(e) => updateSpeaker(speaker.id, "style", e.target.value)}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Quick Tags */}
+            <div className="flex flex-col gap-4">
+              <h3 className="text-sm font-semibold text-text-primary">快速标签</h3>
+              <div className="border border-border rounded-md bg-bg-surface overflow-hidden">
+                <div className="flex text-xs border-b border-border-subtle bg-bg-sunken">
+                  {(Object.keys(PARA_TAGS) as Array<keyof typeof PARA_TAGS>).map((tab) => (
+                    <button
+                      key={tab}
+                      className={`flex-1 py-2 font-medium transition-colors ${
+                        activeTagTab === tab
+                          ? "text-accent border-b border-accent"
+                          : "text-text-secondary hover:text-text-primary"
+                      }`}
+                      onClick={() => setActiveTagTab(tab)}
+                    >
+                      {tab}
+                    </button>
+                  ))}
+                </div>
+                <div className="p-3 flex flex-wrap gap-2">
+                  {PARA_TAGS[activeTagTab].map((tag) => (
+                    <button
+                      key={tag}
+                      className="px-2 py-1 rounded bg-bg-base border border-border-subtle text-xs text-text-secondary hover:text-text-primary hover:border-border transition-colors"
+                      onClick={() => insertTag(tag)}
+                    >
+                      {tag}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Right Column: Config */}
-        <div className="w-[400px] border-l border-border-subtle bg-bg-base overflow-y-auto p-6 flex flex-col gap-6">
-          {/* Speakers */}
-          <div className="flex flex-col gap-4">
-            <h3 className="text-sm font-semibold text-text-primary flex items-center justify-between">
-              Speaker Config
-              <button
-                className="text-accent text-xs font-medium hover:text-accent-hover flex items-center gap-1"
-                onClick={addSpeaker}
-                disabled={speakers.length >= 4}
-              >
-                <Plus size={14} /> 添加 Speaker
-              </button>
-            </h3>
+        {/* Bottom Action Bar */}
+        <div className="h-[52px] bg-bg-sunken border-t border-border-subtle shrink-0 px-6 flex items-center justify-between sticky bottom-0">
+          <div className="flex items-center gap-4">
+            <select
+              className="bg-bg-surface border border-border rounded-md px-3 py-1.5 text-sm outline-none focus:border-border-focus transition-colors text-text-primary"
+              value={voice}
+              onChange={(e) => setVoice(e.target.value)}
+              disabled={assemblePhase === "loading"}
+            >
+              {voiceOptions.map((v) => <option key={v} value={v}>{v}</option>)}
+            </select>
 
-            {speakers.map((speaker) => (
-              <div key={speaker.id} className="border border-border rounded-md p-3 bg-bg-surface flex flex-col gap-3">
-                <div className="flex justify-between items-center text-xs font-medium text-text-secondary">
-                  <span>{speaker.label}</span>
-                  {speaker.id !== "a" && (
-                    <button
-                      className="text-error hover:text-error/80 transition-colors"
-                      onClick={() => removeSpeaker(speaker.id)}
-                    >
-                      <Trash2 size={12} />
-                    </button>
-                  )}
-                </div>
-                <div className="flex items-center gap-2 text-sm">
-                  <label className="w-10 text-text-tertiary">名称:</label>
-                  <input
-                    className="flex-1 bg-bg-sunken border border-border rounded px-2 py-1 outline-none focus:border-border-focus text-text-primary"
-                    value={speaker.name}
-                    onChange={(e) => updateSpeaker(speaker.id, "name", e.target.value)}
-                  />
-                </div>
-                <div className="flex items-center gap-2 text-sm">
-                  <label className="w-10 text-text-tertiary">音色:</label>
-                  <select
-                    className="flex-1 bg-bg-sunken border border-border rounded px-2 py-1 outline-none focus:border-border-focus text-text-primary"
-                    value={speaker.voice}
-                    onChange={(e) => updateSpeaker(speaker.id, "voice", e.target.value)}
-                  >
-                    {voiceOptions.map((v) => <option key={v} value={v}>{v}</option>)}
-                  </select>
-                </div>
-                <div className="flex items-center gap-2 text-sm">
-                  <label className="w-10 text-text-tertiary">风格:</label>
-                  <input
-                    className="flex-1 bg-bg-sunken border border-border rounded px-2 py-1 outline-none focus:border-border-focus text-text-primary"
-                    value={speaker.style}
-                    onChange={(e) => updateSpeaker(speaker.id, "style", e.target.value)}
-                  />
-                </div>
-              </div>
-            ))}
+            <div className="flex items-center bg-bg-surface border border-border rounded-md overflow-hidden text-sm">
+              <button
+                className={`px-3 py-1.5 transition-colors ${format === "mp3" ? "bg-bg-active text-text-primary" : "text-text-tertiary hover:bg-bg-hover hover:text-text-secondary"}`}
+                onClick={() => setFormat("mp3")}
+                disabled={assemblePhase === "loading"}
+              >
+                mp3
+              </button>
+              <button
+                className={`px-3 py-1.5 transition-colors ${format === "pcm" ? "bg-bg-active text-text-primary" : "text-text-tertiary hover:bg-bg-hover hover:text-text-secondary"}`}
+                onClick={() => setFormat("pcm")}
+                disabled={assemblePhase === "loading"}
+              >
+                pcm
+              </button>
+            </div>
+
+            <span className="text-xs text-text-tertiary">
+              预估 {costEstimate?.estimatedCost ?? "$0.0000"}
+            </span>
           </div>
 
-          {/* Quick Tags */}
-          <div className="flex flex-col gap-4">
-            <h3 className="text-sm font-semibold text-text-primary">快速标签</h3>
-            <div className="border border-border rounded-md bg-bg-surface overflow-hidden">
-              <div className="flex text-xs border-b border-border-subtle bg-bg-sunken">
-                {(Object.keys(PARA_TAGS) as Array<keyof typeof PARA_TAGS>).map((tab) => (
-                  <button
-                    key={tab}
-                    className={`flex-1 py-2 font-medium transition-colors ${
-                      activeTagTab === tab
-                        ? "text-accent border-b border-accent"
-                        : "text-text-secondary hover:text-text-primary"
-                    }`}
-                    onClick={() => setActiveTagTab(tab)}
-                  >
-                    {tab}
-                  </button>
-                ))}
-              </div>
-              <div className="p-3 flex flex-wrap gap-2">
-                {PARA_TAGS[activeTagTab].map((tag) => (
-                  <button
-                    key={tag}
-                    className="px-2 py-1 rounded bg-bg-base border border-border-subtle text-xs text-text-secondary hover:text-text-primary hover:border-border transition-colors"
-                    onClick={() => insertTag(tag)}
-                  >
-                    {tag}
-                  </button>
-                ))}
-              </div>
-            </div>
+          <div className="flex items-center gap-3">
+            <button
+              className="px-6 py-2 rounded-md text-sm font-medium transition-colors shadow-shadow-glow flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{
+                backgroundColor: transcript.trim().length === 0 || assemblePhase === "loading"
+                  ? "var(--color-bg-active)"
+                  : "var(--color-accent)",
+                color: "var(--color-bg-base)",
+              }}
+              onClick={handleAssemble}
+              disabled={transcript.trim().length === 0 || assemblePhase === "loading"}
+            >
+              {assemblePhase === "loading" ? (
+                <>
+                  <Loader2 size={16} className="animate-spin" />
+                  组装中...
+                </>
+              ) : (
+                <>
+                  <FileText size={16} />
+                  组装提示词
+                </>
+              )}
+            </button>
           </div>
         </div>
       </div>
+    );
+  }
 
-      {/* Bottom Action Bar */}
-      <div className="h-[52px] bg-bg-sunken border-t border-border-subtle shrink-0 px-6 flex items-center justify-between sticky bottom-0">
-        <div className="flex items-center gap-4">
-          <select
-            className="bg-bg-surface border border-border rounded-md px-3 py-1.5 text-sm outline-none focus:border-border-focus transition-colors text-text-primary"
-            value={voice}
-            onChange={(e) => setVoice(e.target.value)}
-            disabled={generatePhase === "loading"}
-          >
-            {voiceOptions.map((v) => <option key={v} value={v}>{v}</option>)}
-          </select>
-
-          <div className="flex items-center bg-bg-surface border border-border rounded-md overflow-hidden text-sm">
-            <button
-              className={`px-3 py-1.5 transition-colors ${format === "mp3" ? "bg-bg-active text-text-primary" : "text-text-tertiary hover:bg-bg-hover hover:text-text-secondary"}`}
-              onClick={() => setFormat("mp3")}
-              disabled={generatePhase === "loading"}
-            >
-              mp3
-            </button>
-            <button
-              className={`px-3 py-1.5 transition-colors ${format === "pcm" ? "bg-bg-active text-text-primary" : "text-text-tertiary hover:bg-bg-hover hover:text-text-secondary"}`}
-              onClick={() => setFormat("pcm")}
-              disabled={generatePhase === "loading"}
-            >
-              pcm
-            </button>
+  // Step: Preview (assemble success, show prompt + warnings)
+  if (step === "preview" && assembleSuccess) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex-1 p-6 overflow-y-auto flex flex-col gap-5">
+          {/* Header */}
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-lg font-semibold font-display text-text-primary">提示词组装结果</h2>
+              <p className="text-text-tertiary text-xs mt-1">
+                Request ID: {assembleSuccess.requestId}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                className="text-xs text-accent hover:text-accent-hover transition-colors flex items-center gap-1"
+                onClick={() => handleCopyPrompt(assembleSuccess.prompt)}
+              >
+                <Copy size={12} /> {showCopiedToast ? "已复制" : "复制提示词"}
+              </button>
+            </div>
           </div>
 
-          {generatePhase !== "idle" && (
+          {/* Warnings */}
+          {assembleSuccess.warnings.length > 0 && (
+            <div className="flex flex-col gap-2">
+              {assembleSuccess.warnings.map((w, i) => (
+                <div
+                  key={i}
+                  className={`flex items-start gap-2 px-3 py-2 rounded-md text-xs border ${
+                    w.code === "LEGACY_VOICE_ALIAS"
+                      ? "bg-warning-muted border-warning/20 text-warning"
+                      : "bg-accent-muted border-accent/20 text-accent"
+                  }`}
+                >
+                  <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                  <div className="flex flex-col gap-0.5">
+                    <span className="font-medium">{w.code}</span>
+                    <span>{w.message}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Normalized speakers */}
+          {assembleSuccess.normalized.speakers.length > 0 && (
+            <div className="flex flex-col gap-2">
+              <h3 className="text-sm font-semibold text-text-primary">规范化 Speaker 信息</h3>
+              <div className="grid gap-2">
+                {assembleSuccess.normalized.speakers.map((s) => (
+                  <div key={s.id} className="flex items-center gap-3 px-3 py-2 rounded-md bg-bg-surface border border-border-subtle text-xs">
+                    <span className="font-semibold text-text-primary">{s.label}</span>
+                    {s.name && <span className="text-text-secondary">({s.name})</span>}
+                    <span className="text-text-tertiary">Voice:</span>
+                    <span className="text-accent font-mono">{s.voice}</span>
+                    {s.wasLegacyAlias && (
+                      <span className="px-1.5 py-0.5 rounded bg-warning-muted text-warning border border-warning/20 text-[10px]">
+                        legacy alias 已映射
+                      </span>
+                    )}
+                    {s.style && (
+                      <>
+                        <span className="text-text-tertiary">Style:</span>
+                        <span className="text-text-secondary">{s.style}</span>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Five-element summary */}
+          <div className="flex flex-col gap-2">
+            <h3 className="text-sm font-semibold text-text-primary">五要素概要</h3>
+            <div className="grid gap-2 text-xs">
+              {[
+                { label: "Audio Profile", value: assembleSuccess.normalized.audioProfile },
+                { label: "Scene", value: assembleSuccess.normalized.scene },
+                { label: "Director's Notes", value: assembleSuccess.normalized.directorNotes },
+                { label: "Sample Context", value: assembleSuccess.normalized.sampleContext },
+                { label: "Transcript", value: assembleSuccess.normalized.transcript },
+              ].map((el) => (
+                <div key={el.label} className="flex items-start gap-2 px-3 py-1.5 rounded-md bg-bg-surface border border-border-subtle">
+                  <span className="text-text-tertiary shrink-0 w-[110px]">{el.label}:</span>
+                  <span className={`break-all ${el.value ? "text-text-secondary" : "text-text-tertiary italic"}`}>
+                    {el.value || "(empty)"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Assembled prompt preview */}
+          <div className="flex flex-col gap-2">
+            <h3 className="text-sm font-semibold text-text-primary">组装后的提示词</h3>
+            <div className="bg-bg-sunken p-4 rounded-md border border-border font-mono text-xs text-text-secondary min-h-[160px] max-h-[40vh] overflow-y-auto whitespace-pre-wrap leading-relaxed">
+              {assembleSuccess.prompt}
+            </div>
+            <div className="flex items-center justify-between text-xs text-text-tertiary">
+              <span>{assembleSuccess.prompt.length} 字符</span>
+              <span>此步骤不消耗 Token / API 额度</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Bottom Action Bar */}
+        <div className="h-[52px] bg-bg-sunken border-t border-border-subtle shrink-0 px-6 flex items-center justify-between sticky bottom-0">
+          <button
+            className="text-sm text-text-secondary hover:text-text-primary transition-colors"
+            onClick={handleBackToEdit}
+          >
+            返回编辑
+          </button>
+
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-text-tertiary">
+              预估 {costEstimate?.estimatedCost ?? "$0.0000"}
+            </span>
+
             <button
-              className="text-sm text-text-secondary hover:text-text-primary transition-colors"
-              onClick={handleReset}
+              className="px-6 py-2 rounded-md text-sm font-medium transition-colors shadow-shadow-glow flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{
+                backgroundColor: generatePhase === "loading" || !hasApiKey
+                  ? "var(--color-bg-active)"
+                  : "var(--color-accent)",
+                color: "var(--color-bg-base)",
+              }}
+              onClick={handleGenerate}
+              disabled={generatePhase === "loading" || !hasApiKey}
             >
-              重置
+              {generatePhase === "loading" ? (
+                <>
+                  <Loader2 size={16} className="animate-spin" />
+                  生成中...
+                </>
+              ) : (
+                <>
+                  <Zap size={16} />
+                  确认并生成语音
+                </>
+              )}
             </button>
+          </div>
+        </div>
+
+        {/* No API Key warning overlay */}
+        {!hasApiKey && (
+          <div className="absolute inset-0 bg-bg-base/60 backdrop-blur-sm flex items-center justify-center z-10">
+            <div className="bg-bg-elevated border border-border rounded-lg p-6 max-w-md flex flex-col gap-4 text-center shadow-shadow-lg">
+              <div className="w-12 h-12 rounded-full bg-error-muted flex items-center justify-center mx-auto">
+                <AlertCircle size={24} className="text-error" />
+              </div>
+              <h3 className="text-sm font-semibold text-text-primary">未配置 API Key</h3>
+              <p className="text-xs text-text-secondary">
+                生成语音需要调用 OpenRouter API，请先在设置页面配置 API Key。组装提示词不消耗额度，但实际生成需要有效的 API Key。
+              </p>
+              <button
+                className="text-sm text-accent hover:text-accent-hover transition-colors"
+                onClick={handleBackToEdit}
+              >
+                返回编辑
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Step: Confirm (generation result)
+  if (step === "confirm") {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex-1 p-6 overflow-y-auto flex flex-col gap-5">
+          {/* Generation result display */}
+          {generatePhase === "loading" && (
+            <div className="flex flex-col items-center justify-center flex-1 gap-4">
+              <div className="w-16 h-16 rounded-full bg-accent/10 flex items-center justify-center text-accent animate-pulse">
+                <Loader2 size={32} className="animate-spin" />
+              </div>
+              <p className="text-text-secondary text-sm font-medium">正在调用 TTS 生成接口...</p>
+              <p className="text-text-tertiary text-xs">请等待后端响应，此步骤将消耗 API 额度</p>
+            </div>
+          )}
+
+          {generatePhase === "success" && generateResult && (
+            <div className="flex flex-col gap-4">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 size={18} className="text-success" />
+                <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-success-muted text-success border border-success/20">
+                  生成成功
+                </span>
+                <span className="font-mono text-xs text-text-secondary">{generateResult.jobId}</span>
+              </div>
+
+              {generateResult.audioUrl && (
+                <audio controls className="w-full" src={generateResult.audioUrl}>
+                  Your browser does not support the audio element.
+                </audio>
+              )}
+
+              <div className="flex flex-col gap-2 text-sm bg-bg-sunken p-4 rounded-md border border-border-subtle">
+                <div className="flex justify-between">
+                  <span className="text-text-tertiary">音色</span>
+                  <span className="text-text-primary">{generateResult.voice}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-text-tertiary">格式</span>
+                  <span className="text-text-primary font-mono text-xs">{generateResult.format}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-text-tertiary">字符数</span>
+                  <span className="text-text-primary">{generateResult.charCount}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-text-tertiary">预估成本</span>
+                  <span className="text-text-primary text-accent">{generateResult.estimatedCost}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {generatePhase === "error" && generateResult && (
+            <div className="flex flex-col gap-4">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-error-muted text-error border border-error/20">
+                  生成失败
+                </span>
+                <span className="font-mono text-xs text-text-secondary">{generateResult.jobId}</span>
+              </div>
+
+              <div className="p-4 bg-error-muted/50 rounded-md border border-error/20 flex flex-col gap-2">
+                <div className="flex items-center gap-2 text-sm text-error font-medium">
+                  <AlertCircle size={16} />
+                  {generateResult.error?.code ?? "UNKNOWN"}
+                </div>
+                <p className="text-xs text-text-secondary">{generateResult.error?.message ?? "生成过程中发生错误"}</p>
+              </div>
+            </div>
           )}
         </div>
 
-        <div className="flex items-center gap-3">
+        {/* Bottom Action Bar */}
+        <div className="h-[52px] bg-bg-sunken border-t border-border-subtle shrink-0 px-6 flex items-center justify-between sticky bottom-0">
           <button
-            className="px-4 py-2 rounded-md text-sm font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
-            onClick={() => {
-              // Force RightPanel open and navigate to prompt preview
-              const panel = document.querySelector("[data-right-panel-trigger]");
-              if (panel) (panel as HTMLElement).click();
-            }}
+            className="text-sm text-text-secondary hover:text-text-primary transition-colors"
+            onClick={handleReset}
           >
-            预览提示词
+            重新编辑
           </button>
+
+          <div className="flex items-center gap-3">
+            {generatePhase === "error" && (
+              <button
+                className="px-4 py-2 rounded-md text-sm font-medium bg-bg-surface hover:bg-bg-hover transition-colors border border-border flex items-center gap-1"
+                onClick={handleGenerate}
+                disabled={generatePhase === "loading"}
+              >
+                <Loader2 size={14} className={generatePhase === "loading" ? "animate-spin" : "hidden"} />
+                重试生成
+              </button>
+            )}
+
+            {generatePhase === "success" && (
+              <button
+                className="px-4 py-2 rounded-md text-sm font-medium bg-bg-surface hover:bg-bg-hover transition-colors border border-border flex items-center gap-1"
+                onClick={handleReset}
+              >
+                重新生成
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Assemble error state
+  if (assemblePhase === "error" && assembleError) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex-1 p-6 overflow-y-auto flex flex-col items-center justify-center gap-4">
+          <div className="w-16 h-16 rounded-full bg-error-muted flex items-center justify-center">
+            <AlertCircle size={32} className="text-error" />
+          </div>
+          <p className="text-text-secondary text-sm font-medium">提示词组装失败</p>
+          <div className="p-4 bg-error-muted/50 rounded-md border border-error/20 flex flex-col gap-2 max-w-lg">
+            <div className="flex items-center gap-2 text-sm text-error font-medium">
+              <AlertCircle size={16} />
+              {assembleError.code}
+            </div>
+            <p className="text-xs text-text-secondary">{assembleError.message}</p>
+            {assembleError.code === "DIRECTOR_SPEAKER_LIMIT_EXCEEDED" && (
+              <p className="text-xs text-text-tertiary">
+                MVP 阶段最多支持 {MAX_SPEAKERS} 位说话者。请返回编辑并减少 Speaker 数量。
+              </p>
+            )}
+          </div>
           <button
-            className="px-6 py-2 rounded-md text-sm font-medium transition-colors shadow-shadow-glow flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-            style={{
-              backgroundColor: generatePhase === "loading" ? "var(--color-bg-active)" : "var(--color-accent)",
-              color: "var(--color-bg-base)",
-            }}
-            onClick={handleGenerate}
-            disabled={transcript.trim().length === 0 || generatePhase === "loading"}
+            className="px-4 py-2 rounded-md text-sm font-medium bg-bg-surface hover:bg-bg-hover transition-colors border border-border"
+            onClick={handleBackToEdit}
           >
-            {generatePhase === "loading" ? (
-              <>
-                <Loader2 size={16} className="animate-spin" />
-                生成中...
-              </>
-            ) : generatePhase === "success" ? "重新生成" : generatePhase === "error" ? "重试" : "组装并生成"}
-            <span className="text-bg-base/70 text-xs border-l border-bg-base/20 pl-2">
-              预估 {costEstimate?.estimatedCost ?? "$0.0000"}
-            </span>
+            返回编辑
           </button>
         </div>
       </div>
-    </div>
-  );
+    );
+  }
+
+  return null;
 }

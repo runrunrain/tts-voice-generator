@@ -12,6 +12,7 @@ import { voiceProfile } from "../db/schema.js";
 import { eq, sql } from "drizzle-orm";
 import { isOpenRouterConfigured, requireApiKey } from "../services/key-resolver.js";
 import { OpenRouterProvider } from "../services/openrouter-provider.js";
+import { canonicalizeVoice } from "../utils/voice.js";
 
 const app = new Hono();
 
@@ -60,6 +61,7 @@ app.post("/api/voices/probe", async (c) => {
   }
 
   const { voice: voiceName, model, format } = parsed.data;
+  const canonicalName = canonicalizeVoice(voiceName);
   const db = getDb();
 
   const start = Date.now();
@@ -71,7 +73,7 @@ app.post("/api/voices/probe", async (c) => {
     const result = await provider.generateSpeech({
       model,
       input: "Hello, this is a voice test.",
-      voice: voiceName,
+      voice: canonicalName,
       responseFormat: format,
     });
 
@@ -87,14 +89,14 @@ app.post("/api/voices/probe", async (c) => {
           verifyError: null,
           updatedAt: new Date(),
         })
-        .where(eq(voiceProfile.name, voiceName))
+        .where(eq(voiceProfile.name, canonicalName))
         .run();
 
       // Read back the updated profile to return to frontend
-      const updatedProfile = db.select().from(voiceProfile).where(eq(voiceProfile.name, voiceName)).get();
+      const updatedProfile = db.select().from(voiceProfile).where(eq(voiceProfile.name, canonicalName)).get();
 
       return c.json({
-        voice: voiceName,
+        voice: canonicalName,
         verifiedStatus: "verified",
         latencyMs,
         probeJobId: null,
@@ -111,11 +113,11 @@ app.post("/api/voices/probe", async (c) => {
           verifyError: result.errorMessage,
           updatedAt: new Date(),
         })
-        .where(eq(voiceProfile.name, voiceName))
+        .where(eq(voiceProfile.name, canonicalName))
         .run();
 
       return c.json({
-        voice: voiceName,
+        voice: canonicalName,
         verifiedStatus: "failed",
         latencyMs,
         probeJobId: null,
@@ -125,7 +127,7 @@ app.post("/api/voices/probe", async (c) => {
   } catch (err) {
     const latencyMs = Date.now() - start;
     return c.json({
-      voice: voiceName,
+      voice: canonicalName,
       verifiedStatus: "failed",
       latencyMs,
       probeJobId: null,

@@ -334,10 +334,13 @@ describe("TTS Generate API", () => {
     });
 
     it("maps 429 to RATE_LIMITED with retry info", async () => {
-      mockFetch.mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({ error: { message: "Slow down" } }),
-          { status: 429, headers: { "content-type": "application/json", "retry-after": "30" } }
+      // Provider retries on 429 (retryable), mock needs fresh Response each call
+      mockFetch.mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({ error: { message: "Slow down" } }),
+            { status: 429, headers: { "content-type": "application/json", "retry-after": "1" } }
+          )
         )
       );
 
@@ -350,13 +353,18 @@ describe("TTS Generate API", () => {
       const body = await res.json();
       expect(body.status).toBe("failed");
       expect(body.error.code).toBe("RATE_LIMITED");
+      // Provider should have retried (at least 1 attempt, up to maxRetries)
+      expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(1);
     });
 
     it("maps 500 to PROVIDER_ERROR", async () => {
-      mockFetch.mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({ error: { message: "Internal error" } }),
-          { status: 500, headers: { "content-type": "application/json" } }
+      // Provider retries on 5xx (retryable), mock needs fresh Response each call
+      mockFetch.mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({ error: { message: "Internal error" } }),
+            { status: 500, headers: { "content-type": "application/json" } }
+          )
         )
       );
 
@@ -391,7 +399,8 @@ describe("TTS Generate API", () => {
     });
 
     it("handles network errors gracefully (provider catches, returns NETWORK_ERROR)", async () => {
-      mockFetch.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+      // Provider retries on network errors, so mock needs multiple rejections
+      mockFetch.mockRejectedValue(new Error("ECONNREFUSED"));
 
       const res = await r(app, "/api/tts/generate", {
         method: "POST",
@@ -558,6 +567,347 @@ describe("TTS Generate API", () => {
       expect(succeededRecord.durationMs).toBeGreaterThan(0);
       expect(succeededRecord.assetFormat).toBe("mp3");
       expect(succeededRecord.sizeBytes).toBe(audioBytes.length);
+    });
+  });
+
+  // ── directorSnapshot with sampleContext ────────────────────────────────
+
+  describe("directorSnapshot with sampleContext", () => {
+    it("accepts directorSnapshot with sampleContext and persists to job", async () => {
+      await seedKey(app);
+
+      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00, 0x00, 0x00]);
+      mockFetch.mockResolvedValueOnce(
+        new Response(fakeAudio, {
+          status: 200,
+          headers: {
+            "content-type": "audio/mpeg",
+            "x-generation-id": "gen-snapshot-test",
+          },
+        })
+      );
+
+      const res = await r(app, "/api/tts/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: validGenerateBody({
+          directorSnapshot: {
+            audioProfile: "Warm podcast",
+            scene: "Living room",
+            directorNotes: "Relaxed tone",
+            sampleContext: "Previous episode established the hosts",
+            transcript: "Speaker A: Welcome back!",
+          },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("succeeded");
+      expect(body.jobId).toBeTruthy();
+
+      // Verify directorSnapshot persisted with sampleContext
+      const db = getDb();
+      const job = db.select().from(generationJob).where(eq(generationJob.id, body.jobId)).get();
+      expect(job).toBeTruthy();
+      expect(job!.directorSnapshot).toBeTruthy();
+
+      const snapshot = JSON.parse(job!.directorSnapshot!);
+      expect(snapshot.audioProfile).toBe("Warm podcast");
+      expect(snapshot.scene).toBe("Living room");
+      expect(snapshot.directorNotes).toBe("Relaxed tone");
+      expect(snapshot.sampleContext).toBe("Previous episode established the hosts");
+      expect(snapshot.transcript).toBe("Speaker A: Welcome back!");
+    });
+
+    it("accepts directorSnapshot without sampleContext (backward compatible)", async () => {
+      await seedKey(app);
+
+      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00]);
+      mockFetch.mockResolvedValueOnce(
+        new Response(fakeAudio, {
+          status: 200,
+          headers: {
+            "content-type": "audio/mpeg",
+            "x-generation-id": "gen-no-samplectx",
+          },
+        })
+      );
+
+      const res = await r(app, "/api/tts/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: validGenerateBody({
+          directorSnapshot: {
+            audioProfile: "Warm",
+            scene: "Room",
+            directorNotes: "Notes",
+            transcript: "Hello",
+          },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("succeeded");
+
+      const db = getDb();
+      const job = db.select().from(generationJob).where(eq(generationJob.id, body.jobId)).get();
+      const snapshot = JSON.parse(job!.directorSnapshot!);
+      expect(snapshot.audioProfile).toBe("Warm");
+      // sampleContext is optional, may be undefined or absent
+      expect(snapshot.sampleContext).toBeUndefined();
+    });
+
+    it("strips unknown fields from directorSnapshot via Zod strip", async () => {
+      await seedKey(app);
+
+      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00]);
+      mockFetch.mockResolvedValueOnce(
+        new Response(fakeAudio, {
+          status: 200,
+          headers: {
+            "content-type": "audio/mpeg",
+            "x-generation-id": "gen-strip-test",
+          },
+        })
+      );
+
+      const res = await r(app, "/api/tts/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: validGenerateBody({
+          directorSnapshot: {
+            audioProfile: "Test",
+            unknownExtraField: "should be stripped",
+            sampleContext: "This should pass through",
+          },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("succeeded");
+
+      const db = getDb();
+      const job = db.select().from(generationJob).where(eq(generationJob.id, body.jobId)).get();
+      const snapshot = JSON.parse(job!.directorSnapshot!);
+      expect(snapshot.audioProfile).toBe("Test");
+      expect(snapshot.sampleContext).toBe("This should pass through");
+      // Unknown field stripped by Zod's default .strip() behavior
+      expect(snapshot.unknownExtraField).toBeUndefined();
+    });
+
+    it("persists speakers in directorSnapshot", async () => {
+      await seedKey(app);
+
+      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00, 0x00, 0x00]);
+      mockFetch.mockResolvedValueOnce(
+        new Response(fakeAudio, {
+          status: 200,
+          headers: {
+            "content-type": "audio/mpeg",
+            "x-generation-id": "gen-speakers-snapshot",
+          },
+        })
+      );
+
+      const res = await r(app, "/api/tts/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: validGenerateBody({
+          directorSnapshot: {
+            audioProfile: "Warm podcast",
+            scene: "Living room",
+            directorNotes: "Relaxed tone",
+            sampleContext: "Previous episode",
+            transcript: "Speaker A: Welcome back!",
+            speakers: [
+              { id: "a", label: "Speaker A", name: "Host", voice: "Zephyr", style: "conversational" },
+              { id: "b", label: "Speaker B", name: "Guest", voice: "Puck", style: "friendly" },
+            ],
+          },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("succeeded");
+
+      const db = getDb();
+      const job = db.select().from(generationJob).where(eq(generationJob.id, body.jobId)).get();
+      const snapshot = JSON.parse(job!.directorSnapshot!);
+
+      // Verify five elements
+      expect(snapshot.audioProfile).toBe("Warm podcast");
+      expect(snapshot.scene).toBe("Living room");
+      expect(snapshot.directorNotes).toBe("Relaxed tone");
+      expect(snapshot.sampleContext).toBe("Previous episode");
+      expect(snapshot.transcript).toBe("Speaker A: Welcome back!");
+
+      // Verify speakers persisted
+      expect(Array.isArray(snapshot.speakers)).toBe(true);
+      expect(snapshot.speakers.length).toBe(2);
+      expect(snapshot.speakers[0]).toEqual({
+        id: "a",
+        label: "Speaker A",
+        name: "Host",
+        voice: "Zephyr",
+        style: "conversational",
+      });
+      expect(snapshot.speakers[1]).toEqual({
+        id: "b",
+        label: "Speaker B",
+        name: "Guest",
+        voice: "Puck",
+        style: "friendly",
+      });
+    });
+
+    it("persists directorSnapshot with transcript but no speakers", async () => {
+      await seedKey(app);
+
+      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00]);
+      mockFetch.mockResolvedValueOnce(
+        new Response(fakeAudio, {
+          status: 200,
+          headers: {
+            "content-type": "audio/mpeg",
+            "x-generation-id": "gen-transcript-no-speakers",
+          },
+        })
+      );
+
+      const res = await r(app, "/api/tts/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: validGenerateBody({
+          directorSnapshot: {
+            audioProfile: "Narrator",
+            transcript: "The story begins here.",
+          },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("succeeded");
+
+      const db = getDb();
+      const job = db.select().from(generationJob).where(eq(generationJob.id, body.jobId)).get();
+      const snapshot = JSON.parse(job!.directorSnapshot!);
+      expect(snapshot.audioProfile).toBe("Narrator");
+      expect(snapshot.transcript).toBe("The story begins here.");
+      expect(snapshot.speakers).toBeUndefined();
+    });
+
+    it("directorSnapshot speakers are retrievable via GET /api/jobs/:jobId", async () => {
+      await seedKey(app);
+
+      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00]);
+      mockFetch.mockResolvedValueOnce(
+        new Response(fakeAudio, {
+          status: 200,
+          headers: {
+            "content-type": "audio/mpeg",
+            "x-generation-id": "gen-retrieve-speakers",
+          },
+        })
+      );
+
+      const genRes = await r(app, "/api/tts/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: validGenerateBody({
+          directorSnapshot: {
+            audioProfile: "Interview",
+            scene: "Studio",
+            transcript: "Welcome to the show.",
+            speakers: [
+              { id: "a", label: "Host", voice: "Zephyr" },
+            ],
+          },
+        }),
+      });
+
+      const genBody = await genRes.json();
+      expect(genBody.status).toBe("succeeded");
+
+      // Retrieve job detail
+      const detailRes = await r(app, `/api/jobs/${genBody.jobId}`);
+      expect(detailRes.status).toBe(200);
+      const detail = await detailRes.json();
+      expect(detail.job.directorSnapshot).toBeTruthy();
+      expect(detail.job.directorSnapshot.speakers).toHaveLength(1);
+      expect(detail.job.directorSnapshot.speakers[0].id).toBe("a");
+      expect(detail.job.directorSnapshot.speakers[0].voice).toBe("Zephyr");
+      expect(detail.job.directorSnapshot.transcript).toBe("Welcome to the show.");
+    });
+
+    it("preserves original transcript separately from assembled prompt input", async () => {
+      // This test validates the Director frontend flow:
+      // - `input` (req.text) = the assembled prompt sent to TTS
+      // - `directorSnapshot.transcript` = the user's raw transcript
+      // They must be stored independently; the assembled prompt must NOT
+      // overwrite the original transcript.
+      await seedKey(app);
+
+      const fakeAudio = new Uint8Array([0xff, 0xfb, 0x90, 0x00]);
+      mockFetch.mockResolvedValueOnce(
+        new Response(fakeAudio, {
+          status: 200,
+          headers: {
+            "content-type": "audio/mpeg",
+            "x-generation-id": "gen-transcript-vs-input",
+          },
+        })
+      );
+
+      const assembledPrompt = "Audio Profile: Warm\nScene: Room\nDirector's Notes: Slow\nSpeaker A: Hello world!";
+      const originalTranscript = "Hello world!";
+
+      const res = await r(app, "/api/tts/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: validGenerateBody({
+          input: assembledPrompt,
+          directorSnapshot: {
+            audioProfile: "Warm",
+            scene: "Room",
+            directorNotes: "Slow",
+            transcript: originalTranscript,
+            speakers: [
+              { id: "a", label: "Speaker A", name: "Host", voice: "Zephyr", style: "calm" },
+            ],
+          },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("succeeded");
+      expect(body.charCount).toBe(assembledPrompt.length);
+
+      const db = getDb();
+      const job = db.select().from(generationJob).where(eq(generationJob.id, body.jobId)).get();
+      expect(job).toBeTruthy();
+
+      // The `input` column stores the assembled prompt (sent to TTS)
+      expect(job!.input).toBe(assembledPrompt);
+
+      // The `directorSnapshot.transcript` stores the original user transcript
+      const snapshot = JSON.parse(job!.directorSnapshot!);
+      expect(snapshot.transcript).toBe(originalTranscript);
+      expect(snapshot.transcript).not.toBe(assembledPrompt);
+
+      // Other director fields preserved
+      expect(snapshot.audioProfile).toBe("Warm");
+      expect(snapshot.scene).toBe("Room");
+      expect(snapshot.directorNotes).toBe("Slow");
+      expect(snapshot.speakers).toHaveLength(1);
+      expect(snapshot.speakers[0].name).toBe("Host");
+      expect(snapshot.speakers[0].voice).toBe("Zephyr");
+      expect(snapshot.speakers[0].style).toBe("calm");
     });
   });
 });

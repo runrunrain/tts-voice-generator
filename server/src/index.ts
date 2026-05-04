@@ -26,6 +26,7 @@ import settingsRoutes from "./routes/settings.js";
 import voicesRoutes from "./routes/voices.js";
 import ttsRoutes from "./routes/tts.js";
 import historyRoutes from "./routes/history.js";
+import promptsRoutes from "./routes/prompts.js";
 
 // ─── Create Hono App ─────────────────────────────────────────────────────────
 
@@ -43,6 +44,7 @@ app.route("/", settingsRoutes);
 app.route("/", voicesRoutes);
 app.route("/", ttsRoutes);
 app.route("/", historyRoutes);
+app.route("/", promptsRoutes);
 
 // ─── 404 Fallback ────────────────────────────────────────────────────────────
 

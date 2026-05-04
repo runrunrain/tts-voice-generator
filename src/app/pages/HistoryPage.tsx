@@ -1,6 +1,6 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { Link } from "react-router";
-import { Play, Square, Download, Copy, ChevronRight, Search } from "lucide-react";
+import { Play, Square, Download, Copy, ChevronRight, Search, Loader2, AlertCircle, RefreshCw } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import type { HistoryStatus, HistorySource } from "../types";
 
@@ -11,6 +11,9 @@ export function HistoryPage() {
     historyFilter,
     setHistoryFilter,
     refreshHistory,
+    historyLoading,
+    historyError,
+    clearHistoryError,
   } = useAppState();
 
   // Local UI states not covered by context filter
@@ -20,6 +23,13 @@ export function HistoryPage() {
   );
   const [playingId, setPlayingId] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Auto-select first record when records load and no record is currently selected
+  useEffect(() => {
+    if (!activeRecord && historyRecords.length > 0) {
+      setActiveRecord(historyRecords[0].id);
+    }
+  }, [historyRecords, activeRecord]);
 
   const handlePlay = useCallback((recordId: string, audioUrl: string | null | undefined) => {
     if (!audioUrl) return;
@@ -114,10 +124,13 @@ export function HistoryPage() {
             }}
           >
             <option value="">全部音色</option>
-            <option value="alloy">alloy</option>
-            <option value="nova">nova</option>
-            <option value="echo">echo</option>
-            <option value="shimmer">shimmer</option>
+            <option value="Zephyr">Zephyr</option>
+            <option value="Puck">Puck</option>
+            <option value="Charon">Charon</option>
+            <option value="Kore">Kore</option>
+            <option value="Fenrir">Fenrir</option>
+            <option value="Leda">Leda</option>
+            <option value="alloy">alloy (legacy)</option>
           </select>
           <select
             className="bg-bg-surface border border-border rounded px-2 py-1 outline-none text-sm text-text-primary focus:border-border-focus"
@@ -181,7 +194,26 @@ export function HistoryPage() {
 
       {/* List */}
       <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-[2px]">
-        {historyRecords.length === 0 && searchQuery === "" && !historyFilter.voice && !historyFilter.status && !historyFilter.source ? (
+        {/* Loading state */}
+        {historyLoading && historyRecords.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-64 text-center">
+            <Loader2 size={24} className="animate-spin text-text-tertiary mb-3" />
+            <p className="text-text-tertiary text-sm">正在加载历史记录...</p>
+          </div>
+        ) : historyError && historyRecords.length === 0 ? (
+          /* Error state -- no stale data to show */
+          <div className="flex flex-col items-center justify-center h-64 text-center">
+            <AlertCircle size={24} className="text-error mb-3" />
+            <p className="text-error text-sm font-medium">加载历史记录失败</p>
+            <p className="text-text-tertiary text-xs mt-1">{historyError}</p>
+            <button
+              className="mt-4 flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium bg-bg-surface border border-border hover:bg-bg-hover transition-colors"
+              onClick={clearHistoryError}
+            >
+              <RefreshCw size={14} /> 重试
+            </button>
+          </div>
+        ) : historyRecords.length === 0 && searchQuery === "" && !historyFilter.voice && !historyFilter.status && !historyFilter.source ? (
           <div className="flex flex-col items-center justify-center h-64 text-center">
             <p className="text-text-tertiary text-sm">暂无历史记录</p>
             <p className="text-text-tertiary text-xs mt-1">完成语音生成后记录将出现在此处</p>
@@ -192,7 +224,28 @@ export function HistoryPage() {
             <p className="text-text-tertiary text-xs mt-1">调整筛选条件或清除筛选</p>
           </div>
         ) : (
-          displayedRecords.map((r) => (
+          <>
+            {/* Inline error banner when stale data is visible */}
+            {historyError && historyRecords.length > 0 && (
+              <div className="flex items-center gap-3 px-4 py-2 mb-2 rounded-md bg-error-muted/50 border border-error/20 text-sm">
+                <AlertCircle size={16} className="text-error shrink-0" />
+                <span className="text-error text-xs">刷新失败: {historyError}</span>
+                <button
+                  className="ml-auto flex items-center gap-1 text-xs text-text-secondary hover:text-text-primary transition-colors"
+                  onClick={clearHistoryError}
+                >
+                  <RefreshCw size={12} /> 重试
+                </button>
+              </div>
+            )}
+            {/* Inline loading indicator when refreshing with existing data */}
+            {historyLoading && historyRecords.length > 0 && (
+              <div className="flex items-center gap-2 px-4 py-1.5 mb-2 rounded-md bg-accent-muted/30 border border-accent/10 text-xs text-text-tertiary">
+                <Loader2 size={12} className="animate-spin" />
+                正在刷新...
+              </div>
+            )}
+          {displayedRecords.map((r) => (
             <div
               key={r.id}
               className={`group flex items-center px-4 h-14 rounded-md cursor-pointer transition-colors ${
@@ -271,6 +324,8 @@ export function HistoryPage() {
               </div>
             </div>
           ))
+          }
+          </>
         )}
       </div>
 

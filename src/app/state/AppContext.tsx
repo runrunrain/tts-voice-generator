@@ -20,6 +20,10 @@ import type {
   HistoryRecord,
   VoiceProfile,
   TtsServiceAdapter,
+  AssemblePromptRequest,
+  AssemblePromptResponse,
+  AssemblePhase,
+  AssembleResult,
 } from "../types";
 import { httpAdapter } from "../services/httpAdapter";
 
@@ -38,6 +42,12 @@ interface AppState {
   costEstimate: CostEstimate | null;
   estimateCost: (charCount: number, format: AudioFormat) => void;
 
+  // Director prompt assembly
+  assembleResult: AssembleResult | null;
+  assemblePhase: AssemblePhase;
+  assemblePrompt: (req: AssemblePromptRequest) => Promise<AssemblePromptResponse | null>;
+  resetAssemble: () => void;
+
   // Adapter passthrough
   adapter: TtsServiceAdapter;
 
@@ -49,6 +59,14 @@ interface AppState {
 
   // Voices
   voices: VoiceProfile[];
+  /** Whether a voices fetch is in progress */
+  voicesLoading: boolean;
+  /** Last voices fetch error (null when no error, cleared on next successful fetch) */
+  voicesError: string | null;
+  /** Whether voices fetch has completed at least once (success or failure; even if empty array) */
+  voicesLoaded: boolean;
+  /** Retry fetching voices after an error */
+  refreshVoices: () => void;
 
   // History
   historyRecords: HistoryRecord[];
@@ -56,6 +74,12 @@ interface AppState {
   historyFilter: HistoryFilter;
   setHistoryFilter: (filter: Partial<HistoryFilter>) => void;
   refreshHistory: () => void;
+  /** Whether a history fetch is in progress */
+  historyLoading: boolean;
+  /** Last history fetch error (null when no error, cleared on next successful fetch) */
+  historyError: string | null;
+  /** Clear history error and retry fetching */
+  clearHistoryError: () => void;
 
   // Demo metadata (kept for backward compat, always 0 with real backend)
   demoTodayCount: number;
@@ -135,6 +159,61 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const estimateCost = useCallback((charCount: number, format: AudioFormat) => {
     const est = httpAdapter.estimateCost(charCount, format);
     setCostEstimate(est);
+  }, []);
+
+  // --- Director Assemble state ---
+  const [assembleResult, setAssembleResult] = useState<AssembleResult | null>(null);
+  const [assemblePhase, setAssemblePhase] = useState<AssemblePhase>("idle");
+
+  const assemblePromptAction = useCallback(async (req: AssemblePromptRequest): Promise<AssemblePromptResponse | null> => {
+    if (!httpAdapter.assemblePrompt) return null;
+
+    setAssemblePhase("loading");
+    setAssembleResult(null);
+
+    try {
+      const response = await httpAdapter.assemblePrompt(req);
+
+      if (response.ok) {
+        setAssemblePhase("success");
+        setAssembleResult({ phase: "success", response });
+      } else {
+        setAssemblePhase("error");
+        setAssembleResult({
+          phase: "error",
+          response,
+          error: {
+            code: response.error.code,
+            message: response.error.message,
+          },
+        });
+      }
+
+      return response;
+    } catch (err) {
+      const errorResp: AssemblePromptResponse = {
+        ok: false,
+        requestId: `err-${Date.now().toString(36)}`,
+        error: {
+          code: "NETWORK_ERROR",
+          message: err instanceof Error ? err.message : "Assembly failed",
+          category: "internal",
+          retryable: true,
+        },
+      };
+      setAssemblePhase("error");
+      setAssembleResult({
+        phase: "error",
+        response: errorResp,
+        error: { code: "NETWORK_ERROR", message: errorResp.error.message },
+      });
+      return errorResp;
+    }
+  }, []);
+
+  const resetAssemble = useCallback(() => {
+    setAssemblePhase("idle");
+    setAssembleResult(null);
   }, []);
 
   // --- Settings ---
@@ -249,19 +328,48 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   // --- Voices ---
   const [voices, setVoices] = useState<VoiceProfile[]>([]);
+  const [voicesLoading, setVoicesLoading] = useState(false);
+  const [voicesError, setVoicesError] = useState<string | null>(null);
+  const [voicesLoaded, setVoicesLoaded] = useState(false);
+  const voicesRequestIdRef = useRef(0);
+
+  const loadVoices = useCallback(() => {
+    if (!httpAdapter.listVoicesAsync) return;
+
+    const requestId = ++voicesRequestIdRef.current;
+    setVoicesLoading(true);
+    setVoicesError(null);
+
+    httpAdapter.listVoicesAsync().then((result) => {
+      // Only apply if this is still the latest request
+      if (requestId !== voicesRequestIdRef.current) return;
+      setVoices(result);
+      setVoicesLoading(false);
+      setVoicesLoaded(true);
+      setVoicesError(null);
+    }).catch((err) => {
+      if (requestId !== voicesRequestIdRef.current) return;
+      setVoicesLoading(false);
+      setVoicesLoaded(true);
+      const message = err instanceof Error ? err.message : "Failed to load voices";
+      setVoicesError(message);
+    });
+  }, []);
+
+  const refreshVoices = useCallback(() => {
+    loadVoices();
+  }, [loadVoices]);
 
   // Load voices from backend on mount
   useEffect(() => {
-    if (httpAdapter.listVoicesAsync) {
-      httpAdapter.listVoicesAsync().then(setVoices).catch(() => {
-        // Backend not available, keep empty list
-      });
-    }
-  }, []);
+    loadVoices();
+  }, [loadVoices]);
 
   // --- History ---
   const [historyRecords, setHistoryRecords] = useState<HistoryRecord[]>([]);
   const [historyTotalPages, setHistoryTotalPages] = useState(1);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyFilter, setHistoryFilterState] = useState<HistoryFilter>({
     page: 1,
     pageSize: 20,
@@ -276,16 +384,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const historyRequestIdRef = useRef(0);
+
   const refreshHistory = useCallback(() => {
-    if (httpAdapter.listHistoryAsync) {
-      httpAdapter.listHistoryAsync(historyFilter).then((result) => {
-        setHistoryRecords(result.records);
-        setHistoryTotalPages(result.totalPages);
-      }).catch(() => {
-        // Backend not available
-      });
-    }
+    if (!httpAdapter.listHistoryAsync) return;
+
+    const requestId = ++historyRequestIdRef.current;
+    setHistoryLoading(true);
+    setHistoryError(null);
+
+    httpAdapter.listHistoryAsync(historyFilter).then((result) => {
+      // Only apply if this is still the latest request
+      if (requestId !== historyRequestIdRef.current) return;
+      setHistoryRecords(result.records);
+      setHistoryTotalPages(result.totalPages);
+      setHistoryLoading(false);
+      setHistoryError(null);
+    }).catch((err) => {
+      if (requestId !== historyRequestIdRef.current) return;
+      setHistoryLoading(false);
+      const message = err instanceof Error ? err.message : "Failed to load history";
+      setHistoryError(message);
+      // Do not wipe existing records on error -- user can still see stale data
+    });
   }, [historyFilter]);
+
+  const clearHistoryError = useCallback(() => {
+    setHistoryError(null);
+    refreshHistory();
+  }, [refreshHistory]);
 
   // Load history on mount and whenever filter changes
   useEffect(() => {
@@ -303,17 +430,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
     lastRequest,
     costEstimate,
     estimateCost,
+    assembleResult,
+    assemblePhase,
+    assemblePrompt: assemblePromptAction,
+    resetAssemble,
     adapter: httpAdapter,
     settings,
     updateSettings,
     saveSettings,
     testConnection,
     voices,
+    voicesLoading,
+    voicesError,
+    voicesLoaded,
+    refreshVoices,
     historyRecords,
     historyTotalPages,
     historyFilter,
     setHistoryFilter,
     refreshHistory,
+    historyLoading,
+    historyError,
+    clearHistoryError,
     demoTodayCount,
   };
 

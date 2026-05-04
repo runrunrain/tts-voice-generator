@@ -24,7 +24,7 @@ export function GeneratePage() {
   // Voice options from backend (with fallback to a minimal list)
   const voiceOptions = voices.length > 0
     ? voices.map((v) => v.name)
-    : ["alloy", "echo", "nova", "shimmer", "fable", "onyx"];
+    : ["Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda"];
 
   // Real-time cost estimation
   useEffect(() => {

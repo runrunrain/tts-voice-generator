@@ -1,0 +1,23 @@
+{
+  "taskId": "20260504-123050-phase0-repair-review",
+  "timestamp": "2026-05-04T12:30:50+08:00",
+  "agent": "reviewer",
+  "projectId": "tts-voice-generator",
+  "taskBrief": "phase0-repair-review",
+  "status": "completed",
+  "tags": ["phase0", "review", "voice-canonicalization", "smoke-preflight"],
+  "relatedFiles": [
+    "server/src/utils/voice.ts",
+    "server/src/routes/settings.ts",
+    "server/src/routes/tts.ts",
+    "server/src/routes/voices.ts",
+    "server/__tests__/smoke-preflight.test.ts",
+    "src/app/pages/GeneratePage.tsx",
+    "src/app/pages/DirectorPage.tsx",
+    "src/app/pages/VoicesPage.tsx",
+    "src/app/services/demoAdapter.ts"
+  ],
+  "nextSteps": {
+    "suggestedAction": "Allow Phase 1 after minor documentation cleanup; keep real OpenRouter smoke unexecuted until explicit gate."
+  }
+}

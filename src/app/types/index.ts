@@ -34,6 +34,13 @@ export interface GenerateRequest {
   audioProfile?: string;
   scene?: string;
   directorNotes?: string;
+  sampleContext?: string;
+  /**
+   * Original user transcript (before prompt assembly).
+   * Stored in directorSnapshot.transcript so the assembled prompt
+   * (passed as `text`) does not overwrite the user's raw input.
+   */
+  transcript?: string;
 }
 
 export type GeneratePhase = "idle" | "loading" | "success" | "error";
@@ -124,6 +131,80 @@ export interface CostEstimate {
   formula: string;
 }
 
+// ─── Prompt Assembly (Director) ──────────────────────────────────────────────
+
+export interface AssembleSpeakerInput {
+  id: string;
+  label: string;
+  name?: string;
+  voice?: string;
+  style?: string;
+}
+
+export interface AssemblePromptRequest {
+  audioProfile?: string;
+  scene?: string;
+  directorNotes?: string;
+  sampleContext?: string;
+  transcript: string;
+  speakers?: AssembleSpeakerInput[];
+}
+
+export interface PromptWarning {
+  code: string;
+  message: string;
+  field?: string;
+}
+
+export interface NormalizedSpeaker {
+  id: string;
+  label: string;
+  name: string;
+  voice: string;
+  style: string;
+  wasLegacyAlias: boolean;
+}
+
+export interface AssemblePromptSuccess {
+  ok: true;
+  requestId: string;
+  prompt: string;
+  warnings: PromptWarning[];
+  normalized: {
+    speakers: NormalizedSpeaker[];
+    audioProfile: string;
+    scene: string;
+    directorNotes: string;
+    sampleContext: string;
+    transcript: string;
+  };
+}
+
+export interface AssemblePromptError {
+  ok: false;
+  requestId: string;
+  error: {
+    code: string;
+    message: string;
+    category?: string;
+    retryable?: boolean;
+    metadata?: Record<string, unknown>;
+  };
+}
+
+export type AssemblePromptResponse = AssemblePromptSuccess | AssemblePromptError;
+
+export type AssemblePhase = "idle" | "loading" | "success" | "error";
+
+export interface AssembleResult {
+  phase: AssemblePhase;
+  response: AssemblePromptResponse | null;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
 // ─── Demo / Adapter Service Contract ─────────────────────────────────────────
 
 export interface TtsServiceAdapter {
@@ -137,4 +218,6 @@ export interface TtsServiceAdapter {
   /** Async history list for backend-backed adapters */
   listHistoryAsync?(filter: HistoryFilter): Promise<{ records: HistoryRecord[]; totalPages: number; totalRecords?: number }>;
   estimateCost(charCount: number, format: AudioFormat): CostEstimate;
+  /** Director prompt assembly -- calls POST /api/prompts/assemble */
+  assemblePrompt?(req: AssemblePromptRequest): Promise<AssemblePromptResponse>;
 }

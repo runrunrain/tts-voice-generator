@@ -5,10 +5,15 @@
  * Flow:
  * 1. Validate request body
  * 2. Check API Key is configured
- * 3. Call OpenRouter Provider
- * 4. On success: save job + audio asset + write file
- * 5. On failure: save job with error, no file write
- * 6. Return JSON response
+ * 3. Check concurrency limit
+ * 4. Call OpenRouter Provider (with retry)
+ * 5. On success: save job + audio asset + write file (atomic)
+ * 6. On failure: save job with error, no file write
+ * 7. Return normalized JSON response
+ *
+ * Error response format (backward compatible):
+ * - Legacy fields preserved: status, jobId, error.code, error.message, audioUrl
+ * - New fields added: ok, requestId, error.retryable, error.category, error.metadata
  */
 
 import { Hono } from "hono";
@@ -25,6 +30,8 @@ import {
   getMimeType,
   getExtension,
 } from "../utils/audio-fs.js";
+import { canonicalizeVoice } from "../utils/voice.js";
+import { acquireSlot, releaseSlot } from "../services/concurrency.js";
 
 const app = new Hono();
 
@@ -40,29 +47,47 @@ const GenerateSchema = z.object({
     audioProfile: z.string().optional(),
     scene: z.string().optional(),
     directorNotes: z.string().optional(),
+    sampleContext: z.string().optional(),
     transcript: z.string().optional(),
+    speakers: z.array(z.object({
+      id: z.string(),
+      label: z.string(),
+      name: z.string().optional(),
+      voice: z.string().optional(),
+      style: z.string().optional(),
+    })).optional(),
   }).optional().nullable(),
 });
 
 // ─── POST /api/tts/generate ──────────────────────────────────────────────────
 
 app.post("/api/tts/generate", async (c) => {
+  const requestId = uuidv4();
+
   // 1. Parse and validate request
   const rawBody = await c.req.json();
   const parsed = GenerateSchema.safeParse(rawBody);
 
   if (!parsed.success) {
     return c.json({
+      ok: false,
+      requestId,
       jobId: null,
       status: "failed",
       error: {
         code: "VALIDATION_ERROR",
-        message: parsed.error.flatten(),
+        message: "Request validation failed",
+        category: "validation" as const,
+        retryable: false,
+        metadata: { issues: parsed.error.flatten() },
       },
     }, 400);
   }
 
   const req = parsed.data;
+
+  // Canonicalize voice: map legacy aliases (e.g. alloy -> Zephyr)
+  const canonicalVoice = canonicalizeVoice(req.voice);
 
   // 2. Check API Key
   if (!isOpenRouterConfigured()) {
@@ -72,7 +97,7 @@ app.post("/api/tts/generate", async (c) => {
     db.insert(generationJob).values({
       id: jobId,
       model: req.model,
-      voice: req.voice,
+      voice: canonicalVoice,
       responseFormat: req.responseFormat,
       input: req.input,
       inputCharCount: req.input.length,
@@ -84,28 +109,33 @@ app.post("/api/tts/generate", async (c) => {
     }).run();
 
     return c.json({
+      ok: false,
+      requestId,
       jobId,
       status: "failed",
       error: {
         code: "MISSING_API_KEY",
         message: "OpenRouter API Key is not configured. Please go to Settings and configure your API key.",
+        category: "auth" as const,
+        retryable: false,
       },
       charCount: req.input.length,
       createdAt: new Date().toISOString(),
     }, 200);
   }
 
-  // 3. Read maxCharsPerRequest from settings
+  // 3. Read settings for limits
   const db = getDb();
   const settingsRow = db.select().from(settings).where(eq(settings.id, 1)).get();
   const maxChars = settingsRow?.maxCharsPerRequest || 5000;
+  const maxConcurrent = settingsRow?.maxConcurrentJobs || 2;
 
   if (req.input.length > maxChars) {
     const jobId = uuidv4();
     db.insert(generationJob).values({
       id: jobId,
       model: req.model,
-      voice: req.voice,
+      voice: canonicalVoice,
       responseFormat: req.responseFormat,
       input: req.input,
       inputCharCount: req.input.length,
@@ -117,25 +147,44 @@ app.post("/api/tts/generate", async (c) => {
     }).run();
 
     return c.json({
+      ok: false,
+      requestId,
       jobId,
       status: "failed",
       error: {
         code: "TEXT_TOO_LONG",
         message: `Input text exceeds maximum length of ${maxChars} characters (got ${req.input.length}).`,
+        category: "validation" as const,
+        retryable: false,
+        metadata: { maxChars, actualChars: req.input.length },
       },
       charCount: req.input.length,
       createdAt: new Date().toISOString(),
     }, 400);
   }
 
-  // 4. Create pending job
+  // 4. Concurrency check (rejection-based, no queue)
+  const slotResult = acquireSlot(maxConcurrent);
+  if (!slotResult.allowed) {
+    return c.json({
+      ok: false,
+      requestId, // Use route-level requestId for semantic consistency
+      jobId: null,
+      status: "failed",
+      error: slotResult.error,
+      charCount: req.input.length,
+      createdAt: new Date().toISOString(),
+    }, 503); // Service Unavailable (temporary)
+  }
+
+  // 5. Create pending job
   const jobId = uuidv4();
   const estimatedCost = estimateCost(req.input.length);
 
   db.insert(generationJob).values({
     id: jobId,
     model: req.model,
-    voice: req.voice,
+    voice: canonicalVoice,
     responseFormat: req.responseFormat,
     input: req.input,
     inputCharCount: req.input.length,
@@ -147,7 +196,7 @@ app.post("/api/tts/generate", async (c) => {
     createdAt: new Date(),
   }).run();
 
-  // 5. Call OpenRouter Provider
+  // 6. Call OpenRouter Provider (with built-in retry)
   try {
     const apiKey = requireApiKey();
     const provider = new OpenRouterProvider(apiKey);
@@ -155,7 +204,7 @@ app.post("/api/tts/generate", async (c) => {
     const result = await provider.generateSpeech({
       model: req.model,
       input: req.input,
-      voice: req.voice,
+      voice: canonicalVoice,
       responseFormat: req.responseFormat,
       providerOptions: req.providerOptions || undefined,
     });
@@ -166,7 +215,7 @@ app.post("/api/tts/generate", async (c) => {
       const mimeType = getMimeType(req.responseFormat);
       const now = new Date();
 
-      // Write audio file to disk
+      // Write audio file atomically (temp file + rename)
       const filePath = writeAudioFile(jobId, ext, result.audioBuffer, now);
       const sha256 = computeSha256(result.audioBuffer);
 
@@ -199,7 +248,12 @@ app.post("/api/tts/generate", async (c) => {
 
       const assetId = Number(assetResult.lastInsertRowid);
 
+      // Release concurrency slot
+      releaseSlot(slotResult.slotId);
+
       return c.json({
+        ok: true,
+        requestId,
         jobId,
         status: "succeeded",
         generationId: result.generationId,
@@ -225,13 +279,20 @@ app.post("/api/tts/generate", async (c) => {
         .where(eq(generationJob.id, jobId))
         .run();
 
+      // Release concurrency slot
+      releaseSlot(slotResult.slotId);
+
       return c.json({
+        ok: false,
+        requestId,
         jobId,
         status: "failed",
         error: {
           code: result.errorCode,
           message: result.errorMessage,
-          metadata: result.errorMetadata,
+          category: classifyErrorCategory(result.errorCode),
+          retryable: result.retryable,
+          metadata: result.errorMetadata || undefined,
         },
         charCount: req.input.length,
         createdAt: new Date().toISOString(),
@@ -239,6 +300,10 @@ app.post("/api/tts/generate", async (c) => {
     }
   } catch (err) {
     // ─── Unexpected error ─────────────────────────────────────────
+
+    // Release concurrency slot
+    releaseSlot(slotResult.slotId);
+
     db.update(generationJob)
       .set({
         status: "failed",
@@ -250,11 +315,15 @@ app.post("/api/tts/generate", async (c) => {
       .run();
 
     return c.json({
+      ok: false,
+      requestId,
       jobId,
       status: "failed",
       error: {
         code: "INTERNAL_ERROR",
         message: err instanceof Error ? err.message : "An unexpected error occurred",
+        category: "internal" as const,
+        retryable: false,
       },
       charCount: req.input.length,
       createdAt: new Date().toISOString(),
@@ -272,6 +341,38 @@ app.post("/api/tts/generate", async (c) => {
 function estimateCost(charCount: number): string {
   const cost = charCount * 0.000021;
   return `$${cost.toFixed(4)}`;
+}
+
+/**
+ * Classify an error code into a category for frontend handling.
+ */
+function classifyErrorCategory(code: string): "validation" | "auth" | "throttle" | "upstream" | "internal" | "unknown" {
+  switch (code) {
+    case "VALIDATION_ERROR":
+    case "TEXT_TOO_LONG":
+    case "BAD_REQUEST":
+    case "MODEL_NOT_FOUND":
+      return "validation";
+    case "MISSING_API_KEY":
+    case "INVALID_API_KEY":
+    case "INSUFFICIENT_CREDITS":
+    case "FORBIDDEN":
+      return "auth";
+    case "RATE_LIMITED":
+    case "CONCURRENCY_LIMIT":
+      return "throttle";
+    case "PROVIDER_ERROR":
+    case "BAD_GATEWAY":
+    case "SERVICE_UNAVAILABLE":
+    case "NETWORK_ERROR":
+    case "REQUEST_TIMEOUT":
+      return "upstream";
+    case "INTERNAL_ERROR":
+    case "UNEXPECTED_RESPONSE_TYPE":
+      return "internal";
+    default:
+      return "unknown";
+  }
 }
 
 export default app;

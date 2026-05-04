@@ -1,0 +1,25 @@
+{
+  "taskId": "20260504-123000-phase0-voice-canonicalization-smoke-preflight",
+  "timestamp": "2026-05-04T12:30:00Z",
+  "agent": "coder",
+  "projectId": "tts-voice-generator",
+  "taskBrief": "Phase 0 修复：voice canonicalization (alloy->Zephyr)、PUT settings 归一化、TTS/voices probe canonical voice、前端 fallback 更新、smoke preflight 脚本、根目录 server:build 门禁修复",
+  "status": "completed",
+  "tags": ["phase0", "voice-canonicalization", "smoke-preflight", "defaultVoice", "alloy-alias"],
+  "relatedFiles": [
+    "server/src/utils/voice.ts",
+    "server/src/routes/settings.ts",
+    "server/src/routes/tts.ts",
+    "server/src/routes/voices.ts",
+    "server/__tests__/smoke-preflight.test.ts",
+    "package.json",
+    "src/app/pages/GeneratePage.tsx",
+    "src/app/pages/DirectorPage.tsx",
+    "src/app/pages/VoicesPage.tsx",
+    "src/app/services/demoAdapter.ts"
+  ],
+  "nextSteps": {
+    "suggestedAgent": "reviewer",
+    "suggestedAction": "审核 Phase 0 代码修复：voice canonicalization 模块、前端 fallback、smoke preflight 测试"
+  }
+}

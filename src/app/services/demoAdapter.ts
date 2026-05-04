@@ -36,20 +36,20 @@ function generateJobId(): string {
 }
 
 const VOICE_CATALOG: VoiceProfile[] = [
-  { name: "alloy", isDefault: true, role: "通用中性音色", provider: "OpenRouter", status: "success", lastVerified: "2026-05-03", verifyDuration: "2.3s" },
-  { name: "echo", isDefault: false, role: "成熟男性", provider: "OpenRouter", status: "success", lastVerified: "2026-05-03", verifyDuration: "1.8s" },
-  { name: "nova", isDefault: false, role: "女性知性", provider: "OpenRouter", status: "success", lastVerified: "2026-05-03", verifyDuration: "2.1s" },
-  { name: "shimmer", isDefault: false, role: "温暖女性", provider: "OpenRouter", status: "success", lastVerified: "2026-05-03", verifyDuration: "1.9s" },
-  { name: "fable", isDefault: false, role: "年轻男性", provider: "OpenRouter", status: "success", lastVerified: "2026-05-02", verifyDuration: "2.5s" },
-  { name: "onyx", isDefault: false, role: "深沉男性", provider: "OpenRouter", status: "success", lastVerified: "2026-05-02", verifyDuration: "2.0s" },
+  { name: "Zephyr", isDefault: true, role: "明亮", provider: "OpenRouter", status: "success", lastVerified: "2026-05-03", verifyDuration: "2.3s" },
+  { name: "Puck", isDefault: false, role: "欢快", provider: "OpenRouter", status: "success", lastVerified: "2026-05-03", verifyDuration: "1.8s" },
+  { name: "Charon", isDefault: false, role: "信息丰富", provider: "OpenRouter", status: "success", lastVerified: "2026-05-03", verifyDuration: "2.1s" },
+  { name: "Kore", isDefault: false, role: "坚定", provider: "OpenRouter", status: "success", lastVerified: "2026-05-03", verifyDuration: "1.9s" },
+  { name: "Fenrir", isDefault: false, role: "兴奋", provider: "OpenRouter", status: "success", lastVerified: "2026-05-02", verifyDuration: "2.5s" },
+  { name: "Leda", isDefault: false, role: "青春", provider: "OpenRouter", status: "success", lastVerified: "2026-05-02", verifyDuration: "2.0s" },
   { name: "custom-1", isDefault: false, role: "自定义角色", provider: "Local", status: "warning", lastVerified: "2026-05-02" },
   { name: "custom-fail", isDefault: false, role: "未知", provider: "Local", status: "error", lastVerified: "2026-05-01" },
 ];
 
 const DEMO_HISTORY: HistoryRecord[] = [
-  { id: "demo-abc123", text: "从前有个叫小明的小朋友，有一天他走进了一片神秘的森林...", voice: "alloy", format: "mp3", date: "2026-05-03 14:30", source: "用户", duration: "3.2s", status: "success", cost: "$0.0004", charCount: 247 },
-  { id: "demo-def456", text: "Welcome to the future of voice generation. This is a sample output for demonstration purposes.", voice: "nova", format: "mp3", date: "2026-05-03 12:15", source: "Agent", duration: "4.5s", status: "success", cost: "$0.0006", charCount: 89 },
-  { id: "demo-err789", text: "测试文本用于验证 API 的容错能力，特别是长文本截断...", voice: "alloy", format: "pcm", date: "2026-05-03 10:05", source: "用户", duration: "0.0s", status: "error", error: "RATE_LIMITED" },
+  { id: "demo-abc123", text: "从前有个叫小明的小朋友，有一天他走进了一片神秘的森林...", voice: "Zephyr", format: "mp3", date: "2026-05-03 14:30", source: "用户", duration: "3.2s", status: "success", cost: "$0.0004", charCount: 247 },
+  { id: "demo-def456", text: "Welcome to the future of voice generation. This is a sample output for demonstration purposes.", voice: "Puck", format: "mp3", date: "2026-05-03 12:15", source: "Agent", duration: "4.5s", status: "success", cost: "$0.0006", charCount: 89 },
+  { id: "demo-err789", text: "测试文本用于验证 API 的容错能力，特别是长文本截断...", voice: "Zephyr", format: "pcm", date: "2026-05-03 10:05", source: "用户", duration: "0.0s", status: "error", error: "RATE_LIMITED" },
 ];
 
 // ─── Generate Demo Audio Blob ────────────────────────────────────────────────

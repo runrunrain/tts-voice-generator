@@ -22,6 +22,8 @@ import type {
   VoiceProfile,
   VoiceStatus,
   TtsServiceAdapter,
+  AssemblePromptRequest,
+  AssemblePromptResponse,
 } from "../types";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -82,11 +84,24 @@ export const httpAdapter: TtsServiceAdapter = {
         responseFormat: req.format,
       };
 
-      if (req.audioProfile || req.scene || req.directorNotes) {
+      const hasDirectorFields = req.audioProfile?.trim() || req.scene?.trim() || req.directorNotes?.trim() || req.sampleContext?.trim() || req.transcript?.trim() || (req.speakers && req.speakers.length > 0);
+      if (hasDirectorFields) {
         body.directorSnapshot = {
-          audioProfile: req.audioProfile,
-          scene: req.scene,
-          directorNotes: req.directorNotes,
+          audioProfile: req.audioProfile?.trim() || undefined,
+          scene: req.scene?.trim() || undefined,
+          directorNotes: req.directorNotes?.trim() || undefined,
+          sampleContext: req.sampleContext?.trim() || undefined,
+          // Preserve the original user transcript, not the assembled prompt.
+          // req.transcript is the raw user input; req.text is the assembled TTS prompt.
+          // Fall back to req.text only when no explicit transcript was provided.
+          transcript: req.transcript?.trim() || req.text,
+          speakers: req.speakers?.map((s) => ({
+            id: s.id,
+            label: s.label,
+            name: s.name || undefined,
+            voice: s.voice || undefined,
+            style: s.style || undefined,
+          })),
         };
       }
 
@@ -210,34 +225,30 @@ export const httpAdapter: TtsServiceAdapter = {
   },
 
   async listVoicesAsync(): Promise<VoiceProfile[]> {
-    try {
-      const result = await apiFetch<{
-        voices: Array<{
-          id: number;
-          name: string;
-          provider: string;
-          model: string | null;
-          role: string | null;
-          source: string;
-          verifiedStatus: string;
-          lastVerified: number | null;
-          verifyDuration: number | null;
-        }>;
-        stats: Record<string, number>;
-      }>("/api/voices");
+    const result = await apiFetch<{
+      voices: Array<{
+        id: number;
+        name: string;
+        provider: string;
+        model: string | null;
+        role: string | null;
+        source: string;
+        verifiedStatus: string;
+        lastVerified: number | null;
+        verifyDuration: number | null;
+      }>;
+      stats: Record<string, number>;
+    }>("/api/voices");
 
-      return result.voices.map((v) => ({
-        name: v.name,
-        isDefault: v.source === "default",
-        role: v.role || "",
-        provider: v.provider === "openrouter" ? "OpenRouter" : v.provider,
-        status: mapVoiceStatus(v.verifiedStatus),
-        lastVerified: v.lastVerified ? new Date(v.lastVerified).toISOString().split("T")[0] : "",
-        verifyDuration: v.verifyDuration ? `${(v.verifyDuration / 1000).toFixed(1)}s` : undefined,
-      }));
-    } catch {
-      return [];
-    }
+    return result.voices.map((v) => ({
+      name: v.name,
+      isDefault: v.source === "default",
+      role: v.role || "",
+      provider: v.provider === "openrouter" ? "OpenRouter" : v.provider,
+      status: mapVoiceStatus(v.verifiedStatus),
+      lastVerified: v.lastVerified ? new Date(v.lastVerified).toISOString().split("T")[0] : "",
+      verifyDuration: v.verifyDuration ? `${(v.verifyDuration / 1000).toFixed(1)}s` : undefined,
+    }));
   },
 
   listHistory(filter: HistoryFilter): { records: HistoryRecord[]; totalPages: number } {
@@ -247,64 +258,60 @@ export const httpAdapter: TtsServiceAdapter = {
   },
 
   async listHistoryAsync(filter: HistoryFilter): Promise<{ records: HistoryRecord[]; totalPages: number; totalRecords?: number }> {
-    try {
-      const params = new URLSearchParams();
-      params.set("page", filter.page.toString());
-      params.set("pageSize", filter.pageSize.toString());
-      if (filter.voice) params.set("voice", filter.voice);
-      if (filter.status) params.set("status", filter.status);
-      if (filter.source) params.set("source", filter.source === "用户" ? "user" : "agent");
+    const params = new URLSearchParams();
+    params.set("page", filter.page.toString());
+    params.set("pageSize", filter.pageSize.toString());
+    if (filter.voice) params.set("voice", filter.voice);
+    if (filter.status) params.set("status", filter.status);
+    if (filter.source) params.set("source", filter.source === "用户" ? "user" : "agent");
 
-      const result = await apiFetch<{
-        records: Array<{
-          id: string;
-          textPreview: string;
-          voice: string;
-          format: string;
-          status: string;
-          source: string;
-          charCount: number;
-          cost: string | null;
-          createdAt: string | null;
-          error?: string;
-          assetId: number | null;
-          audioUrl: string | null;
-          downloadUrl: string | null;
-          durationMs: number | null;
-          assetFormat: string | null;
-          sizeBytes: number | null;
-        }>;
-        totalPages: number;
-        currentPage: number;
-        totalRecords: number;
-      }>(`/api/history?${params.toString()}`);
+    const result = await apiFetch<{
+      records: Array<{
+        id: string;
+        textPreview: string;
+        voice: string;
+        format: string;
+        status: string;
+        source: string;
+        charCount: number;
+        cost: string | null;
+        createdAt: string | null;
+        error?: string;
+        assetId: number | null;
+        audioUrl: string | null;
+        downloadUrl: string | null;
+        durationMs: number | null;
+        assetFormat: string | null;
+        sizeBytes: number | null;
+      }>;
+      totalPages: number;
+      currentPage: number;
+      totalRecords: number;
+    }>(`/api/history?${params.toString()}`);
 
-      return {
-        records: result.records.map((r) => ({
-          id: r.id,
-          text: r.textPreview,
-          voice: r.voice,
-          format: r.format as AudioFormat,
-          date: r.createdAt ? new Date(r.createdAt).toLocaleString("zh-CN") : "",
-          source: (r.source === "用户" ? "用户" : "Agent") as HistorySource,
-          duration: r.durationMs != null ? `${(r.durationMs / 1000).toFixed(1)}s` : "0.0s",
-          status: mapHistoryStatus(r.status),
-          cost: r.cost || undefined,
-          charCount: r.charCount,
-          error: r.error,
-          assetId: r.assetId,
-          audioUrl: r.audioUrl,
-          downloadUrl: r.downloadUrl,
-          durationMs: r.durationMs,
-          assetFormat: r.assetFormat,
-          sizeBytes: r.sizeBytes,
-        })),
-        totalPages: result.totalPages,
-        totalRecords: result.totalRecords,
-      };
-    } catch {
-      return { records: [], totalPages: 1 };
-    }
+    return {
+      records: result.records.map((r) => ({
+        id: r.id,
+        text: r.textPreview,
+        voice: r.voice,
+        format: r.format as AudioFormat,
+        date: r.createdAt ? new Date(r.createdAt).toLocaleString("zh-CN") : "",
+        source: (r.source === "用户" ? "用户" : "Agent") as HistorySource,
+        duration: r.durationMs != null ? `${(r.durationMs / 1000).toFixed(1)}s` : "0.0s",
+        status: mapHistoryStatus(r.status),
+        cost: r.cost || undefined,
+        charCount: r.charCount,
+        error: r.error,
+        assetId: r.assetId,
+        audioUrl: r.audioUrl,
+        downloadUrl: r.downloadUrl,
+        durationMs: r.durationMs,
+        assetFormat: r.assetFormat,
+        sizeBytes: r.sizeBytes,
+      })),
+      totalPages: result.totalPages,
+      totalRecords: result.totalRecords,
+    };
   },
 
   estimateCost(charCount: number, _format: AudioFormat): CostEstimate {
@@ -316,6 +323,79 @@ export const httpAdapter: TtsServiceAdapter = {
       estimatedCost: `$${cost.toFixed(4)}`,
       formula: `${charCount} chars x ~$0.000021/char (OpenRouter Gemini TTS)`,
     };
+  },
+
+  async assemblePrompt(req: AssemblePromptRequest): Promise<AssemblePromptResponse> {
+    try {
+      const response = await fetch("/api/prompts/assemble", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          audioProfile: req.audioProfile ?? "",
+          scene: req.scene ?? "",
+          directorNotes: req.directorNotes ?? "",
+          sampleContext: req.sampleContext ?? "",
+          transcript: req.transcript,
+          speakers: (req.speakers ?? []).map((s) => ({
+            id: s.id,
+            label: s.label,
+            name: s.name ?? "",
+            voice: s.voice ?? "Zephyr",
+            style: s.style ?? "",
+          })),
+        }),
+      });
+
+      // Parse JSON body regardless of HTTP status -- the backend returns
+      // structured error objects with code/message/category/retryable
+      // for 400 responses (VALIDATION_ERROR, DIRECTOR_SPEAKER_LIMIT_EXCEEDED, etc.)
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        // Non-JSON response (network proxy, CDN, etc.)
+        return {
+          ok: false,
+          requestId: `err-${Date.now().toString(36)}`,
+          error: {
+            code: "NETWORK_ERROR",
+            message: `Unexpected response (HTTP ${response.status}): non-JSON body`,
+            category: "internal",
+            retryable: false,
+          },
+        };
+      }
+
+      // If the body is a valid AssemblePromptResponse (has ok field), return it directly.
+      // The backend always returns { ok, requestId, ... } for both success and error.
+      if (body && typeof body === "object" && "ok" in body) {
+        return body as AssemblePromptResponse;
+      }
+
+      // Fallback for unexpected body shape
+      return {
+        ok: false,
+        requestId: `err-${Date.now().toString(36)}`,
+        error: {
+          code: "NETWORK_ERROR",
+          message: `Unexpected response format (HTTP ${response.status})`,
+          category: "internal",
+          retryable: false,
+        },
+      };
+    } catch (err) {
+      // Network-level error: fetch itself threw (CORS, DNS, connection refused, timeout)
+      return {
+        ok: false,
+        requestId: `err-${Date.now().toString(36)}`,
+        error: {
+          code: "NETWORK_ERROR",
+          message: err instanceof Error ? err.message : "Cannot reach backend server",
+          category: "internal",
+          retryable: true,
+        },
+      };
+    }
   },
 };
 

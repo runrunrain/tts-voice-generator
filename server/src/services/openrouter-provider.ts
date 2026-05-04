@@ -7,6 +7,9 @@
  * - Non-2xx JSON error responses
  * - X-Generation-Id header extraction
  * - Error classification (client vs server, retryable)
+ * - Exponential backoff retry for retryable errors (429, 5xx, network)
+ * - Retry-After header respect
+ * - Request timeout
  */
 
 import { env } from "../config/env.js";
@@ -38,30 +41,93 @@ export interface OpenRouterTtsError {
   errorMetadata?: Record<string, unknown>;
   retryable: boolean;
   retryAfter?: number;
+  attempts?: number;
 }
 
 export type OpenRouterTtsResult = OpenRouterTtsSuccess | OpenRouterTtsError;
+
+// ─── Retry Configuration ─────────────────────────────────────────────────────
+
+const DEFAULT_MAX_ATTEMPTS = 3;
+const DEFAULT_BASE_DELAY_MS = 1000;   // 1 second initial delay
+const DEFAULT_MAX_DELAY_MS = 30000;   // 30 seconds max delay
+const DEFAULT_TIMEOUT_MS = 60000;     // 60 seconds per request
 
 // ─── Provider ────────────────────────────────────────────────────────────────
 
 export class OpenRouterProvider {
   private apiKey: string;
   private baseUrl: string;
+  private maxAttempts: number;
+  private baseDelayMs: number;
+  private maxDelayMs: number;
+  private timeoutMs: number;
 
-  constructor(apiKey?: string, baseUrl?: string) {
+  constructor(apiKey?: string, baseUrl?: string, options?: {
+    maxAttempts?: number;
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+    timeoutMs?: number;
+  }) {
     this.apiKey = apiKey || requireApiKey();
     this.baseUrl = baseUrl || env.openRouterBaseUrl;
+    this.maxAttempts = options?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    this.baseDelayMs = options?.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
+    this.maxDelayMs = options?.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
+    this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
   /**
-   * Generate speech via OpenRouter TTS API.
+   * Generate speech via OpenRouter TTS API with retry support.
    *
-   * Response handling:
-   * - 2xx + Content-Type includes "audio" -> read body as Buffer (success)
-   * - 2xx + Content-Type is JSON -> treat as unexpected error
-   * - Non-2xx -> read body as JSON error
+   * Retry policy:
+   * - Only retry on retryable errors (429, 5xx, network)
+   * - Exponential backoff: base * 2^attempt + jitter
+   * - Respect Retry-After header for 429
+   * - Maximum attempts controlled by maxAttempts
+   * - Each attempt has its own timeout covering headers AND body reading
    */
   async generateSpeech(req: OpenRouterTtsRequest): Promise<OpenRouterTtsResult> {
+    let lastResult: OpenRouterTtsError | null = null;
+    let attempt = 0;
+
+    while (attempt < this.maxAttempts) {
+      attempt++;
+      const result = await this.singleAttempt(req);
+
+      // Success - return immediately
+      if (result.ok) {
+        return result;
+      }
+
+      // Non-retryable error - return immediately
+      if (!result.retryable) {
+        return { ...result, attempts: attempt };
+      }
+
+      lastResult = result;
+
+      // If this was the last allowed attempt, don't sleep
+      if (attempt >= this.maxAttempts) {
+        break;
+      }
+
+      // Calculate delay
+      const delay = this.calculateDelay(attempt, result.retryAfter);
+      await sleep(delay);
+    }
+
+    // All retries exhausted
+    return {
+      ...lastResult!,
+      attempts: attempt,
+    };
+  }
+
+  /**
+   * Single attempt to generate speech (no retry).
+   */
+  private async singleAttempt(req: OpenRouterTtsRequest): Promise<OpenRouterTtsResult> {
     const url = `${this.baseUrl}/audio/speech`;
 
     const body: Record<string, unknown> = {
@@ -81,76 +147,92 @@ export class OpenRouterProvider {
     }
 
     try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${this.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-      });
+      // Use AbortController for timeout covering the full attempt
+      // (headers + body reading). Timer is only cleared in finally,
+      // so body hang will be caught by the abort.
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
 
-      const contentType = response.headers.get("content-type") || "";
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${this.apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
 
-      // Extract X-Generation-Id
-      const generationId = response.headers.get("x-generation-id");
+        const contentType = response.headers.get("content-type") || "";
 
-      if (response.ok && contentType.includes("audio")) {
-        // Success: read audio body as ArrayBuffer -> Buffer
-        const arrayBuffer = await response.arrayBuffer();
-        const audioBuffer = Buffer.from(arrayBuffer);
+        // Extract X-Generation-Id
+        const generationId = response.headers.get("x-generation-id");
 
-        return {
-          ok: true,
-          audioBuffer,
-          contentType,
-          generationId,
-        };
-      }
+        if (response.ok && contentType.includes("audio")) {
+          // Success: read audio body as ArrayBuffer -> Buffer
+          const arrayBuffer = await response.arrayBuffer();
+          const audioBuffer = Buffer.from(arrayBuffer);
 
-      if (response.ok && !contentType.includes("audio")) {
-        // 2xx but not audio - unexpected, treat as error
-        const text = await response.text();
+          return {
+            ok: true,
+            audioBuffer,
+            contentType,
+            generationId,
+          };
+        }
+
+        if (response.ok && !contentType.includes("audio")) {
+          // 2xx but not audio - unexpected, treat as error
+          const text = await response.text();
+          return {
+            ok: false,
+            statusCode: response.status,
+            errorCode: "UNEXPECTED_RESPONSE_TYPE",
+            errorMessage: `Expected audio response but got ${contentType}: ${text.slice(0, 500)}`,
+            retryable: false,
+          };
+        }
+
+        // Non-2xx: read JSON error body
+        let errorData: Record<string, unknown>;
+        try {
+          errorData = await response.json() as Record<string, unknown>;
+        } catch {
+          const text = await response.text();
+          errorData = { message: text.slice(0, 500) };
+        }
+
+        const errorMsg = extractErrorMessage(errorData);
+        const retryable = response.status === 429 || response.status >= 500;
+        const retryAfter = response.status === 429
+          ? parseRetryAfter(response.headers.get("retry-after"))
+          : undefined;
+
         return {
           ok: false,
           statusCode: response.status,
-          errorCode: "UNEXPECTED_RESPONSE_TYPE",
-          errorMessage: `Expected audio response but got ${contentType}: ${text.slice(0, 500)}`,
-          retryable: false,
+          errorCode: classifyErrorCode(response.status, errorData),
+          errorMessage: errorMsg,
+          errorMetadata: sanitizeErrorMetadata(errorData),
+          retryable,
+          retryAfter,
         };
+      } finally {
+        // Timer covers headers AND body reading; clean up only when
+        // the entire attempt is done (success, error, or abort).
+        clearTimeout(timeoutId);
       }
-
-      // Non-2xx: read JSON error body
-      let errorData: Record<string, unknown>;
-      try {
-        errorData = await response.json() as Record<string, unknown>;
-      } catch {
-        const text = await response.text();
-        errorData = { message: text.slice(0, 500) };
-      }
-
-      const errorMsg = extractErrorMessage(errorData);
-      const retryable = response.status === 429 || response.status >= 500;
-      const retryAfter = response.status === 429
-        ? parseRetryAfter(response.headers.get("retry-after"))
-        : undefined;
-
-      return {
-        ok: false,
-        statusCode: response.status,
-        errorCode: classifyErrorCode(response.status, errorData),
-        errorMessage: errorMsg,
-        errorMetadata: errorData.error ? (errorData.error as Record<string, unknown>) : errorData,
-        retryable,
-        retryAfter,
-      };
     } catch (err) {
-      // Network-level error (DNS, timeout, etc.)
+      // Network-level error (DNS, timeout, abort, etc.)
+      const isTimeout = err instanceof DOMException && err.name === "AbortError";
       return {
         ok: false,
         statusCode: 0,
-        errorCode: "NETWORK_ERROR",
-        errorMessage: err instanceof Error ? err.message : "Unknown network error",
+        errorCode: isTimeout ? "REQUEST_TIMEOUT" : "NETWORK_ERROR",
+        errorMessage: isTimeout
+          ? `Request timed out after ${this.timeoutMs}ms`
+          : (err instanceof Error ? err.message : "Unknown network error"),
         retryable: true,
       };
     }
@@ -158,28 +240,37 @@ export class OpenRouterProvider {
 
   /**
    * Test API Key validity by fetching the models list.
-   * Returns latency in ms.
+   * Returns latency in ms. No retry on test connections.
    */
   async testConnection(): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
     const start = Date.now();
     try {
-      const response = await fetch(`${this.baseUrl}/models`, {
-        headers: {
-          "Authorization": `Bearer ${this.apiKey}`,
-        },
-      });
-      const latencyMs = Date.now() - start;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
 
-      if (response.ok) {
-        return { ok: true, latencyMs };
+      try {
+        const response = await fetch(`${this.baseUrl}/models`, {
+          headers: {
+            "Authorization": `Bearer ${this.apiKey}`,
+          },
+          signal: controller.signal,
+        });
+
+        const latencyMs = Date.now() - start;
+
+        if (response.ok) {
+          return { ok: true, latencyMs };
+        }
+
+        const body = await response.text();
+        return {
+          ok: false,
+          latencyMs,
+          error: `HTTP ${response.status}: ${body.slice(0, 200)}`,
+        };
+      } finally {
+        clearTimeout(timeoutId);
       }
-
-      const body = await response.text();
-      return {
-        ok: false,
-        latencyMs,
-        error: `HTTP ${response.status}: ${body.slice(0, 200)}`,
-      };
     } catch (err) {
       return {
         ok: false,
@@ -188,9 +279,61 @@ export class OpenRouterProvider {
       };
     }
   }
+
+  /**
+   * Calculate delay for retry attempt using exponential backoff with jitter.
+   * Respects Retry-After header when present.
+   */
+  private calculateDelay(attempt: number, retryAfter?: number): number {
+    // If server sent Retry-After, use it (but cap at maxDelay)
+    if (retryAfter !== undefined) {
+      const retryAfterMs = retryAfter * 1000;
+      return Math.min(retryAfterMs, this.maxDelayMs);
+    }
+
+    // Exponential backoff: base * 2^(attempt-1) + random jitter
+    const exponentialDelay = this.baseDelayMs * Math.pow(2, attempt - 1);
+    const jitter = Math.random() * this.baseDelayMs;
+    return Math.min(exponentialDelay + jitter, this.maxDelayMs);
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Sanitize error metadata: remove sensitive fields like Authorization headers,
+ * API keys, or other credentials from error data before storing/returning.
+ */
+function sanitizeErrorMetadata(data: Record<string, unknown>): Record<string, unknown> {
+  const SENSITIVE_KEYS = new Set([
+    "authorization",
+    "api_key",
+    "apikey",
+    "key",
+    "token",
+    "secret",
+    "password",
+    "credential",
+  ]);
+
+  const sanitized: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(data)) {
+    if (SENSITIVE_KEYS.has(key.toLowerCase())) {
+      sanitized[key] = "[REDACTED]";
+    } else if (value && typeof value === "object" && !Array.isArray(value)) {
+      sanitized[key] = sanitizeErrorMetadata(value as Record<string, unknown>);
+    } else {
+      sanitized[key] = value;
+    }
+  }
+
+  return sanitized;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function extractErrorMessage(data: Record<string, unknown>): string {
   // OpenRouter error format: { error: { message: "..." } }
