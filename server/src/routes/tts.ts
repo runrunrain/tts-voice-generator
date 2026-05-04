@@ -17,7 +17,7 @@ import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../db/index.js";
 import { generationJob, audioAsset, settings } from "../db/schema.js";
 import { eq } from "drizzle-orm";
-import { isOpenRouterConfigured, requireApiKey } from "../config/env.js";
+import { isOpenRouterConfigured, requireApiKey } from "../services/key-resolver.js";
 import { OpenRouterProvider } from "../services/openrouter-provider.js";
 import {
   writeAudioFile,

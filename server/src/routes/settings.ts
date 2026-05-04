@@ -1,8 +1,8 @@
 /**
  * Settings routes.
  * GET    /api/settings          - Read current settings (Key masked)
- * PUT    /api/settings          - Save settings (including API Key)
- * POST   /api/settings/test     - Test OpenRouter connection (alias: test-connection)
+ * PUT    /api/settings          - Save settings (including API Key, stored encrypted)
+ * POST   /api/settings/test     - Test OpenRouter connection
  */
 
 import { Hono } from "hono";
@@ -10,7 +10,8 @@ import { z } from "zod";
 import { getDb } from "../db/index.js";
 import { settings } from "../db/schema.js";
 import { eq } from "drizzle-orm";
-import { isOpenRouterConfigured, requireApiKey } from "../config/env.js";
+import { encryptApiKey, decryptApiKey, maskApiKey } from "../config/env.js";
+import { isOpenRouterConfigured, requireApiKey } from "../services/key-resolver.js";
 import { OpenRouterProvider } from "../services/openrouter-provider.js";
 
 const app = new Hono();
@@ -35,7 +36,8 @@ app.get("/api/settings", (c) => {
 
   if (!row) {
     return c.json({
-      openRouterApiKey: null,
+      hasOpenRouterApiKey: false,
+      keyMask: null,
       defaultModel: "google/gemini-3.1-flash-tts-preview",
       defaultVoice: "Zephyr",
       defaultFormat: "mp3",
@@ -45,13 +47,28 @@ app.get("/api/settings", (c) => {
     });
   }
 
-  // Mask the API key - never return plaintext
-  const maskedKey = row.openRouterApiKey
-    ? "***configured***"
-    : null;
+  // Determine if key exists and compute mask -- never return plaintext
+  let hasKey = false;
+  let keyMask: string | null = null;
+
+  if (row.openRouterApiKey) {
+    // Try to decrypt to get the real key for masking
+    const decrypted = decryptApiKey(row.openRouterApiKey);
+    if (decrypted) {
+      hasKey = true;
+      keyMask = maskApiKey(decrypted);
+    } else {
+      // Legacy plaintext stored key
+      hasKey = true;
+      keyMask = maskApiKey(row.openRouterApiKey);
+    }
+  }
 
   return c.json({
-    openRouterApiKey: maskedKey,
+    hasOpenRouterApiKey: hasKey,
+    keyMask,
+    // Backward compat: also return openRouterApiKey field for older frontend
+    openRouterApiKey: hasKey ? keyMask : null,
     defaultModel: row.defaultModel,
     defaultVoice: row.defaultVoice,
     defaultFormat: row.defaultFormat,
@@ -79,9 +96,13 @@ app.put("/api/settings", async (c) => {
   const updateValues: Record<string, unknown> = { updatedAt: now };
 
   if (data.openRouterApiKey !== undefined) {
-    updateValues.openRouterApiKey = data.openRouterApiKey || null;
-    // Also update the runtime env so provider picks it up immediately
-    process.env.OPENROUTER_API_KEY = data.openRouterApiKey || "";
+    if (data.openRouterApiKey && data.openRouterApiKey.trim().length > 0) {
+      // Encrypt the key before storing in DB
+      updateValues.openRouterApiKey = encryptApiKey(data.openRouterApiKey.trim());
+    } else {
+      // Clear the key
+      updateValues.openRouterApiKey = null;
+    }
   }
   if (data.defaultModel !== undefined) updateValues.defaultModel = data.defaultModel;
   if (data.defaultVoice !== undefined) updateValues.defaultVoice = data.defaultVoice;

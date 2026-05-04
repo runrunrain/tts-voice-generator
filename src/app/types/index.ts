@@ -83,6 +83,13 @@ export interface HistoryRecord {
   error?: string;
   cost?: string;
   charCount?: number;
+  // Audio asset fields from backend (null when no asset)
+  assetId?: number | null;
+  audioUrl?: string | null;
+  downloadUrl?: string | null;
+  durationMs?: number | null;
+  assetFormat?: string | null;
+  sizeBytes?: number | null;
 }
 
 export interface HistoryFilter {
@@ -124,6 +131,10 @@ export interface TtsServiceAdapter {
   probeVoice(voiceName: string): Promise<{ status: VoiceStatus; latency: string }>;
   testConnection(): Promise<ConnectionStatus>;
   listVoices(): VoiceProfile[];
+  /** Async voice list for backend-backed adapters */
+  listVoicesAsync?(): Promise<VoiceProfile[]>;
   listHistory(filter: HistoryFilter): { records: HistoryRecord[]; totalPages: number };
+  /** Async history list for backend-backed adapters */
+  listHistoryAsync?(filter: HistoryFilter): Promise<{ records: HistoryRecord[]; totalPages: number; totalRecords?: number }>;
   estimateCost(charCount: number, format: AudioFormat): CostEstimate;
 }

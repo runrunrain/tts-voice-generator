@@ -1,5 +1,5 @@
-import { useState, useCallback } from "react";
-import { Search, Filter, Play, Loader2 } from "lucide-react";
+import { useState, useCallback, useEffect } from "react";
+import { Search, Filter, Play, Loader2, AlertTriangle } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import type { VoiceStatus } from "../types";
 
@@ -10,7 +10,15 @@ export function VoicesPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<TabFilter>("all");
   const [selectedVoice, setSelectedVoice] = useState<string>("alloy");
-  const [probeStatuses, setProbeStatuses] = useState<Record<string, "idle" | "loading" | "success" | "error">>({});
+  const [probeStatuses, setProbeStatuses] = useState<Record<string, "idle" | "loading" | "success" | "error" | "no-key">>({});
+  const [voicesLoading, setVoicesLoading] = useState(true);
+
+  // Track when voices are loaded
+  useEffect(() => {
+    if (voices.length > 0) {
+      setVoicesLoading(false);
+    }
+  }, [voices]);
 
   // Filter voices
   const filteredVoices = voices.filter((v) => {
@@ -38,10 +46,16 @@ export function VoicesPage() {
   const handleProbe = useCallback(async (voiceName: string) => {
     setProbeStatuses((prev) => ({ ...prev, [voiceName]: "loading" }));
     const result = await adapter.probeVoice(voiceName);
-    setProbeStatuses((prev) => ({ ...prev, [voiceName]: result.status === "success" ? "success" : "error" }));
+    // Check for MISSING_API_KEY via the error path
+    if (result.latency === "N/A" && result.status === "error") {
+      // Likely MISSING_API_KEY from backend - distinguish from regular probe failure
+      setProbeStatuses((prev) => ({ ...prev, [voiceName]: "no-key" }));
+    } else {
+      setProbeStatuses((prev) => ({ ...prev, [voiceName]: result.status === "success" ? "success" : "error" }));
+    }
     setTimeout(() => {
       setProbeStatuses((prev) => ({ ...prev, [voiceName]: "idle" }));
-    }, 3000);
+    }, 5000);
   }, [adapter]);
 
   return (
@@ -92,7 +106,12 @@ export function VoicesPage() {
 
       {/* Grid */}
       <div className="flex-1 p-6 overflow-y-auto">
-        {filteredVoices.length === 0 ? (
+        {voicesLoading ? (
+          <div className="flex flex-col items-center justify-center h-64 text-center">
+            <Loader2 size={24} className="animate-spin text-text-tertiary mb-3" />
+            <p className="text-text-tertiary text-sm">正在从后端加载音色列表...</p>
+          </div>
+        ) : filteredVoices.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-center">
             <p className="text-text-tertiary text-sm">没有匹配的音色</p>
             <p className="text-text-tertiary text-xs mt-1">尝试调整筛选条件</p>
@@ -127,7 +146,7 @@ export function VoicesPage() {
                 <div className="flex flex-col gap-1 text-[11px] text-text-secondary mb-3">
                   <div className="flex">
                     <span className="w-12 text-text-tertiary">角色:</span>
-                    <span className="text-text-primary truncate">{v.role}</span>
+                    <span className="text-text-primary truncate">{v.role || "--"}</span>
                   </div>
                   <div className="flex">
                     <span className="w-12 text-text-tertiary">供应商:</span>
@@ -136,7 +155,7 @@ export function VoicesPage() {
                 </div>
 
                 <div className="flex items-center justify-between mt-auto">
-                  <span className="text-[10px] text-text-tertiary">上次验证: {v.lastVerified.slice(5)}</span>
+                  <span className="text-[10px] text-text-tertiary">{v.lastVerified ? `上次验证: ${v.lastVerified.slice(5)}` : "未验证"}</span>
                   <div className="flex gap-2">
                     <button
                       className="text-xs font-medium text-text-secondary hover:text-text-primary transition-colors disabled:opacity-50"
@@ -145,6 +164,8 @@ export function VoicesPage() {
                     >
                       {probeStatuses[v.name] === "loading" ? (
                         <Loader2 size={12} className="animate-spin inline" />
+                      ) : probeStatuses[v.name] === "no-key" ? (
+                        <span className="text-error flex items-center gap-1"><AlertTriangle size={10} /> 无 Key</span>
                       ) : probeStatuses[v.name] === "success" ? "验证成功" : probeStatuses[v.name] === "error" ? "验证失败" : "探针"}
                     </button>
                     <button

@@ -9,7 +9,8 @@
  * - Error classification (client vs server, retryable)
  */
 
-import { env, requireApiKey } from "../config/env.js";
+import { env } from "../config/env.js";
+import { requireApiKey } from "./key-resolver.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 

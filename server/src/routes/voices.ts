@@ -2,6 +2,7 @@
  * Voices routes.
  * GET  /api/voices        - List all voice profiles with stats
  * POST /api/voices/probe  - Probe a specific voice for availability
+ * GET  /api/voices/refresh - Refresh voice list (re-read from DB)
  */
 
 import { Hono } from "hono";
@@ -9,7 +10,7 @@ import { z } from "zod";
 import { getDb } from "../db/index.js";
 import { voiceProfile } from "../db/schema.js";
 import { eq, sql } from "drizzle-orm";
-import { isOpenRouterConfigured, requireApiKey } from "../config/env.js";
+import { isOpenRouterConfigured, requireApiKey } from "../services/key-resolver.js";
 import { OpenRouterProvider } from "../services/openrouter-provider.js";
 
 const app = new Hono();
@@ -89,12 +90,16 @@ app.post("/api/voices/probe", async (c) => {
         .where(eq(voiceProfile.name, voiceName))
         .run();
 
+      // Read back the updated profile to return to frontend
+      const updatedProfile = db.select().from(voiceProfile).where(eq(voiceProfile.name, voiceName)).get();
+
       return c.json({
         voice: voiceName,
         verifiedStatus: "verified",
         latencyMs,
         probeJobId: null,
         error: null,
+        profile: updatedProfile || undefined,
       });
     } else {
       // Voice probe failed - update database

@@ -1,6 +1,6 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { Link } from "react-router";
-import { Play, Download, Copy, ChevronRight, Search } from "lucide-react";
+import { Play, Square, Download, Copy, ChevronRight, Search } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import type { HistoryStatus, HistorySource } from "../types";
 
@@ -18,6 +18,55 @@ export function HistoryPage() {
   const [activeRecord, setActiveRecord] = useState<string>(
     historyRecords[0]?.id ?? ""
   );
+  const [playingId, setPlayingId] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const handlePlay = useCallback((recordId: string, audioUrl: string | null | undefined) => {
+    if (!audioUrl) return;
+
+    // If clicking the same record that's playing, stop it
+    if (playingId === recordId && audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      audioRef.current = null;
+      setPlayingId(null);
+      return;
+    }
+
+    // Stop any currently playing audio
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+
+    // Start playing the new audio
+    const audio = new Audio(audioUrl);
+    audio.addEventListener("ended", () => {
+      setPlayingId(null);
+      audioRef.current = null;
+    });
+    audio.addEventListener("error", () => {
+      setPlayingId(null);
+      audioRef.current = null;
+    });
+    audioRef.current = audio;
+    audio.play().catch(() => {
+      setPlayingId(null);
+      audioRef.current = null;
+    });
+    setPlayingId(recordId);
+  }, [playingId]);
+
+  const handleDownload = useCallback((downloadUrl: string | null | undefined, fileName?: string) => {
+    if (!downloadUrl) return;
+    const a = document.createElement("a");
+    a.href = downloadUrl;
+    if (fileName) a.download = fileName;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, []);
 
   // Client-side search on top of server-side filtered records
   const displayedRecords = searchQuery
@@ -132,7 +181,12 @@ export function HistoryPage() {
 
       {/* List */}
       <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-[2px]">
-        {displayedRecords.length === 0 ? (
+        {historyRecords.length === 0 && searchQuery === "" && !historyFilter.voice && !historyFilter.status && !historyFilter.source ? (
+          <div className="flex flex-col items-center justify-center h-64 text-center">
+            <p className="text-text-tertiary text-sm">暂无历史记录</p>
+            <p className="text-text-tertiary text-xs mt-1">完成语音生成后记录将出现在此处</p>
+          </div>
+        ) : displayedRecords.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-center">
             <p className="text-text-tertiary text-sm">暂无匹配的历史记录</p>
             <p className="text-text-tertiary text-xs mt-1">调整筛选条件或清除筛选</p>
@@ -164,10 +218,10 @@ export function HistoryPage() {
                   <span>{r.date}</span>
                   <span className="w-px h-2.5 bg-border-subtle" />
                   <span>{r.source}</span>
-                  {r.status === "success" && (
+                  {r.status === "success" && r.durationMs != null && (
                     <>
                       <span className="w-px h-2.5 bg-border-subtle" />
-                      <span>{r.duration}</span>
+                      <span>{(r.durationMs / 1000).toFixed(1)}s</span>
                     </>
                   )}
                 </div>
@@ -176,10 +230,30 @@ export function HistoryPage() {
               <div className={`flex items-center gap-1 shrink-0 ${activeRecord === r.id ? "opacity-100" : "opacity-0 group-hover:opacity-100"} transition-opacity`}>
                 {r.status === "success" ? (
                   <>
-                    <button className="w-8 h-8 rounded flex items-center justify-center text-text-secondary hover:text-text-primary hover:bg-bg-surface transition-colors" title="播放">
-                      <Play size={16} />
+                    <button
+                      className={`w-8 h-8 rounded flex items-center justify-center transition-colors ${
+                        playingId === r.id
+                          ? "text-accent bg-accent-subtle"
+                          : r.audioUrl
+                            ? "text-text-secondary hover:text-text-primary hover:bg-bg-surface"
+                            : "text-text-tertiary cursor-not-allowed"
+                      }`}
+                      title={playingId === r.id ? "停止" : "播放"}
+                      disabled={!r.audioUrl}
+                      onClick={(e) => { e.stopPropagation(); handlePlay(r.id, r.audioUrl); }}
+                    >
+                      {playingId === r.id ? <Square size={16} /> : <Play size={16} />}
                     </button>
-                    <button className="w-8 h-8 rounded flex items-center justify-center text-text-secondary hover:text-text-primary hover:bg-bg-surface transition-colors" title="下载">
+                    <button
+                      className={`w-8 h-8 rounded flex items-center justify-center transition-colors ${
+                        r.downloadUrl
+                          ? "text-text-secondary hover:text-text-primary hover:bg-bg-surface"
+                          : "text-text-tertiary cursor-not-allowed"
+                      }`}
+                      title="下载"
+                      disabled={!r.downloadUrl}
+                      onClick={(e) => { e.stopPropagation(); handleDownload(r.downloadUrl); }}
+                    >
                       <Download size={16} />
                     </button>
                     <button className="w-8 h-8 rounded flex items-center justify-center text-text-secondary hover:text-text-primary hover:bg-bg-surface transition-colors" title="复制参数">

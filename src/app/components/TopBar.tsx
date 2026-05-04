@@ -1,10 +1,32 @@
+import { useState, useEffect } from "react";
 import { useLocation } from "react-router";
 import { ChevronRight } from "lucide-react";
 
+interface HealthStatus {
+  ok: boolean;
+  openRouterConfigured: boolean;
+  version: string;
+}
+
 export function TopBar() {
   const location = useLocation();
+  const [health, setHealth] = useState<HealthStatus | null>(null);
 
-  // Very basic breadcrumb logic for demonstration
+  useEffect(() => {
+    fetch("/api/health")
+      .then((res) => res.json())
+      .then((data) => {
+        setHealth({
+          ok: data.status === "ok",
+          openRouterConfigured: !!data.openRouterConfigured,
+          version: data.version || "0.1.0",
+        });
+      })
+      .catch(() => {
+        setHealth(null);
+      });
+  }, []);
+
   let breadcrumbs = ["生成", "单次"];
   let title = "语音生成";
 
@@ -18,13 +40,29 @@ export function TopBar() {
     breadcrumbs = ["历史记录"];
     title = "历史记录";
     if (location.pathname.length > "/history".length) {
-      breadcrumbs.push(`详情`);
+      breadcrumbs.push("详情");
       title = "记录详情";
     }
   } else if (location.pathname.includes("/settings")) {
     breadcrumbs = ["设置"];
     title = "系统设置";
   }
+
+  const statusColor = !health
+    ? "bg-error"
+    : health.ok && health.openRouterConfigured
+      ? "bg-success"
+      : "bg-warning";
+  const statusShadow = !health
+    ? "shadow-[0_0_8px_rgba(239,68,68,0.4)]"
+    : health.ok && health.openRouterConfigured
+      ? "shadow-[0_0_8px_rgba(34,197,94,0.4)]"
+      : "shadow-[0_0_8px_rgba(197,158,49,0.4)]";
+  const statusText = !health
+    ? "Backend: unreachable"
+    : health.ok && health.openRouterConfigured
+      ? "Backend OK / Key configured"
+      : "Backend OK / Key missing";
 
   return (
     <div className="h-full px-5 flex items-center justify-between">
@@ -47,12 +85,9 @@ export function TopBar() {
 
       <div className="flex-1 flex items-center justify-end gap-4">
         <div className="flex items-center gap-2 text-sm text-text-tertiary">
-          <div className="w-2 h-2 rounded-full bg-warning shadow-[0_0_8px_rgba(197,158,49,0.4)]" />
-          Demo API: simulated
+          <div className={`w-2 h-2 rounded-full ${statusColor} ${statusShadow}`} />
+          {statusText}
         </div>
-        <button className="px-3 py-1.5 text-sm font-medium rounded-md hover:bg-bg-hover transition-colors">
-          快捷操作
-        </button>
       </div>
     </div>
   );

@@ -4,8 +4,7 @@
  * Provides shared generation state between GeneratePage / DirectorPage and RightPanel,
  * as well as access to the service adapter and application settings.
  *
- * DEMO NOTE: All state mutations go through the demo adapter. When a real backend
- * is ready, swap the adapter implementation in the provider.
+ * Uses httpAdapter for real backend communication via /api/* endpoints.
  */
 
 import { createContext, useContext, useState, useCallback, useRef, useEffect, type ReactNode } from "react";
@@ -22,7 +21,7 @@ import type {
   VoiceProfile,
   TtsServiceAdapter,
 } from "../types";
-import { demoAdapter } from "../services/demoAdapter";
+import { httpAdapter } from "../services/httpAdapter";
 
 // ─── Context Value ───────────────────────────────────────────────────────────
 
@@ -45,7 +44,7 @@ interface AppState {
   // Settings
   settings: AppSettings;
   updateSettings: (partial: Partial<AppSettings>) => void;
-  saveSettings: () => Promise<void>;
+  saveSettings: (payload?: Partial<AppSettings>) => Promise<void>;
   testConnection: () => Promise<ConnectionStatus>;
 
   // Voices
@@ -58,7 +57,7 @@ interface AppState {
   setHistoryFilter: (filter: Partial<HistoryFilter>) => void;
   refreshHistory: () => void;
 
-  // Demo metadata
+  // Demo metadata (kept for backward compat, always 0 with real backend)
   demoTodayCount: number;
 }
 
@@ -79,7 +78,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!req.text.trim()) {
       setGeneratePhase("error");
       setGenerateResult({
-        jobId: `demo-err-empty-${Date.now().toString(36)}`,
+        jobId: `err-empty-${Date.now().toString(36)}`,
         phase: "error",
         voice: req.voice,
         format: req.format,
@@ -91,7 +90,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           message: "文本内容不能为空，请输入文本后重试。",
         },
         timestamp: new Date().toISOString(),
-        isDemo: true,
+        isDemo: false,
       });
       return;
     }
@@ -102,7 +101,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setGenerateResult(null);
 
     try {
-      const result = await demoAdapter.generateSpeech(req);
+      const result = await httpAdapter.generateSpeech(req);
       if (abortRef.current) return;
       setGenerateResult(result);
       setGeneratePhase(result.phase);
@@ -110,7 +109,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (abortRef.current) return;
       setGeneratePhase("error");
       setGenerateResult({
-        jobId: `demo-err-${Date.now().toString(36)}`,
+        jobId: `err-${Date.now().toString(36)}`,
         phase: "error",
         voice: req.voice,
         format: req.format,
@@ -119,10 +118,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         estimatedCost: "$0.00",
         error: {
           code: "UNEXPECTED",
-          message: err instanceof Error ? err.message : "演示过程发生异常",
+          message: err instanceof Error ? err.message : "生成过程发生异常",
         },
         timestamp: new Date().toISOString(),
-        isDemo: true,
+        isDemo: false,
       });
     }
   }, []);
@@ -134,15 +133,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const estimateCost = useCallback((charCount: number, format: AudioFormat) => {
-    const est = demoAdapter.estimateCost(charCount, format);
+    const est = httpAdapter.estimateCost(charCount, format);
     setCostEstimate(est);
   }, []);
 
   // --- Settings ---
   const [settings, setSettings] = useState<AppSettings>({
     openRouterApiKey: "",
-    defaultModel: "gemini-3.1-flash",
-    defaultVoice: "alloy",
+    defaultModel: "google/gemini-3.1-flash-tts-preview",
+    defaultVoice: "Zephyr",
     defaultFormat: "mp3",
     audioDir: "./data/audio",
     maxChars: 5000,
@@ -150,30 +149,115 @@ export function AppProvider({ children }: { children: ReactNode }) {
     connectionStatus: "untested",
   });
 
+  // Load settings from backend on mount
+  useEffect(() => {
+    fetch("/api/settings")
+      .then((res) => res.json())
+      .then((data) => {
+        // Handle both new format (hasOpenRouterApiKey/keyMask) and legacy format (openRouterApiKey)
+        const hasKey = data.hasOpenRouterApiKey || data.openRouterApiKey === "***configured***";
+        setSettings((prev) => ({
+          ...prev,
+          openRouterApiKey: hasKey ? (data.keyMask || data.openRouterApiKey || "***configured***") : "",
+          defaultModel: data.defaultModel || prev.defaultModel,
+          defaultVoice: data.defaultVoice || prev.defaultVoice,
+          defaultFormat: data.defaultFormat || prev.defaultFormat,
+          audioDir: data.audioOutputDir || prev.audioDir,
+          maxChars: data.maxCharsPerRequest || prev.maxChars,
+          maxConcurrent: data.maxConcurrentJobs || prev.maxConcurrent,
+        }));
+      })
+      .catch(() => {
+        // Backend not available, keep defaults
+      });
+  }, []);
+
   const updateSettings = useCallback((partial: Partial<AppSettings>) => {
     setSettings((prev) => ({ ...prev, ...partial }));
   }, []);
 
-  const saveSettings = useCallback(async () => {
-    // Demo: simulate saving with delay
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    // In production this would persist to localStorage or backend
+  /**
+   * Save settings to the backend.
+   *
+   * Accepts an optional explicit payload to bypass stale-closure issues.
+   * If no payload is given, falls back to current React state (may be stale
+   * if called right after updateSettings in the same render cycle).
+   *
+   * After a successful PUT, re-fetches settings from the backend so the
+   * UI reflects the authoritative hasOpenRouterApiKey / keyMask values.
+   */
+  const saveSettings = useCallback(async (payload?: Partial<AppSettings>) => {
+    // Merge: explicit payload wins, then current state
+    const source = payload
+      ? { ...settings, ...payload }
+      : settings;
+
     try {
-      localStorage.setItem("tts-demo-settings", JSON.stringify(settings));
-    } catch {
-      // Silently ignore storage errors
+      const res = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          // Send the actual key string only when provided by the user.
+          // Masked sentinel values ("***configured***") must be translated to
+          // undefined so the backend doesn't overwrite the stored key.
+          openRouterApiKey: source.openRouterApiKey &&
+            source.openRouterApiKey !== "***configured***" &&
+            source.openRouterApiKey !== ""
+            ? source.openRouterApiKey
+            : undefined,
+          defaultModel: source.defaultModel,
+          defaultVoice: source.defaultVoice,
+          defaultFormat: source.defaultFormat,
+          audioOutputDir: source.audioDir,
+          maxCharsPerRequest: source.maxChars,
+          maxConcurrentJobs: source.maxConcurrent,
+        }),
+      });
+
+      if (!res.ok) {
+        console.error("Failed to save settings:", res.status, await res.text());
+        return;
+      }
+
+      // Re-fetch authoritative settings from backend after save
+      const freshRes = await fetch("/api/settings");
+      if (freshRes.ok) {
+        const data = await freshRes.json();
+        const hasKey = data.hasOpenRouterApiKey || data.openRouterApiKey === "***configured***";
+        setSettings((prev) => ({
+          ...prev,
+          openRouterApiKey: hasKey ? (data.keyMask || data.openRouterApiKey || "***configured***") : "",
+          defaultModel: data.defaultModel || prev.defaultModel,
+          defaultVoice: data.defaultVoice || prev.defaultVoice,
+          defaultFormat: data.defaultFormat || prev.defaultFormat,
+          audioDir: data.audioOutputDir || prev.audioDir,
+          maxChars: data.maxCharsPerRequest || prev.maxChars,
+          maxConcurrent: data.maxConcurrentJobs || prev.maxConcurrent,
+        }));
+      }
+    } catch (err) {
+      console.error("Failed to save settings:", err);
     }
   }, [settings]);
 
   const testConnection = useCallback(async (): Promise<ConnectionStatus> => {
     setSettings((prev) => ({ ...prev, connectionStatus: "testing" }));
-    const status = await demoAdapter.testConnection();
+    const status = await httpAdapter.testConnection();
     setSettings((prev) => ({ ...prev, connectionStatus: status }));
     return status;
   }, []);
 
   // --- Voices ---
-  const [voices] = useState<VoiceProfile[]>(() => demoAdapter.listVoices());
+  const [voices, setVoices] = useState<VoiceProfile[]>([]);
+
+  // Load voices from backend on mount
+  useEffect(() => {
+    if (httpAdapter.listVoicesAsync) {
+      httpAdapter.listVoicesAsync().then(setVoices).catch(() => {
+        // Backend not available, keep empty list
+      });
+    }
+  }, []);
 
   // --- History ---
   const [historyRecords, setHistoryRecords] = useState<HistoryRecord[]>([]);
@@ -193,9 +277,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refreshHistory = useCallback(() => {
-    const result = demoAdapter.listHistory(historyFilter);
-    setHistoryRecords(result.records);
-    setHistoryTotalPages(result.totalPages);
+    if (httpAdapter.listHistoryAsync) {
+      httpAdapter.listHistoryAsync(historyFilter).then((result) => {
+        setHistoryRecords(result.records);
+        setHistoryTotalPages(result.totalPages);
+      }).catch(() => {
+        // Backend not available
+      });
+    }
   }, [historyFilter]);
 
   // Load history on mount and whenever filter changes
@@ -203,8 +292,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     refreshHistory();
   }, [refreshHistory]);
 
-  // Demo today generation count (static demo value)
-  const demoTodayCount = 3;
+  // Demo today generation count (0 with real backend)
+  const demoTodayCount = 0;
 
   const value: AppState = {
     generateResult,
@@ -214,7 +303,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     lastRequest,
     costEstimate,
     estimateCost,
-    adapter: demoAdapter,
+    adapter: httpAdapter,
     settings,
     updateSettings,
     saveSettings,

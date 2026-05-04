@@ -4,8 +4,13 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
+    "dev": "vite",
     "build": "vite build",
-    "dev": "vite"
+    "server:dev": "tsx watch server/src/index.ts",
+    "server:build": "tsc -p server/tsconfig.json",
+    "server:start": "node server/dist/index.js",
+    "server:test": "npm test --prefix server",
+    "test": "npm test --prefix server"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",

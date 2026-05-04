@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useLocation } from "react-router";
-import { X, Play, Download, Loader2, PlayCircle, AlertCircle, RefreshCw, Clock } from "lucide-react";
+import { useLocation, Link } from "react-router";
+import { X, Play, Download, Loader2, PlayCircle, AlertCircle, RefreshCw, Clock, Settings } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 
 interface RightPanelProps {
@@ -95,7 +95,7 @@ function DirectorPreview() {
       </div>
 
       <div className="text-[10px] text-text-tertiary text-center border-t border-border-subtle pt-3 mt-2">
-        演示模式 -- Token 估算为粗略计算，不代表实际 API 消耗
+        Token 估算为粗略计算，不代表实际 API 消耗
       </div>
     </div>
   );
@@ -129,7 +129,7 @@ function GenerateOutputPanel() {
           <Loader2 size={32} className="animate-spin" />
         </div>
         <p className="text-text-secondary text-sm font-medium">正在生成语音...</p>
-        <p className="text-text-tertiary text-xs mt-1">演示模式，模拟延迟中</p>
+        <p className="text-text-tertiary text-xs mt-1">请等待后端响应</p>
       </div>
     );
   }
@@ -151,6 +151,15 @@ function GenerateOutputPanel() {
             {generateResult.error?.code ?? "UNKNOWN"}
           </div>
           <p className="text-xs text-text-secondary">{generateResult.error?.message ?? "生成过程中发生错误"}</p>
+          {generateResult.error?.code === "MISSING_API_KEY" && (
+            <Link
+              to="/settings"
+              className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-bg-surface border border-border text-xs font-medium text-accent hover:bg-bg-hover transition-colors w-fit"
+            >
+              <Settings size={12} />
+              前往设置页配置 OpenRouter API Key
+            </Link>
+          )}
         </div>
 
         <div className="flex flex-col gap-2 text-sm bg-bg-sunken p-4 rounded-md border border-border-subtle">
@@ -194,12 +203,6 @@ function GenerateOutputPanel() {
             返回
           </button>
         </div>
-
-        {generateResult.isDemo && (
-          <div className="text-[10px] text-text-tertiary text-center pt-2 border-t border-border-subtle">
-            演示模式 -- 错误信息为模拟数据
-          </div>
-        )}
       </div>
     );
   }
@@ -223,8 +226,7 @@ function GenerateOutputPanel() {
       if (generateResult.audioUrl) {
         const a = document.createElement("a");
         a.href = generateResult.audioUrl;
-        // Demo adapter produces WAV blobs; download extension matches actual format
-        a.download = `${generateResult.jobId}.wav`;
+        a.download = `${generateResult.jobId}.${generateResult.format}`;
         a.click();
       }
     };
@@ -255,7 +257,7 @@ function GenerateOutputPanel() {
                 className="w-8 h-8 rounded-full bg-accent text-bg-base flex items-center justify-center hover:bg-accent-hover transition-colors shrink-0"
                 onClick={handlePlay}
               >
-                <Play fill="currentColor" size={14} className="ml-0.5" />
+                {isPlaying ? <span className="text-xs">||</span> : <Play fill="currentColor" size={14} className="ml-0.5" />}
               </button>
               <div className="flex-1 h-8 flex items-center gap-[2px]">
                 {Array.from({ length: 30 }).map((_, i) => (
@@ -273,7 +275,7 @@ function GenerateOutputPanel() {
                 className="text-xs text-text-secondary hover:text-text-primary transition-colors flex items-center gap-1"
                 onClick={handleDownload}
               >
-                <Download size={14} /> 下载
+                <Download size={14} /> 下载 {generateResult.format.toUpperCase()}
               </button>
             </div>
           </div>
@@ -298,12 +300,6 @@ function GenerateOutputPanel() {
             <span className="text-text-primary text-accent">{generateResult.estimatedCost}</span>
           </div>
         </div>
-
-        {generateResult.isDemo && (
-          <div className="text-[10px] text-warning text-center border-t border-border-subtle pt-3">
-            演示音频，不代表真实模型输出。音频为本地生成的示意音波。
-          </div>
-        )}
       </div>
     );
   }
@@ -424,7 +420,7 @@ function VoicesDetailPanel() {
       </div>
 
       <div className="text-[10px] text-text-tertiary text-center border-t border-border-subtle pt-3">
-        演示模式 -- 探针验证为模拟返回
+        探针结果来自后端真实验证
       </div>
     </div>
   );
@@ -476,8 +472,8 @@ function HistoryPreviewPanel() {
             <span className="text-xs font-mono w-10 text-right">{record.duration.replace("s", "")}</span>
           </div>
           <div className="flex justify-end gap-2">
-            <button className="text-xs text-text-secondary hover:text-text-primary transition-colors flex items-center gap-1">
-              <Download size={14} /> 下载 WAV (演示)
+              <button className="text-xs text-text-secondary hover:text-text-primary transition-colors flex items-center gap-1">
+                <Download size={14} /> 下载音频
             </button>
           </div>
         </div>
@@ -511,7 +507,7 @@ function HistoryPreviewPanel() {
       </button>
 
       <div className="text-[10px] text-text-tertiary text-center border-t border-border-subtle pt-3">
-        演示模式 -- 历史记录为模拟演示数据
+        数据来自后端持久化存储
       </div>
     </div>
   );

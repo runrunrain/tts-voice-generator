@@ -3,14 +3,12 @@ import { ChevronDown, ChevronUp, Plus, Trash2, Loader2 } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import type { AudioFormat, SpeakerConfig } from "../types";
 
-const VOICE_OPTIONS = ["alloy", "echo", "nova", "shimmer", "fable", "onyx"];
-
 const EMOTION_TAGS = ["[happy]", "[sad]", "[excited]", "[calm]", "[angry]", "[nervous]", "[proud]"];
 const EXPRESS_TAGS = ["[slow]", "[fast]", "[pause]", "[whisper]", "[shout]", "[sigh]", "[laugh]"];
 const PARA_TAGS = {"情绪": EMOTION_TAGS, "表达": EXPRESS_TAGS, "副语言": ["[breath]", "[cough]", "[giggle]", "[gasp]", "[yawn]"]};
 
 export function DirectorPage() {
-  const { generate, generatePhase, generateResult, resetGeneration, estimateCost, costEstimate, settings } = useAppState();
+  const { generate, generatePhase, generateResult, resetGeneration, estimateCost, costEstimate, settings, voices } = useAppState();
 
   // Director fields
   const [audioProfile, setAudioProfile] = useState("");
@@ -21,6 +19,11 @@ export function DirectorPage() {
   // Config
   const [voice, setVoice] = useState(settings.defaultVoice);
   const [format, setFormat] = useState<AudioFormat>(settings.defaultFormat);
+
+  // Voice options from backend
+  const voiceOptions = voices.length > 0
+    ? voices.map((v) => v.name)
+    : ["alloy", "echo", "nova", "shimmer", "fable", "onyx"];
 
   // Speakers
   const [speakers, setSpeakers] = useState<SpeakerConfig[]>([
@@ -219,7 +222,7 @@ export function DirectorPage() {
                     value={speaker.voice}
                     onChange={(e) => updateSpeaker(speaker.id, "voice", e.target.value)}
                   >
-                    {VOICE_OPTIONS.map((v) => <option key={v} value={v}>{v}</option>)}
+                    {voiceOptions.map((v) => <option key={v} value={v}>{v}</option>)}
                   </select>
                 </div>
                 <div className="flex items-center gap-2 text-sm">
@@ -278,7 +281,7 @@ export function DirectorPage() {
             onChange={(e) => setVoice(e.target.value)}
             disabled={generatePhase === "loading"}
           >
-            {VOICE_OPTIONS.map((v) => <option key={v} value={v}>{v}</option>)}
+            {voiceOptions.map((v) => <option key={v} value={v}>{v}</option>)}
           </select>
 
           <div className="flex items-center bg-bg-surface border border-border rounded-md overflow-hidden text-sm">
@@ -340,13 +343,6 @@ export function DirectorPage() {
           </button>
         </div>
       </div>
-
-      {/* Demo Notice */}
-      {generateResult?.isDemo && (
-        <div className="px-6 py-1.5 bg-warning-muted border-t border-warning/20 text-xs text-warning text-center shrink-0">
-          演示模式：当前输出为本地演示数据，不代表真实模型输出。
-        </div>
-      )}
     </div>
   );
 }

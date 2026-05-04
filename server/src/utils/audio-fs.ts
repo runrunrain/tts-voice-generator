@@ -4,29 +4,37 @@
  * Handles local audio storage with path constraint:
  *   data/audio/YYYY/MM/DD/{jobId}.{ext}
  *
- * Security: rejects any path traversal attempt.
+ * Security: rejects any path traversal attempt using path.relative check.
+ * Reads the audio base directory from env/settings configuration.
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { env } from "../config/env.js";
 
-const AUDIO_BASE_DIR = path.resolve("./data/audio");
+/**
+ * Resolve the audio base directory from configuration.
+ * Falls back to "./data/audio" if not configured.
+ */
+function getAudioBaseDir(): string {
+  return path.resolve(env.audioOutputDir || "./data/audio");
+}
 
 /**
  * Get the audio output directory for a given date.
- * Format: data/audio/YYYY/MM/DD
+ * Format: {audioDir}/YYYY/MM/DD
  */
 export function getAudioDir(date: Date = new Date()): string {
   const y = date.getFullYear().toString();
   const m = (date.getMonth() + 1).toString().padStart(2, "0");
   const d = date.getDate().toString().padStart(2, "0");
-  return path.join(AUDIO_BASE_DIR, y, m, d);
+  return path.join(getAudioBaseDir(), y, m, d);
 }
 
 /**
  * Get the full file path for an audio asset.
- * Enforces the data/audio/YYYY/MM/DD/{jobId}.{ext} pattern.
+ * Enforces the {audioDir}/YYYY/MM/DD/{jobId}.{ext} pattern.
  */
 export function getAudioFilePath(jobId: string, ext: string, date: Date = new Date()): string {
   const dir = getAudioDir(date);
@@ -61,15 +69,21 @@ export function writeAudioFile(jobId: string, ext: string, buffer: Buffer, date:
 
 /**
  * Read an audio file from disk.
- * Validates that the file path is within the audio directory to prevent path traversal.
+ * Validates that the file path is within the configured audio directory
+ * to prevent path traversal attacks.
+ *
+ * Uses path.relative check: the resolved target must not start with ".."
+ * and must not be an absolute path outside the base directory.
  */
 export function readAudioFile(relativePath: string): Buffer {
-  // Normalize and validate path
-  const resolvedPath = path.resolve(relativePath);
-  const normalizedBase = path.resolve(AUDIO_BASE_DIR);
+  const baseDir = getAudioBaseDir();
+  const resolvedPath = path.resolve(baseDir, relativePath);
 
-  // Security: ensure the resolved path is under the audio directory
-  if (!resolvedPath.startsWith(normalizedBase)) {
+  // Security: use path.relative to detect traversal.
+  // If the resolved path escapes the base dir, the relative path will
+  // start with ".." or be an absolute path on another drive (Windows).
+  const relative = path.relative(baseDir, resolvedPath);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
     throw new Error("Invalid audio path: path traversal detected");
   }
 

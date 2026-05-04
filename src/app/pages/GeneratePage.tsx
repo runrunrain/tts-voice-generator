@@ -6,14 +6,25 @@ import type { AudioFormat } from "../types";
 
 const MAX_CHARS = 5000;
 
-const VOICE_OPTIONS = ["alloy", "echo", "nova", "shimmer", "fable", "onyx"];
-
 export function GeneratePage() {
-  const { generate, generatePhase, generateResult, resetGeneration, estimateCost, costEstimate, settings } = useAppState();
+  const { generate, generatePhase, generateResult, resetGeneration, estimateCost, costEstimate, settings, voices } = useAppState();
 
   const [text, setText] = useState("");
   const [voice, setVoice] = useState(settings.defaultVoice);
   const [format, setFormat] = useState<AudioFormat>(settings.defaultFormat);
+
+  // Sync default voice when settings load from backend
+  useEffect(() => {
+    setVoice((prev) => {
+      if (prev === "Zephyr" && settings.defaultVoice && settings.defaultVoice !== prev) return settings.defaultVoice;
+      return prev;
+    });
+  }, [settings.defaultVoice]);
+
+  // Voice options from backend (with fallback to a minimal list)
+  const voiceOptions = voices.length > 0
+    ? voices.map((v) => v.name)
+    : ["alloy", "echo", "nova", "shimmer", "fable", "onyx"];
 
   // Real-time cost estimation
   useEffect(() => {
@@ -46,7 +57,7 @@ export function GeneratePage() {
       >
         <textarea
           className="w-full h-full bg-transparent resize-none outline-none p-4 text-sm text-text-primary placeholder:text-text-tertiary"
-          placeholder="输入要转为语音的文本内容...&#10;&#10;提示：输入包含 [error] 的文本可触发演示错误态"
+          placeholder="输入要转为语音的文本内容..."
           value={text}
           onChange={(e) => setText(e.target.value)}
           disabled={generatePhase === "loading"}
@@ -73,7 +84,7 @@ export function GeneratePage() {
             onChange={(e) => setVoice(e.target.value)}
             disabled={generatePhase === "loading"}
           >
-            {VOICE_OPTIONS.map((v) => (
+            {voiceOptions.map((v) => (
               <option key={v} value={v}>{v}</option>
             ))}
           </select>
@@ -146,13 +157,6 @@ export function GeneratePage() {
           </span>
         </button>
       </div>
-
-      {/* Demo Notice */}
-      {generateResult?.isDemo && (
-        <div className="mt-2 px-3 py-1.5 rounded-md bg-warning-muted border border-warning/20 text-xs text-warning text-center shrink-0">
-          演示模式：当前输出为本地演示数据，不代表真实模型输出。后续接入后端后将替换为实际生成结果。
-        </div>
-      )}
     </div>
   );
 }

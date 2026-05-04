@@ -1,13 +1,14 @@
-import { useState, useCallback } from "react";
-import { Eye, EyeOff, RefreshCw, Loader2, Shield } from "lucide-react";
+import { useState, useCallback, useEffect } from "react";
+import { Eye, EyeOff, RefreshCw, Loader2, Shield, Settings } from "lucide-react";
 import { useAppState } from "../state/AppContext";
-import type { AudioFormat, ConnectionStatus } from "../types";
+import type { AppSettings, AudioFormat, ConnectionStatus } from "../types";
 
 export function SettingsPage() {
-  const { settings, updateSettings, saveSettings, testConnection } = useAppState();
+  const { settings, saveSettings, testConnection } = useAppState();
 
   // Local form state (synced on save)
   const [apiKey, setApiKey] = useState("");
+  const [apiKeyMasked, setApiKeyMasked] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const [defaultModel, setDefaultModel] = useState(settings.defaultModel);
   const [defaultVoice, setDefaultVoice] = useState(settings.defaultVoice);
@@ -16,32 +17,82 @@ export function SettingsPage() {
   const [maxChars, setMaxChars] = useState(settings.maxChars);
   const [maxConcurrent, setMaxConcurrent] = useState(settings.maxConcurrent);
 
+  // Sync form when settings load from backend
+  useEffect(() => {
+    setDefaultModel(settings.defaultModel);
+    setDefaultVoice(settings.defaultVoice);
+    setDefaultFormat(settings.defaultFormat);
+    setAudioDir(settings.audioDir);
+    setMaxChars(settings.maxChars);
+    setMaxConcurrent(settings.maxConcurrent);
+    // If backend reports key is configured, show masked state
+    if (settings.openRouterApiKey === "***configured***") {
+      setApiKeyMasked(true);
+    } else {
+      setApiKeyMasked(false);
+    }
+  }, [settings.defaultModel, settings.defaultVoice, settings.defaultFormat, settings.audioDir, settings.maxChars, settings.maxConcurrent, settings.openRouterApiKey]);
+
   // Save feedback
-  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>(settings.connectionStatus);
+  const [connectionLatency, setConnectionLatency] = useState<number | null>(null);
 
   const handleSave = useCallback(async () => {
     setSaveStatus("saving");
-    updateSettings({
-      // Only persist a boolean flag for "has key been entered", not the key itself
-      openRouterApiKey: apiKey.trim() ? "__filled__" : "",
+
+    // Build the payload directly from local form state -- this avoids the
+    // stale-closure bug where saveSettings would read the old `settings` value
+    // because updateSettings hasn't triggered a re-render yet.
+    const payload: Partial<AppSettings> = {
+      openRouterApiKey: apiKey.trim() || undefined,
       defaultModel,
       defaultVoice,
       defaultFormat,
       audioDir,
       maxChars,
       maxConcurrent,
-    });
-    await saveSettings();
+    };
+
+    await saveSettings(payload);
+
+    // If a new key was just saved, clear the plaintext from local state
+    if (apiKey.trim()) {
+      setApiKey("");
+      setApiKeyMasked(true);
+    } else {
+      // User explicitly cleared the key field -- check if backend still has one
+      try {
+        const res = await fetch("/api/settings");
+        const data = await res.json();
+        setApiKeyMasked(!!data.hasOpenRouterApiKey);
+      } catch {
+        setApiKeyMasked(false);
+      }
+    }
+
     setSaveStatus("saved");
     setTimeout(() => setSaveStatus("idle"), 2000);
-  }, [apiKey, defaultModel, defaultVoice, defaultFormat, audioDir, maxChars, maxConcurrent, updateSettings, saveSettings]);
+  }, [apiKey, defaultModel, defaultVoice, defaultFormat, audioDir, maxChars, maxConcurrent, saveSettings]);
 
   const handleTestConnection = useCallback(async () => {
     setConnectionStatus("testing");
-    const status = await testConnection();
-    setConnectionStatus(status);
-  }, [testConnection]);
+    setConnectionLatency(null);
+    try {
+      const res = await fetch("/api/settings/test", { method: "POST" });
+      const data = await res.json();
+      if (data.error === "MISSING_API_KEY") {
+        setConnectionStatus("failed");
+      } else if (data.ok) {
+        setConnectionStatus("connected");
+        setConnectionLatency(data.latencyMs ?? null);
+      } else {
+        setConnectionStatus("failed");
+      }
+    } catch {
+      setConnectionStatus("failed");
+    }
+  }, []);
 
   return (
     <div className="flex flex-col h-full bg-bg-base overflow-y-auto">
@@ -66,8 +117,8 @@ export function SettingsPage() {
                       <input
                         type={showApiKey ? "text" : "password"}
                         value={apiKey}
-                        onChange={(e) => setApiKey(e.target.value)}
-                        placeholder="在此输入 API Key..."
+                        onChange={(e) => { setApiKey(e.target.value); setApiKeyMasked(false); }}
+                        placeholder={apiKeyMasked ? "Key 已配置（已安全存储在后端）" : "在此输入 API Key..."}
                         className="w-full bg-bg-sunken border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-border-focus font-mono text-text-primary placeholder:text-text-tertiary"
                       />
                       <button
@@ -80,14 +131,14 @@ export function SettingsPage() {
                     <button
                       className="px-4 py-2 bg-bg-base border border-border rounded-md text-sm font-medium hover:bg-bg-hover transition-colors disabled:opacity-50"
                       onClick={handleTestConnection}
-                      disabled={connectionStatus === "testing" || !apiKey.trim()}
+                      disabled={connectionStatus === "testing"}
                     >
-                      {connectionStatus === "testing" ? <Loader2 size={14} className="animate-spin inline" /> : "测试（模拟）"}
+                      {connectionStatus === "testing" ? <Loader2 size={14} className="animate-spin inline" /> : "测试连接"}
                     </button>
                   </div>
                   <div className="flex items-center gap-1.5 text-[10px] text-text-tertiary mt-1">
                     <Shield size={12} />
-                    <span>真实 API Key 应由后端安全存储，此处仅用于演示界面交互。生产环境请勿在前端暴露密钥。</span>
+                    <span>API Key 由后端安全存储，前端不会保存明文 Key。保存后 Key 将被遮蔽显示。</span>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 text-sm">
@@ -101,10 +152,10 @@ export function SettingsPage() {
                       ? "bg-error-muted text-error border-error/20"
                       : "bg-bg-sunken text-text-tertiary border-border"
                   }`}>
-                    {connectionStatus === "connected" ? "演示连接已就绪（未调用真实 OpenRouter）" :
-                     connectionStatus === "testing" ? "测试中（模拟）..." :
-                     connectionStatus === "failed" ? "连接失败" :
-                     apiKey.trim() ? "待测试" : "未配置"}
+                    {connectionStatus === "connected" ? `已连接${connectionLatency ? ` (${connectionLatency}ms)` : ""}` :
+                     connectionStatus === "testing" ? "测试中..." :
+                     connectionStatus === "failed" ? "连接失败 -- 请检查 API Key 是否正确" :
+                     apiKeyMasked ? "Key 已配置" : "未配置"}
                   </span>
                 </div>
               </div>
@@ -120,24 +171,17 @@ export function SettingsPage() {
                     value={defaultModel}
                     onChange={(e) => setDefaultModel(e.target.value)}
                   >
-                    <option>gemini-3.1-flash</option>
-                    <option>gemini-3.1-pro</option>
+                    <option value="google/gemini-3.1-flash-tts-preview">gemini-3.1-flash-tts</option>
                   </select>
                 </div>
                 <div className="flex items-center justify-between">
                   <label className="text-sm text-text-secondary w-32">默认音色:</label>
-                  <select
+                  <input
+                    type="text"
                     className="flex-1 bg-bg-sunken border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-border-focus text-text-primary"
                     value={defaultVoice}
                     onChange={(e) => setDefaultVoice(e.target.value)}
-                  >
-                    <option>alloy</option>
-                    <option>echo</option>
-                    <option>nova</option>
-                    <option>shimmer</option>
-                    <option>fable</option>
-                    <option>onyx</option>
-                  </select>
+                  />
                 </div>
                 <div className="flex items-center justify-between">
                   <label className="text-sm text-text-secondary w-32">默认格式:</label>
@@ -222,8 +266,8 @@ export function SettingsPage() {
                 </div>
                 <div className="flex items-center gap-2 text-sm">
                   <span className="text-text-tertiary">状态:</span>
-                  <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-success-muted text-success border border-success/20">
-                    已启用（演示）
+                  <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-bg-sunken text-text-tertiary border border-border">
+                    待实现
                   </span>
                 </div>
               </div>
@@ -279,19 +323,12 @@ export function SettingsPage() {
               <div className="flex items-center justify-between text-sm">
                 <div className="flex items-center gap-2">
                   <span className="text-text-tertiary">当前会话状态:</span>
-                  <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-accent-muted text-accent border border-accent/20">
-                    已激活
+                  <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-bg-sunken text-text-tertiary border border-border">
+                    待实现
                   </span>
                 </div>
 
                 <div className="flex items-center gap-4">
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="text-text-tertiary">已用额度:</span>
-                    <div className="w-24 h-1.5 bg-border-subtle rounded-full overflow-hidden">
-                      <div className="h-full bg-accent w-[30%]" />
-                    </div>
-                    <span className="font-mono text-text-primary">3/10</span>
-                  </div>
                   <button className="text-xs text-error hover:text-error/80 transition-colors">
                     撤销授权
                   </button>
@@ -306,7 +343,7 @@ export function SettingsPage() {
 
       <div className="h-[52px] shrink-0 bg-bg-sunken border-t border-border-subtle mt-auto flex items-center justify-between px-8 sticky bottom-0 z-10">
         <div className="text-xs text-text-tertiary">
-          演示模式 -- 设置仅保存在本地会话中
+          设置通过后端 API 持久化保存
         </div>
         <button
           className="px-6 py-2 rounded-md text-sm font-medium transition-colors shadow-shadow-glow disabled:opacity-50"
@@ -317,7 +354,7 @@ export function SettingsPage() {
           onClick={handleSave}
           disabled={saveStatus === "saving"}
         >
-          {saveStatus === "saving" ? "保存中..." : saveStatus === "saved" ? "已保存" : "保存设置"}
+          {saveStatus === "saving" ? "保存中..." : saveStatus === "saved" ? "已保存" : saveStatus === "error" ? "保存失败" : "保存设置"}
         </button>
       </div>
     </div>

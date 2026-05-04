@@ -1,0 +1,24 @@
+{
+  "taskId": "20260503-frontend-api-integration",
+  "timestamp": "2026-05-03T12:15:00Z",
+  "agent": "designer",
+  "projectId": "tts-voice-generator",
+  "taskBrief": "Frontend real API integration -- replace demo data with backend endpoints across all pages and components",
+  "status": "completed",
+  "tags": ["frontend", "api-integration", "react", "httpAdapter", "backend-proxy"],
+  "relatedFiles": [
+    "src/app/components/TopBar.tsx",
+    "src/app/components/BottomBar.tsx",
+    "src/app/components/RightPanel.tsx",
+    "src/app/pages/GeneratePage.tsx",
+    "src/app/pages/SettingsPage.tsx",
+    "src/app/pages/VoicesPage.tsx",
+    "src/app/pages/HistoryPage.tsx",
+    "src/app/pages/HistoryDetailPage.tsx",
+    "src/app/pages/DirectorPage.tsx"
+  ],
+  "nextSteps": {
+    "suggestedAgent": "reviewer",
+    "suggestedAction": "Review 8 changed frontend files for API contract alignment, type safety, and MISSING_API_KEY error handling completeness"
+  }
+}
