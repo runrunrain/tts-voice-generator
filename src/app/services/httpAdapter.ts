@@ -54,6 +54,56 @@ function mapVoiceStatus(status: string): VoiceStatus {
   }
 }
 
+// ─── Format Resolution ────────────────────────────────────────────────────────
+
+/**
+ * Resolve the actual audio format from the backend response.
+ *
+ * Priority:
+ * 1. outputFormat field (explicit, always correct)
+ * 2. Infer from Content-Type header (fallback for older backends)
+ * 3. Fall back to the user-requested format (last resort)
+ */
+function resolveActualFormat(
+  outputFormat: AudioFormat | undefined,
+  contentType: string | undefined,
+  fallback: AudioFormat,
+): AudioFormat {
+  if (outputFormat === "wav" || outputFormat === "pcm" || outputFormat === "mp3") {
+    return outputFormat;
+  }
+
+  if (contentType) {
+    const ct = contentType.toLowerCase();
+    if (ct.includes("wav")) return "wav";
+    if (ct.includes("pcm")) return "pcm";
+    if (ct.includes("mpeg") || ct.includes("mp3")) return "mp3";
+  }
+
+  return fallback;
+}
+
+/**
+ * Resolve the display format for a history record.
+ *
+ * Priority:
+ * 1. assetFormat - the actual format of the audio file on disk (from mimeType)
+ * 2. job format  - the requested/response format stored on the job record (fallback)
+ *
+ * This ensures that when a legacy "mp3" request actually produces a "wav" file
+ * (because the upstream provider only outputs PCM, which gets wrapped to WAV),
+ * the history list shows the real format the user can download.
+ */
+function resolveHistoryFormat(assetFormat: string | null | undefined, jobFormat: string | undefined): string {
+  if (assetFormat && (assetFormat === "wav" || assetFormat === "pcm" || assetFormat === "mp3")) {
+    return assetFormat;
+  }
+  if (jobFormat && (jobFormat === "wav" || jobFormat === "pcm" || jobFormat === "mp3")) {
+    return jobFormat;
+  }
+  return "wav";
+}
+
 // ─── Adapter Implementation ──────────────────────────────────────────────────
 
 export const httpAdapter: TtsServiceAdapter = {
@@ -118,17 +168,31 @@ export const httpAdapter: TtsServiceAdapter = {
         createdAt?: string;
         generationId?: string;
         assetId?: number;
+        /** Actual output format after server-side resolution (e.g. "wav" when user requested "mp3" for Gemini) */
+        outputFormat?: AudioFormat;
+        /** The format the user originally requested */
+        requestedFormat?: AudioFormat;
+        /** The format sent to the upstream provider */
+        upstreamFormat?: "pcm" | "mp3";
       }>("/api/tts/generate", {
         method: "POST",
         body: JSON.stringify(body),
       });
 
       if (result.status === "succeeded") {
+        // Resolve the actual output format: prefer outputFormat from backend,
+        // fall back to inferring from contentType, and finally to req.format.
+        const actualFormat = resolveActualFormat(
+          result.outputFormat,
+          result.contentType,
+          req.format,
+        );
+
         return {
           jobId: result.jobId,
           phase: "success",
           voice: req.voice,
-          format: req.format,
+          format: actualFormat,
           charCount: result.charCount || req.text.length,
           duration: result.duration || "0.0s",
           estimatedCost: result.estimatedCost || "$0.00",
@@ -294,7 +358,11 @@ export const httpAdapter: TtsServiceAdapter = {
         id: r.id,
         text: r.textPreview,
         voice: r.voice,
-        format: r.format as AudioFormat,
+        // Prefer the actual asset format over the job's requested format.
+        // When a legacy mp3 request produces a wav asset, this ensures
+        // the history list shows "wav" (what the user actually received),
+        // not "mp3" (what was requested but not delivered).
+        format: resolveHistoryFormat(r.assetFormat, r.format) as AudioFormat,
         date: r.createdAt ? new Date(r.createdAt).toLocaleString("zh-CN") : "",
         source: (r.source === "用户" ? "用户" : "Agent") as HistorySource,
         duration: r.durationMs != null ? `${(r.durationMs / 1000).toFixed(1)}s` : "0.0s",

@@ -46,6 +46,37 @@ interface JobDetail {
   } | null;
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Derive the actual audio format to display for a job detail.
+ *
+ * Priority:
+ * 1. audio.mimeType -> infer from MIME (e.g. "audio/wav" -> "wav")
+ * 2. audio.fileName -> infer from extension (e.g. "xxx.wav" -> "wav")
+ * 3. job.responseFormat -> the format stored on the job record (last resort)
+ *
+ * This ensures that when a legacy "mp3" request actually produced a "wav" asset,
+ * the detail page shows the real format the user can download.
+ */
+function deriveActualFormat(detail: JobDetail): string {
+  const audio = detail.audio;
+  if (audio) {
+    // Prefer MIME type inference
+    const mime = audio.mimeType?.toLowerCase() ?? "";
+    if (mime.includes("wav")) return "wav";
+    if (mime.includes("pcm")) return "pcm";
+    if (mime.includes("mpeg") || mime.includes("mp3")) return "mp3";
+
+    // Fallback to file extension
+    const ext = audio.fileName?.split(".").pop()?.toLowerCase() ?? "";
+    if (ext === "wav") return "wav";
+    if (ext === "pcm") return "pcm";
+    if (ext === "mp3") return "mp3";
+  }
+  return detail.job.responseFormat || "wav";
+}
+
 export function HistoryDetailPage() {
   const { jobId } = useParams();
   const { generate } = useAppState();
@@ -221,7 +252,7 @@ export function HistoryDetailPage() {
                     className="flex items-center gap-2 px-4 py-2 rounded-md bg-bg-base border border-border text-sm font-medium hover:bg-bg-hover transition-colors"
                     onClick={handleDownload}
                   >
-                    <Download size={16} /> 下载 {job.responseFormat.toUpperCase()}
+                    <Download size={16} /> 下载 {deriveActualFormat(detail).toUpperCase()}
                   </button>
                 </div>
               </div>
@@ -288,7 +319,7 @@ export function HistoryDetailPage() {
                   </div>
                   <div>
                     <div className="text-text-tertiary text-xs mb-1">格式</div>
-                    <div className="text-text-primary font-mono text-xs">{job.responseFormat}</div>
+                    <div className="text-text-primary font-mono text-xs">{deriveActualFormat(detail)}</div>
                   </div>
                   <div>
                     <div className="text-text-tertiary text-xs mb-1">字符数</div>

@@ -1,0 +1,19 @@
+{
+  "taskId": "20260504-format-resolution-fix",
+  "timestamp": "2026-05-04T21:52:00Z",
+  "agent": "coder",
+  "projectId": "tts-voice-generator",
+  "taskBrief": "Fix legacy mp3 format masking as actual output format in httpAdapter",
+  "status": "completed",
+  "tags": ["bug-fix", "format-resolution", "legacy-mp3", "wav"],
+  "relatedFiles": [
+    "src/app/services/httpAdapter.ts",
+    "src/app/components/RightPanel.tsx",
+    "src/app/pages/HistoryDetailPage.tsx",
+    "src/app/pages/HistoryPage.tsx"
+  ],
+  "nextSteps": {
+    "suggestedAgent": "reviewer",
+    "suggestedAction": "Audit the format resolution fix in httpAdapter.ts"
+  }
+}

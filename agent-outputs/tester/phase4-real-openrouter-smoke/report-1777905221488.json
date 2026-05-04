@@ -1,0 +1,12 @@
+{
+  "timestamp": "2026-05-04T14:33:41.488Z",
+  "realOpenRouterVerified": true,
+  "status": "verified",
+  "generationStatus": "succeeded",
+  "generationId": "gen-tts-1777905218-Hov2muNZuN7T2MfSfTX5",
+  "jobId": "d776d373-8f1a-4770-ab3e-ddc9c83b5afe",
+  "assetId": 1,
+  "audioUrl": "/api/audio/1",
+  "sizeBytes": 147884,
+  "contentType": "audio/wav"
+}

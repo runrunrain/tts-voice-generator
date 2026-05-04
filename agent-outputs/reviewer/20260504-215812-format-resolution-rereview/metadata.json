@@ -1,0 +1,19 @@
+﻿{
+  "taskId": "20260504-215812-format-resolution-rereview",
+  "timestamp": "2026-05-04T21:58:12+08:00",
+  "agent": "reviewer",
+  "projectId": "tts-voice-generator",
+  "taskBrief": "format-resolution-rereview",
+  "status": "completed",
+  "tags": ["review", "format-resolution", "tts", "frontend"],
+  "relatedFiles": [
+    "src/app/services/httpAdapter.ts",
+    "src/app/components/RightPanel.tsx",
+    "src/app/pages/HistoryPage.tsx",
+    "src/app/pages/HistoryDetailPage.tsx",
+    "server/src/routes/history.ts"
+  ],
+  "nextSteps": {
+    "suggestedAction": "Fix remaining history asset-format display paths and failing automated test gate, then request rereview."
+  }
+}
