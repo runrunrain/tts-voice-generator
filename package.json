@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:all": "concurrently \"npm run server:dev\" \"npm run dev\"",
     "build": "vite build",
+    "build:all": "npm run build && npm run server:build",
+    "start:all": "npm run build:all && npm run server:start",
     "server:dev": "tsx watch server/src/index.ts",
     "server:build": "npm run build --prefix server",
     "server:start": "node server/dist/index.js",
@@ -74,6 +77,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "4.1.12",
     "@vitejs/plugin-react": "4.7.0",
+    "concurrently": "^9.2.1",
     "tailwindcss": "4.1.12",
     "vite": "6.3.5"
   },

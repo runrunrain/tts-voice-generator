@@ -134,6 +134,9 @@ describe("Data Consistency: succeeded job has audio asset", () => {
   beforeEach(() => {
     closeDb();
     if (fs.existsSync(testState.dbFilePath)) fs.unlinkSync(testState.dbFilePath);
+    const audioDir = getAudioBaseDir();
+    if (fs.existsSync(audioDir)) fs.rmSync(audioDir, { recursive: true, force: true });
+    fs.mkdirSync(audioDir, { recursive: true });
     initSchema();
     app = createApp();
     mockFetch = vi.fn();
@@ -191,6 +194,9 @@ describe("Data Consistency: succeeded job has audio asset", () => {
     const asset = db.select().from(audioAsset).where(eq(audioAsset.jobId, body.jobId)).get();
     expect(asset).toBeTruthy();
     expect(asset!.mimeType).toBe("audio/wav");
+    expect(asset!.sampleRate).toBe(24000);
+    expect(asset!.bitDepth).toBe(16);
+    expect(asset!.channels).toBe(1);
     // WAV size = 44 header + PCM data
     expect(asset!.sizeBytes).toBe(44 + pcmBytes.length);
     expect(asset!.sizeBytes).toBeGreaterThan(0);
@@ -209,6 +215,13 @@ describe("Data Consistency: succeeded job has audio asset", () => {
     expect(fs.existsSync(fullPath)).toBe(true);
     const fileContent = fs.readFileSync(fullPath);
     expect(fileContent.length).toBe(44 + pcmBytes.length);
+
+    const detailRes = await r(app, `/api/jobs/${body.jobId}`);
+    expect(detailRes.status).toBe(200);
+    const detailBody = await detailRes.json();
+    expect(detailBody.audio.sampleRate).toBe(24000);
+    expect(detailBody.audio.bitDepth).toBe(16);
+    expect(detailBody.audio.channels).toBe(1);
   });
 
   it("succeeded job audio is retrievable via /api/audio/:assetId", async () => {
@@ -252,6 +265,9 @@ describe("Data Consistency: failed jobs do NOT create audio assets", () => {
   beforeEach(() => {
     closeDb();
     if (fs.existsSync(testState.dbFilePath)) fs.unlinkSync(testState.dbFilePath);
+    const audioDir = getAudioBaseDir();
+    if (fs.existsSync(audioDir)) fs.rmSync(audioDir, { recursive: true, force: true });
+    fs.mkdirSync(audioDir, { recursive: true });
     initSchema();
     app = createApp();
     mockFetch = vi.fn();
@@ -435,6 +451,9 @@ describe("Data Consistency: no orphan temp files after errors", () => {
   beforeEach(() => {
     closeDb();
     if (fs.existsSync(testState.dbFilePath)) fs.unlinkSync(testState.dbFilePath);
+    const audioDir = getAudioBaseDir();
+    if (fs.existsSync(audioDir)) fs.rmSync(audioDir, { recursive: true, force: true });
+    fs.mkdirSync(audioDir, { recursive: true });
     initSchema();
     app = createApp();
     mockFetch = vi.fn();
@@ -453,11 +472,12 @@ describe("Data Consistency: no orphan temp files after errors", () => {
   });
 
   it("no .tmp orphan files remain after MISSING_API_KEY error", async () => {
-    await r(app, "/api/tts/generate", {
+    const res = await r(app, "/api/tts/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: validGenerateBody(),
     });
+    const body = await res.json();
 
     // Use negative maxAgeMs so even brand-new files count as orphans
     const orphans = scanOrphanFiles(-10000);
@@ -477,11 +497,12 @@ describe("Data Consistency: no orphan temp files after errors", () => {
       )
     );
 
-    await r(app, "/api/tts/generate", {
+    const res = await r(app, "/api/tts/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: validGenerateBody(),
     });
+    const body = await res.json();
 
     const orphans = scanOrphanFiles(-10000);
     const tmpOrphans = orphans.filter(o => o.path.endsWith(".tmp"));
@@ -518,21 +539,23 @@ describe("Data Consistency: no orphan temp files after errors", () => {
       })
     );
 
-    await r(app, "/api/tts/generate", {
+    const res = await r(app, "/api/tts/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: validGenerateBody(),
     });
+    const body = await res.json();
 
     // No temp files after successful write
     const orphans = scanOrphanFiles(-10000);
     const tmpOrphans = orphans.filter(o => o.path.endsWith(".tmp"));
     expect(tmpOrphans.length).toBe(0);
 
-    // But the real file should exist (not .tmp) - now WAV format
+    // But the real file for this job should exist (not .tmp) - now WAV format
+    const asset = getDb().select().from(audioAsset).where(eq(audioAsset.jobId, body.jobId)).get();
+    expect(asset).toBeTruthy();
     const baseDir = getAudioBaseDir();
-    const wavFiles = findFilesRecursive(baseDir, ".wav");
-    expect(wavFiles.length).toBe(1);
+    expect(fs.existsSync(path.join(baseDir, asset!.filePath))).toBe(true);
   });
 });
 

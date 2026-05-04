@@ -377,6 +377,7 @@ function VoicesDetailPanel() {
   const [selectedVoice, setSelectedVoice] = useState<VoiceProfile | null>(voices[0] ?? null);
   const [probeStatus, setProbeStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [probeLatency, setProbeLatency] = useState("");
+  const [probeError, setProbeError] = useState<string | null>(null);
 
   // Sync selectedVoice when voices populate after initial empty state
   useEffect(() => {
@@ -396,9 +397,15 @@ function VoicesDetailPanel() {
   const handleProbe = async () => {
     if (!selectedVoice) return;
     setProbeStatus("loading");
+    setProbeError(null);
     const result = await adapter.probeVoice(selectedVoice.name);
     setProbeLatency(result.latency);
-    setProbeStatus(result.status === "success" ? "success" : "error");
+    if (result.status === "success") {
+      setProbeStatus("success");
+    } else {
+      setProbeStatus("error");
+      setProbeError(result.error || null);
+    }
     setTimeout(() => setProbeStatus("idle"), 3000);
   };
 
@@ -533,7 +540,7 @@ function VoicesDetailPanel() {
         }`}>
           {probeStatus === "loading" ? "正在验证..." :
            probeStatus === "success" ? `验证成功，延迟 ${probeLatency}` :
-           `验证失败${probeLatency ? `，${probeLatency}` : ""}`}
+           `验证失败${probeError === "MISSING_API_KEY" ? ": 未配置 API Key" : ""}`}
         </div>
       )}
 

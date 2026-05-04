@@ -11,6 +11,7 @@ import { createContext, useContext, useState, useCallback, useRef, useEffect, ty
 import type {
   AudioFormat,
   AppSettings,
+  AgentSettings,
   ConnectionStatus,
   CostEstimate,
   GeneratePhase,
@@ -19,6 +20,7 @@ import type {
   HistoryFilter,
   HistoryRecord,
   VoiceProfile,
+  VoiceStats,
   TtsServiceAdapter,
   AssemblePromptRequest,
   AssemblePromptResponse,
@@ -57,6 +59,10 @@ interface AppState {
   saveSettings: (payload?: Partial<AppSettings>) => Promise<void>;
   testConnection: () => Promise<ConnectionStatus>;
 
+  // Agent token management
+  rotateLocalPluginToken: () => Promise<string | null>;
+  clearLocalPluginToken: () => Promise<void>;
+
   // Voices
   voices: VoiceProfile[];
   /** Whether a voices fetch is in progress */
@@ -67,6 +73,8 @@ interface AppState {
   voicesLoaded: boolean;
   /** Retry fetching voices after an error */
   refreshVoices: () => void;
+  /** Voice statistics from backend (availability report, error summary) */
+  voiceStats: VoiceStats | null;
 
   // History
   historyRecords: HistoryRecord[];
@@ -226,6 +234,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
     maxChars: 5000,
     maxConcurrent: 2,
     connectionStatus: "untested",
+    agent: {
+      authMode: "confirm_each",
+      maxRequests: 10,
+      maxChars: 10000,
+      maxCost: 0.01,
+      sessionExpiry: 3600,
+      hasLocalPluginToken: false,
+      localPluginTokenFingerprint: null,
+    },
   });
 
   // Load settings from backend on mount
@@ -244,6 +261,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
           audioDir: data.audioOutputDir || prev.audioDir,
           maxChars: data.maxCharsPerRequest || prev.maxChars,
           maxConcurrent: data.maxConcurrentJobs || prev.maxConcurrent,
+          agent: {
+            authMode: data.agentAuthMode ?? data.agent?.authMode ?? prev.agent.authMode,
+            maxRequests: data.agentMaxRequests ?? data.agent?.maxRequests ?? prev.agent.maxRequests,
+            maxChars: data.agentMaxChars ?? data.agent?.maxChars ?? prev.agent.maxChars,
+            maxCost: data.agentMaxCost ?? data.agent?.maxCost ?? prev.agent.maxCost,
+            sessionExpiry: data.agentSessionExpiry ?? data.agent?.sessionExpiry ?? prev.agent.sessionExpiry,
+            hasLocalPluginToken: data.hasLocalPluginToken ?? data.agent?.hasLocalPluginToken ?? false,
+            localPluginTokenFingerprint: data.localPluginTokenFingerprint ?? data.agent?.fingerprint ?? null,
+          },
         }));
       })
       .catch(() => {
@@ -268,11 +294,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const saveSettings = useCallback(async (payload?: Partial<AppSettings>) => {
     // Merge: explicit payload wins, then current state
     const source = payload
-      ? { ...settings, ...payload }
+      ? { ...settings, ...payload, agent: { ...settings.agent, ...payload.agent } }
       : settings;
 
+    let res: Response;
     try {
-      const res = await fetch("/api/settings", {
+      res = await fetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -290,32 +317,46 @@ export function AppProvider({ children }: { children: ReactNode }) {
           audioOutputDir: source.audioDir,
           maxCharsPerRequest: source.maxChars,
           maxConcurrentJobs: source.maxConcurrent,
+          // Agent fields (flat format for compatibility)
+          agentAuthMode: source.agent.authMode,
+          agentMaxRequests: source.agent.maxRequests,
+          agentMaxChars: source.agent.maxChars,
+          agentMaxCost: source.agent.maxCost,
+          agentSessionExpiry: source.agent.sessionExpiry,
         }),
       });
+    } catch {
+      throw new Error("网络错误：无法连接到服务器，请检查网络连接");
+    }
 
-      if (!res.ok) {
-        console.error("Failed to save settings:", res.status, await res.text());
-        return;
-      }
+    if (!res.ok) {
+      throw new Error(`保存失败 (HTTP ${res.status})`);
+    }
 
-      // Re-fetch authoritative settings from backend after save
-      const freshRes = await fetch("/api/settings");
-      if (freshRes.ok) {
-        const data = await freshRes.json();
-        const hasKey = data.hasOpenRouterApiKey || data.openRouterApiKey === "***configured***";
-        setSettings((prev) => ({
-          ...prev,
-          openRouterApiKey: hasKey ? (data.keyMask || data.openRouterApiKey || "***configured***") : "",
-          defaultModel: data.defaultModel || prev.defaultModel,
-          defaultVoice: data.defaultVoice || prev.defaultVoice,
-          defaultFormat: data.defaultFormat || prev.defaultFormat,
-          audioDir: data.audioOutputDir || prev.audioDir,
-          maxChars: data.maxCharsPerRequest || prev.maxChars,
-          maxConcurrent: data.maxConcurrentJobs || prev.maxConcurrent,
-        }));
-      }
-    } catch (err) {
-      console.error("Failed to save settings:", err);
+    // Re-fetch authoritative settings from backend after save
+    const freshRes = await fetch("/api/settings");
+    if (freshRes.ok) {
+      const data = await freshRes.json();
+      const hasKey = data.hasOpenRouterApiKey || data.openRouterApiKey === "***configured***";
+      setSettings((prev) => ({
+        ...prev,
+        openRouterApiKey: hasKey ? (data.keyMask || data.openRouterApiKey || "***configured***") : "",
+        defaultModel: data.defaultModel || prev.defaultModel,
+        defaultVoice: data.defaultVoice || prev.defaultVoice,
+        defaultFormat: data.defaultFormat || prev.defaultFormat,
+        audioDir: data.audioOutputDir || prev.audioDir,
+        maxChars: data.maxCharsPerRequest || prev.maxChars,
+        maxConcurrent: data.maxConcurrentJobs || prev.maxConcurrent,
+        agent: {
+          authMode: data.agentAuthMode ?? data.agent?.authMode ?? prev.agent.authMode,
+          maxRequests: data.agentMaxRequests ?? data.agent?.maxRequests ?? prev.agent.maxRequests,
+          maxChars: data.agentMaxChars ?? data.agent?.maxChars ?? prev.agent.maxChars,
+          maxCost: data.agentMaxCost ?? data.agent?.maxCost ?? prev.agent.maxCost,
+          sessionExpiry: data.agentSessionExpiry ?? data.agent?.sessionExpiry ?? prev.agent.sessionExpiry,
+          hasLocalPluginToken: data.hasLocalPluginToken ?? data.agent?.hasLocalPluginToken ?? false,
+          localPluginTokenFingerprint: data.localPluginTokenFingerprint ?? data.agent?.fingerprint ?? null,
+        },
+      }));
     }
   }, [settings]);
 
@@ -326,8 +367,84 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return status;
   }, []);
 
+  /**
+   * Rotate (regenerate) the local plugin token.
+   * Returns the plaintext token on success. The caller (SettingsPage) may hold
+   * the plaintext in component-local state for one-time display -- it is never
+   * persisted to localStorage, sessionStorage, or global React context.
+   * Throws on network or server errors so the caller can surface failure UI.
+   */
+  const rotateLocalPluginToken = useCallback(async (): Promise<string | null> => {
+    let res: Response;
+    try {
+      res = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ localPluginTokenAction: "rotate" }),
+      });
+    } catch {
+      throw new Error("网络错误：无法连接到服务器");
+    }
+
+    if (!res.ok) {
+      throw new Error(`Token 轮换失败 (HTTP ${res.status})`);
+    }
+
+    const data = await res.json();
+    // Re-fetch settings to update fingerprint
+    const freshRes = await fetch("/api/settings");
+    if (freshRes.ok) {
+      const fresh = await freshRes.json();
+      setSettings((prev) => ({
+        ...prev,
+        agent: {
+          ...prev.agent,
+          hasLocalPluginToken: fresh.hasLocalPluginToken ?? true,
+          localPluginTokenFingerprint: fresh.localPluginTokenFingerprint ?? fresh.agent?.fingerprint ?? null,
+        },
+      }));
+    }
+    return data.localPluginToken ?? null;
+  }, []);
+
+  /**
+   * Clear (remove) the local plugin token.
+   * Throws on network or server errors so the caller can surface failure UI.
+   */
+  const clearLocalPluginToken = useCallback(async (): Promise<void> => {
+    let res: Response;
+    try {
+      res = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ localPluginTokenAction: "clear" }),
+      });
+    } catch {
+      throw new Error("网络错误：无法连接到服务器");
+    }
+
+    if (!res.ok) {
+      throw new Error(`Token 清除失败 (HTTP ${res.status})`);
+    }
+
+    // Re-fetch settings to update state
+    const freshRes = await fetch("/api/settings");
+    if (freshRes.ok) {
+      const fresh = await freshRes.json();
+      setSettings((prev) => ({
+        ...prev,
+        agent: {
+          ...prev.agent,
+          hasLocalPluginToken: fresh.hasLocalPluginToken ?? false,
+          localPluginTokenFingerprint: fresh.localPluginTokenFingerprint ?? fresh.agent?.fingerprint ?? null,
+        },
+      }));
+    }
+  }, []);
+
   // --- Voices ---
   const [voices, setVoices] = useState<VoiceProfile[]>([]);
+  const [voiceStats, setVoiceStats] = useState<VoiceStats | null>(null);
   const [voicesLoading, setVoicesLoading] = useState(false);
   const [voicesError, setVoicesError] = useState<string | null>(null);
   const [voicesLoaded, setVoicesLoaded] = useState(false);
@@ -343,7 +460,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     httpAdapter.listVoicesAsync().then((result) => {
       // Only apply if this is still the latest request
       if (requestId !== voicesRequestIdRef.current) return;
-      setVoices(result);
+      setVoices(result.voices);
+      setVoiceStats(result.stats);
       setVoicesLoading(false);
       setVoicesLoaded(true);
       setVoicesError(null);
@@ -439,11 +557,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     updateSettings,
     saveSettings,
     testConnection,
+    rotateLocalPluginToken,
+    clearLocalPluginToken,
     voices,
     voicesLoading,
     voicesError,
     voicesLoaded,
     refreshVoices,
+    voiceStats,
     historyRecords,
     historyTotalPages,
     historyFilter,

@@ -12,8 +12,12 @@
 
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { env } from "./config/env.js";
 import { initSchema, closeDb } from "./db/index.js";
@@ -27,9 +31,12 @@ import voicesRoutes from "./routes/voices.js";
 import ttsRoutes from "./routes/tts.js";
 import historyRoutes from "./routes/history.js";
 import promptsRoutes from "./routes/prompts.js";
+import agentRoutes from "./routes/agent.js";
+import diagnosticsRoutes from "./routes/diagnostics.js";
 
 // ─── Create Hono App ─────────────────────────────────────────────────────────
 
+export function createApp() {
 const app = new Hono();
 
 // Global middleware
@@ -64,6 +71,23 @@ app.route("/", voicesRoutes);
 app.route("/", ttsRoutes);
 app.route("/", historyRoutes);
 app.route("/", promptsRoutes);
+app.route("/", agentRoutes);
+app.route("/", diagnosticsRoutes);
+
+// Keep API semantics JSON-only. Static SPA fallback is registered after this
+// guard so missing /api/* routes never return index.html.
+app.all("/api/*", (c) => {
+  return c.json({ error: "Not found", path: c.req.path }, 404);
+});
+
+// ─── Production Static Frontend ───────────────────────────────────────────────
+
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const frontendDistDir = path.resolve(moduleDir, "../../dist");
+const frontendIndexPath = path.join(frontendDistDir, "index.html");
+
+app.get("*", serveStatic({ root: frontendDistDir }));
+app.get("*", serveStatic({ path: frontendIndexPath }));
 
 // ─── 404 Fallback ────────────────────────────────────────────────────────────
 
@@ -81,26 +105,29 @@ app.onError((err, c) => {
   }, 500);
 });
 
+return app;
+}
+
+const app = createApp();
+
 // ─── Initialize and Start ────────────────────────────────────────────────────
 
 function startServer() {
-  console.log("[server] Initializing...");
+  console.info("[server] Initializing...");
 
   // Initialize database schema
   initSchema();
-  console.log("[server] Database schema initialized");
+  console.info("[server] Database schema initialized");
 
   // Seed data
   seedDatabase();
 
   // Ensure audio output directory exists
-  import("node:fs").then(fs => {
-    const audioDir = env.audioOutputDir;
-    if (!fs.existsSync(audioDir)) {
-      fs.mkdirSync(audioDir, { recursive: true });
-      console.log(`[server] Created audio output directory: ${audioDir}`);
-    }
-  });
+  const audioDir = env.audioOutputDir;
+  if (!fs.existsSync(audioDir)) {
+    fs.mkdirSync(audioDir, { recursive: true });
+    console.info(`[server] Created audio output directory: ${audioDir}`);
+  }
 
   // Start HTTP server
   serve(
@@ -109,15 +136,15 @@ function startServer() {
       port: env.port,
     },
     (info) => {
-      console.log(`[server] TTS Voice Generator API listening on http://127.0.0.1:${info.port}`);
-      console.log(`[server] OpenRouter API Key configured: ${isOpenRouterConfigured() ? "yes" : "no"}`);
-      console.log(`[server] Environment: ${env.nodeEnv}`);
+      console.info(`[server] TTS Voice Generator API listening on http://127.0.0.1:${info.port}`);
+      console.info(`[server] OpenRouter API Key configured: ${isOpenRouterConfigured() ? "yes" : "no"}`);
+      console.info(`[server] Environment: ${env.nodeEnv}`);
     }
   );
 
   // Graceful shutdown
   const shutdown = () => {
-    console.log("[server] Shutting down...");
+    console.info("[server] Shutting down...");
     closeDb();
     process.exit(0);
   };
@@ -126,6 +153,12 @@ function startServer() {
   process.on("SIGTERM", shutdown);
 }
 
-startServer();
+const isMainModule = process.argv[1]
+  ? path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  : false;
+
+if (isMainModule) {
+  startServer();
+}
 
 export default app;

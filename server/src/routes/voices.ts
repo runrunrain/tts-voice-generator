@@ -10,13 +10,30 @@ import { z } from "zod";
 import { getDb } from "../db/index.js";
 import { voiceProfile } from "../db/schema.js";
 import { eq, sql } from "drizzle-orm";
-import { isOpenRouterConfigured, requireApiKey } from "../services/key-resolver.js";
+import { resolveApiKey } from "../services/key-resolver.js";
 import { OpenRouterProvider } from "../services/openrouter-provider.js";
 import { sanitizeText } from "../services/openrouter-provider.js";
 import { canonicalizeVoice } from "../utils/voice.js";
 import { resolveTtsFormat, type AudioFormat } from "../utils/audio-format.js";
 
 const app = new Hono();
+const PROBE_CACHE_TTL_SECONDS = 30;
+const STALE_VERIFICATION_MS = 24 * 60 * 60 * 1000;
+const inFlightProbes = new Map<string, Promise<ProbeResponse>>();
+
+type VoiceProfileRow = typeof voiceProfile.$inferSelect;
+
+type ProbeResponse = {
+  voice: string;
+  verifiedStatus: "verified" | "failed";
+  latencyMs: number;
+  probeJobId: null;
+  error: string | null;
+  cached: boolean;
+  cacheTtlSeconds: number;
+  lastVerified?: string;
+  profile?: VoiceProfileRow;
+};
 
 // ─── GET /api/voices ─────────────────────────────────────────────────────────
 
@@ -24,13 +41,54 @@ app.get("/api/voices", (c) => {
   const db = getDb();
   const voices = db.select().from(voiceProfile).all();
 
-  // Compute stats
+  const nowMs = Date.now();
+  const durations = voices
+    .map((v) => v.verifyDuration)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  const errorCounts = new Map<string, { voice: string; errorMessage: string; count: number; lastOccurrenceMs: number | null }>();
+  for (const voice of voices) {
+    if (!voice.verifyError) continue;
+    const key = `${voice.name}\u0000${voice.verifyError}`;
+    const lastOccurrenceMs = toTimestampMs(voice.lastVerified);
+    const existing = errorCounts.get(key);
+    if (existing) {
+      existing.count += 1;
+      if (lastOccurrenceMs != null && (existing.lastOccurrenceMs == null || lastOccurrenceMs > existing.lastOccurrenceMs)) {
+        existing.lastOccurrenceMs = lastOccurrenceMs;
+      }
+    } else {
+      errorCounts.set(key, {
+        voice: voice.name,
+        errorMessage: voice.verifyError,
+        count: 1,
+        lastOccurrenceMs,
+      });
+    }
+  }
+
+  // Compute stats. Keep legacy fields while adding availability report fields.
   const stats = {
     total: voices.length,
     verified: voices.filter(v => v.verifiedStatus === "verified").length,
     candidate: voices.filter(v => v.source === "candidate").length,
     custom: voices.filter(v => v.source === "custom").length,
     failed: voices.filter(v => v.verifiedStatus === "failed").length,
+    unknown: voices.filter(v => v.verifiedStatus === "unknown").length,
+    staleVerified: voices.filter(v => v.verifiedStatus === "verified" && isOlderThan(v.lastVerified, nowMs, STALE_VERIFICATION_MS)).length,
+    neverVerified: voices.filter(v => !v.lastVerified).length,
+    avgLatencyMs: durations.length > 0
+      ? Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length)
+      : null,
+    errorSummary: Array.from(errorCounts.values())
+      .sort((a, b) => b.count - a.count || a.errorMessage.localeCompare(b.errorMessage) || a.voice.localeCompare(b.voice))
+      .slice(0, 5)
+      .map((entry) => ({
+        voice: entry.voice,
+        errorCode: classifyVoiceError(entry.errorMessage),
+        errorMessage: entry.errorMessage,
+        count: entry.count,
+        lastOccurrence: entry.lastOccurrenceMs == null ? "" : new Date(entry.lastOccurrenceMs).toISOString(),
+      })),
   };
 
   return c.json({ voices, stats });
@@ -42,19 +100,10 @@ const ProbeSchema = z.object({
   voice: z.string().min(1),
   model: z.string().optional().default("google/gemini-3.1-flash-tts-preview"),
   format: z.enum(["wav", "pcm", "mp3"]).optional().default("wav"),
+  force: z.boolean().optional().default(false),
 });
 
 app.post("/api/voices/probe", async (c) => {
-  if (!isOpenRouterConfigured()) {
-    return c.json({
-      voice: null,
-      verifiedStatus: "failed",
-      latencyMs: 0,
-      probeJobId: null,
-      error: "MISSING_API_KEY",
-    }, 200);
-  }
-
   const body = await c.req.json();
   const parsed = ProbeSchema.safeParse(body);
 
@@ -63,15 +112,52 @@ app.post("/api/voices/probe", async (c) => {
   }
 
   const { voice: voiceName, model, format } = parsed.data;
+  const force = parsed.data.force || c.req.query("force")?.toLowerCase() === "true";
   const canonicalName = canonicalizeVoice(voiceName);
   const db = getDb();
+  const existingProfile = db.select().from(voiceProfile).where(eq(voiceProfile.name, canonicalName)).get();
+
+  const apiKey = resolveApiKey();
+  if (!apiKey) return c.json(buildMissingApiKeyResponse(canonicalName, existingProfile), 200);
 
   // Resolve format for upstream: for Gemini TTS, always use upstream "pcm"
   const formatPlan = resolveTtsFormat(model, format as AudioFormat);
 
+  if (!force) {
+    const cachedResult = buildCachedProbeResponse(existingProfile);
+    if (cachedResult) return c.json(cachedResult);
+  }
+
+  const inFlightKey = buildProbeKey({ voice: canonicalName, model, format: formatPlan.upstreamFormat, force });
+  const existingProbe = inFlightProbes.get(inFlightKey);
+  if (existingProbe) return c.json(await existingProbe);
+
+  const probePromise = runOpenRouterProbe({
+    apiKey,
+    model,
+    voice: canonicalName,
+    upstreamFormat: formatPlan.upstreamFormat,
+  });
+  inFlightProbes.set(inFlightKey, probePromise);
+
+  try {
+    return c.json(await probePromise);
+  } finally {
+    inFlightProbes.delete(inFlightKey);
+  }
+});
+
+async function runOpenRouterProbe(input: {
+  apiKey: string;
+  model: string;
+  voice: string;
+  upstreamFormat: AudioFormat;
+}): Promise<ProbeResponse> {
+  const { apiKey, model, voice: canonicalName, upstreamFormat } = input;
+  const db = getDb();
+
   const start = Date.now();
   try {
-    const apiKey = requireApiKey();
     const provider = new OpenRouterProvider(apiKey);
 
     // Use a short probe text
@@ -79,7 +165,7 @@ app.post("/api/voices/probe", async (c) => {
       model,
       input: "Hello, this is a voice test.",
       voice: canonicalName,
-      responseFormat: formatPlan.upstreamFormat,
+      responseFormat: upstreamFormat,
     });
 
     const latencyMs = Date.now() - start;
@@ -100,14 +186,17 @@ app.post("/api/voices/probe", async (c) => {
       // Read back the updated profile to return to frontend
       const updatedProfile = db.select().from(voiceProfile).where(eq(voiceProfile.name, canonicalName)).get();
 
-      return c.json({
+      return {
         voice: canonicalName,
         verifiedStatus: "verified",
         latencyMs,
         probeJobId: null,
         error: null,
+        cached: false,
+        cacheTtlSeconds: PROBE_CACHE_TTL_SECONDS,
+        lastVerified: updatedProfile?.lastVerified ? toIsoString(updatedProfile.lastVerified) : undefined,
         profile: updatedProfile || undefined,
-      });
+      };
     } else {
       // Voice probe failed - update database
       db.update(voiceProfile)
@@ -121,25 +210,93 @@ app.post("/api/voices/probe", async (c) => {
         .where(eq(voiceProfile.name, canonicalName))
         .run();
 
-      return c.json({
+      return {
         voice: canonicalName,
         verifiedStatus: "failed",
         latencyMs,
         probeJobId: null,
         error: sanitizeText(result.errorMessage),
-      });
+        cached: false,
+        cacheTtlSeconds: PROBE_CACHE_TTL_SECONDS,
+        lastVerified: new Date().toISOString(),
+      };
     }
   } catch (err) {
     const latencyMs = Date.now() - start;
     const rawMsg = err instanceof Error ? err.message : "Probe failed";
-    return c.json({
+    return {
       voice: canonicalName,
       verifiedStatus: "failed",
       latencyMs,
       probeJobId: null,
       error: sanitizeText(rawMsg),
-    });
+      cached: false,
+      cacheTtlSeconds: PROBE_CACHE_TTL_SECONDS,
+    };
   }
-});
+}
+
+function buildMissingApiKeyResponse(canonicalName: string, existingProfile: VoiceProfileRow | undefined): ProbeResponse {
+  return {
+    voice: canonicalName,
+    verifiedStatus: "failed",
+    latencyMs: 0,
+    probeJobId: null,
+    error: "MISSING_API_KEY",
+    cached: false,
+    cacheTtlSeconds: PROBE_CACHE_TTL_SECONDS,
+    lastVerified: existingProfile?.lastVerified ? toIsoString(existingProfile.lastVerified) : undefined,
+    profile: existingProfile || undefined,
+  };
+}
+
+function buildProbeKey(input: { voice: string; model: string; format: string; force: boolean }): string {
+  return `${input.force ? "force" : "normal"}\u0000${input.voice}\u0000${input.model}\u0000${input.format}`;
+}
+
+function buildCachedProbeResponse(profile: VoiceProfileRow | undefined): ProbeResponse | null {
+  if (!profile?.lastVerified) return null;
+  if (profile.verifiedStatus !== "verified" && profile.verifiedStatus !== "failed") return null;
+
+  const lastVerifiedMs = toTimestampMs(profile.lastVerified);
+  if (lastVerifiedMs == null) return null;
+
+  const ageMs = Date.now() - lastVerifiedMs;
+  if (ageMs < 0 || ageMs > PROBE_CACHE_TTL_SECONDS * 1000) return null;
+
+  return {
+    voice: profile.name,
+    verifiedStatus: profile.verifiedStatus,
+    latencyMs: profile.verifyDuration ?? 0,
+    probeJobId: null,
+    error: profile.verifiedStatus === "failed" ? profile.verifyError : null,
+    cached: true,
+    cacheTtlSeconds: PROBE_CACHE_TTL_SECONDS,
+    lastVerified: toIsoString(profile.lastVerified),
+    profile,
+  };
+}
+
+function classifyVoiceError(errorMessage: string): string {
+  return errorMessage === "MISSING_API_KEY" ? "MISSING_API_KEY" : "VOICE_PROBE_FAILED";
+}
+
+function isOlderThan(value: Date | null, nowMs: number, thresholdMs: number): boolean {
+  const timestamp = toTimestampMs(value);
+  return timestamp != null && nowMs - timestamp > thresholdMs;
+}
+
+function toTimestampMs(value: Date | number | string | null): number | null {
+  if (!value) return null;
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "number") return value > 10_000_000_000 ? value : value * 1000;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function toIsoString(value: Date | number | string): string {
+  const timestamp = toTimestampMs(value);
+  return timestamp == null ? new Date(0).toISOString() : new Date(timestamp).toISOString();
+}
 
 export default app;

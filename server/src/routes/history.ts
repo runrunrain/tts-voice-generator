@@ -64,6 +64,9 @@ app.get("/api/history", (c) => {
       assetMimeType: audioAsset.mimeType,
       assetSizeBytes: audioAsset.sizeBytes,
       assetDuration: audioAsset.duration,
+      assetSampleRate: audioAsset.sampleRate,
+      assetBitDepth: audioAsset.bitDepth,
+      assetChannels: audioAsset.channels,
       assetCreatedAt: audioAsset.createdAt,
     })
     .from(generationJob)
@@ -116,6 +119,12 @@ app.get("/api/history", (c) => {
       durationMs: hasAsset && row.assetDuration ? parseDurationMs(row.assetDuration) : null,
       assetFormat: hasAsset ? formatFromMime(row.assetMimeType) : null,
       sizeBytes: hasAsset ? row.assetSizeBytes : null,
+      sampleRate: hasAsset ? row.assetSampleRate : null,
+      bitDepth: hasAsset ? row.assetBitDepth : null,
+      channels: hasAsset ? row.assetChannels : null,
+      // Agent context fields (present when source is "agent")
+      agentConversationId: job.agentConversationId ?? null,
+      agentActionLogId: job.agentActionLogId ?? null,
     };
   });
 
@@ -186,6 +195,8 @@ app.get("/api/jobs/:jobId", (c) => {
       errorMessage: job.errorMessage,
       errorMetadata,
       source: job.source,
+      agentConversationId: job.agentConversationId ?? null,
+      agentActionLogId: job.agentActionLogId ?? null,
       directorSnapshot,
       providerOptions,
       createdAt: job.createdAt ? new Date(job.createdAt).toISOString() : null,
@@ -198,6 +209,9 @@ app.get("/api/jobs/:jobId", (c) => {
       mimeType: asset.mimeType,
       sizeBytes: asset.sizeBytes,
       duration: asset.duration,
+      sampleRate: asset.sampleRate,
+      bitDepth: asset.bitDepth,
+      channels: asset.channels,
     } : null,
   });
 });

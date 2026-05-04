@@ -15,6 +15,7 @@ import { isOpenRouterConfigured, requireApiKey } from "../services/key-resolver.
 import { OpenRouterProvider } from "../services/openrouter-provider.js";
 import { canonicalizeVoice } from "../utils/voice.js";
 import { normalizeFormat, type AudioFormat } from "../utils/audio-format.js";
+import { fingerprintFromHash, generateLocalPluginToken } from "../services/agent-auth.js";
 
 const app = new Hono();
 
@@ -28,7 +29,54 @@ const SettingsSchema = z.object({
   audioOutputDir: z.string().optional(),
   maxCharsPerRequest: z.number().int().min(100).max(50000).optional(),
   maxConcurrentJobs: z.number().int().min(1).max(10).optional(),
+  agentAuthMode: z.enum(["confirm_each", "session_auto"]).optional(),
+  agentMaxRequests: z.number().int().min(1).max(1000).optional(),
+  agentMaxChars: z.number().int().min(1).max(500000).optional(),
+  agentMaxCost: z.number().min(0).max(100).optional(),
+  agentSessionExpiry: z.number().int().min(60).max(604800).optional(),
+  localPluginTokenAction: z.enum(["rotate", "clear"]).optional(),
+  agent: z.object({
+    authMode: z.enum(["confirm_each", "session_auto"]).optional(),
+    maxRequests: z.number().int().min(1).max(1000).optional(),
+    maxChars: z.number().int().min(1).max(500000).optional(),
+    maxCost: z.number().min(0).max(100).optional(),
+    sessionExpiry: z.number().int().min(60).max(604800).optional(),
+    tokenAction: z.enum(["rotate", "clear"]).optional(),
+  }).optional(),
 });
+
+function defaults() {
+  return {
+    agentAuthMode: "confirm_each" as const,
+    agentMaxRequests: 10,
+    agentMaxChars: 10000,
+    agentMaxCost: 0.01,
+    agentSessionExpiry: 3600,
+  };
+}
+
+function agentSettingsPayload(row: typeof settings.$inferSelect | undefined) {
+  const d = defaults();
+  const hash = row?.localPluginToken ?? null;
+  return {
+    hasLocalPluginToken: !!hash,
+    localPluginTokenFingerprint: fingerprintFromHash(hash),
+    agentAuthMode: row?.agentAuthMode ?? d.agentAuthMode,
+    agentMaxRequests: row?.agentMaxRequests ?? d.agentMaxRequests,
+    agentMaxChars: row?.agentMaxChars ?? d.agentMaxChars,
+    agentMaxCost: row?.agentMaxCost ?? d.agentMaxCost,
+    agentSessionExpiry: row?.agentSessionExpiry ?? d.agentSessionExpiry,
+    agent: {
+      hasLocalPluginToken: !!hash,
+      fingerprint: fingerprintFromHash(hash),
+      authMode: row?.agentAuthMode ?? d.agentAuthMode,
+      maxRequests: row?.agentMaxRequests ?? d.agentMaxRequests,
+      maxChars: row?.agentMaxChars ?? d.agentMaxChars,
+      maxCost: row?.agentMaxCost ?? d.agentMaxCost,
+      sessionExpiry: row?.agentSessionExpiry ?? d.agentSessionExpiry,
+    },
+  };
+}
 
 // ─── GET /api/settings ───────────────────────────────────────────────────────
 
@@ -46,6 +94,7 @@ app.get("/api/settings", (c) => {
       audioOutputDir: "./data/audio",
       maxCharsPerRequest: 5000,
       maxConcurrentJobs: 2,
+      ...agentSettingsPayload(undefined),
     });
   }
 
@@ -77,6 +126,7 @@ app.get("/api/settings", (c) => {
     audioOutputDir: row.audioOutputDir,
     maxCharsPerRequest: row.maxCharsPerRequest,
     maxConcurrentJobs: row.maxConcurrentJobs,
+    ...agentSettingsPayload(row),
   });
 });
 
@@ -93,6 +143,8 @@ app.put("/api/settings", async (c) => {
   const db = getDb();
   const data = parsed.data;
   const now = new Date();
+  const tokenAction = data.localPluginTokenAction ?? data.agent?.tokenAction;
+  let rotatedToken: string | null = null;
 
   // Build update values - only include fields that were provided
   const updateValues: Record<string, unknown> = { updatedAt: now };
@@ -112,6 +164,18 @@ app.put("/api/settings", async (c) => {
   if (data.audioOutputDir !== undefined) updateValues.audioOutputDir = data.audioOutputDir;
   if (data.maxCharsPerRequest !== undefined) updateValues.maxCharsPerRequest = data.maxCharsPerRequest;
   if (data.maxConcurrentJobs !== undefined) updateValues.maxConcurrentJobs = data.maxConcurrentJobs;
+  if (data.agentAuthMode !== undefined || data.agent?.authMode !== undefined) updateValues.agentAuthMode = data.agentAuthMode ?? data.agent?.authMode;
+  if (data.agentMaxRequests !== undefined || data.agent?.maxRequests !== undefined) updateValues.agentMaxRequests = data.agentMaxRequests ?? data.agent?.maxRequests;
+  if (data.agentMaxChars !== undefined || data.agent?.maxChars !== undefined) updateValues.agentMaxChars = data.agentMaxChars ?? data.agent?.maxChars;
+  if (data.agentMaxCost !== undefined || data.agent?.maxCost !== undefined) updateValues.agentMaxCost = data.agentMaxCost ?? data.agent?.maxCost;
+  if (data.agentSessionExpiry !== undefined || data.agent?.sessionExpiry !== undefined) updateValues.agentSessionExpiry = data.agentSessionExpiry ?? data.agent?.sessionExpiry;
+  if (tokenAction === "rotate") {
+    const generated = generateLocalPluginToken();
+    updateValues.localPluginToken = generated.hash;
+    rotatedToken = generated.token;
+  } else if (tokenAction === "clear") {
+    updateValues.localPluginToken = null;
+  }
 
   // Upsert: update row id=1, or insert if not exists
   const existing = db.select().from(settings).where(eq(settings.id, 1)).get();
@@ -130,6 +194,7 @@ app.put("/api/settings", async (c) => {
   return c.json({
     ok: true,
     openRouterKeySaved: !!data.openRouterApiKey,
+    localPluginToken: rotatedToken ?? undefined,
   });
 });
 

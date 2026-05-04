@@ -18,6 +18,8 @@ interface JobDetail {
     errorCode: string | null;
     errorMessage: string | null;
     source: string;
+    agentConversationId: string | null;
+    agentActionLogId: number | null;
     directorSnapshot: {
       audioProfile?: string;
       scene?: string;
@@ -43,6 +45,9 @@ interface JobDetail {
     mimeType: string;
     sizeBytes: number;
     duration: string | null;
+    sampleRate?: number | null;
+    bitDepth?: number | null;
+    channels?: number | null;
   } | null;
 }
 
@@ -343,6 +348,24 @@ export function HistoryDetailPage() {
                         <div className="text-text-tertiary text-xs mb-1">时长</div>
                         <div className="text-text-primary font-medium">{audio.duration || "--"}</div>
                       </div>
+                      {audio.sampleRate != null && (
+                        <div>
+                          <div className="text-text-tertiary text-xs mb-1">采样率</div>
+                          <div className="text-text-primary font-medium font-mono text-xs">{audio.sampleRate} Hz</div>
+                        </div>
+                      )}
+                      {audio.bitDepth != null && (
+                        <div>
+                          <div className="text-text-tertiary text-xs mb-1">位深度</div>
+                          <div className="text-text-primary font-medium font-mono text-xs">{audio.bitDepth} bit</div>
+                        </div>
+                      )}
+                      {audio.channels != null && (
+                        <div>
+                          <div className="text-text-tertiary text-xs mb-1">声道</div>
+                          <div className="text-text-primary font-medium font-mono text-xs">{audio.channels === 1 ? "Mono" : audio.channels === 2 ? "Stereo" : `${audio.channels}ch`}</div>
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
@@ -360,6 +383,18 @@ export function HistoryDetailPage() {
                   <span className="text-text-tertiary">状态</span>
                   <span className={isSucceeded ? "text-success" : "text-error"}>{job.status}</span>
                 </div>
+                {job.agentConversationId && (
+                  <div className="flex justify-between">
+                    <span className="text-text-tertiary">Conversation ID</span>
+                    <span className="text-text-primary font-mono text-xs">{job.agentConversationId}</span>
+                  </div>
+                )}
+                {job.agentActionLogId != null && (
+                  <div className="flex justify-between">
+                    <span className="text-text-tertiary">Action Log ID</span>
+                    <span className="text-text-primary font-mono text-xs">{job.agentActionLogId}</span>
+                  </div>
+                )}
                 {job.completedAt && (
                   <div className="flex justify-between">
                     <span className="text-text-tertiary">完成时间</span>

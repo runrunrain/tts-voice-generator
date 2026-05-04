@@ -1,12 +1,13 @@
 /**
  * Drizzle ORM schema definitions for TTS Voice Generator.
  *
- * 5 tables:
+ * 6 tables:
  * - settings: single-row application settings
  * - voice_profile: voice catalog with probe status
  * - generation_job: TTS generation records
  * - audio_asset: generated audio file metadata
- * - agent_action_log: agent operation audit log (reserved)
+ * - agent_action_log: agent operation audit log
+ * - agent_session: bounded agent auto-approval sessions
  */
 
 import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
@@ -84,6 +85,9 @@ export const audioAsset = sqliteTable("audio_asset", {
   sizeBytes: integer("size_bytes").notNull(),
   sha256: text("sha256"),
   duration: text("duration"), // "3.2s"
+  sampleRate: integer("sample_rate"),
+  bitDepth: integer("bit_depth"),
+  channels: integer("channels"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 });
 
@@ -94,11 +98,33 @@ export const agentActionLog = sqliteTable("agent_action_log", {
   conversationId: text("conversation_id").notNull(),
   actionType: text("action_type").notNull(), // generate_speech | probe_voice | assemble_prompt
   toolName: text("tool_name").notNull(),
+  sessionId: text("session_id"),
   inputSummary: text("input_summary"),
+  inputPayload: text("input_payload"),
   outputSummary: text("output_summary"),
   estimatedCost: text("estimated_cost"),
   approvalStatus: text("approval_status").notNull().default("pending"), // not_required | pending | approved | rejected
   approvalScope: text("approval_scope"), // once | session
   relatedJobId: text("related_job_id"),
+  approvedAt: integer("approved_at", { mode: "timestamp" }),
+  completedAt: integer("completed_at", { mode: "timestamp" }),
+  errorCode: text("error_code"),
+  errorMessage: text("error_message"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const agentSession = sqliteTable("agent_session", {
+  id: text("id").primaryKey(),
+  conversationId: text("conversation_id").notNull(),
+  status: text("status").notNull().default("active"), // active | revoked | expired
+  maxRequests: integer("max_requests").notNull(),
+  usedRequests: integer("used_requests").notNull().default(0),
+  maxChars: integer("max_chars").notNull(),
+  usedChars: integer("used_chars").notNull().default(0),
+  maxCost: real("max_cost").notNull(),
+  usedCost: real("used_cost").notNull().default(0),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+  revokedAt: integer("revoked_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 });

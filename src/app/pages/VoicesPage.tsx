@@ -6,11 +6,13 @@ import type { VoiceStatus } from "../types";
 type TabFilter = "all" | "verified" | "candidate" | "custom" | "failed";
 
 export function VoicesPage() {
-  const { voices, adapter, voicesLoading, voicesError, refreshVoices, voicesLoaded } = useAppState();
+  const { voices, adapter, voicesLoading, voicesError, refreshVoices, voicesLoaded, voiceStats } = useAppState();
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<TabFilter>("all");
   const [selectedVoice, setSelectedVoice] = useState<string>("Zephyr");
-  const [probeStatuses, setProbeStatuses] = useState<Record<string, "idle" | "loading" | "success" | "error" | "no-key">>({});
+  const [probeStatuses, setProbeStatuses] = useState<Record<string, "idle" | "loading" | "success" | "error">>({});
+  const [probeErrors, setProbeErrors] = useState<Record<string, string | null>>({});
+  const [probeMeta, setProbeMeta] = useState<Record<string, { cached?: boolean; cacheTtlSeconds?: number | null; lastVerified?: string | null }>>({});
 
   // Filter voices
   const filteredVoices = voices.filter((v) => {
@@ -35,15 +37,16 @@ export function VoicesPage() {
     failed: voices.filter((v) => v.status === "error").length,
   };
 
-  const handleProbe = useCallback(async (voiceName: string) => {
+  const handleProbe = useCallback(async (voiceName: string, force = false) => {
     setProbeStatuses((prev) => ({ ...prev, [voiceName]: "loading" }));
-    const result = await adapter.probeVoice(voiceName);
-    // Check for MISSING_API_KEY via the error path
-    if (result.latency === "N/A" && result.status === "error") {
-      // Likely MISSING_API_KEY from backend - distinguish from regular probe failure
-      setProbeStatuses((prev) => ({ ...prev, [voiceName]: "no-key" }));
+    setProbeErrors((prev) => ({ ...prev, [voiceName]: null }));
+    const result = await adapter.probeVoice(voiceName, force || undefined);
+    setProbeMeta((prev) => ({ ...prev, [voiceName]: { cached: result.cached, cacheTtlSeconds: result.cacheTtlSeconds, lastVerified: result.lastVerified } }));
+    if (result.status === "success") {
+      setProbeStatuses((prev) => ({ ...prev, [voiceName]: "success" }));
     } else {
-      setProbeStatuses((prev) => ({ ...prev, [voiceName]: result.status === "success" ? "success" : "error" }));
+      setProbeStatuses((prev) => ({ ...prev, [voiceName]: "error" }));
+      setProbeErrors((prev) => ({ ...prev, [voiceName]: result.error || null }));
     }
     setTimeout(() => {
       setProbeStatuses((prev) => ({ ...prev, [voiceName]: "idle" }));
@@ -95,6 +98,47 @@ export function VoicesPage() {
           </button>
         ))}
       </div>
+
+      {/* Voice Stats Summary */}
+      {voiceStats && (
+        <div className="px-6 py-2.5 border-b border-border-subtle bg-bg-sunken shrink-0">
+          <div className="flex items-center gap-4 text-xs flex-wrap">
+            <span className="text-text-tertiary font-medium">可用性报告</span>
+            <span className="text-text-secondary">总计 <span className="text-text-primary font-semibold">{voiceStats.total}</span></span>
+            <span className="text-text-secondary">已验证 <span className="text-success font-semibold">{voiceStats.verified}</span></span>
+            {voiceStats.failed > 0 && (
+              <span className="text-text-secondary">失败 <span className="text-error font-semibold">{voiceStats.failed}</span></span>
+            )}
+            {voiceStats.unknown > 0 && (
+              <span className="text-text-secondary">未知 <span className="text-warning font-semibold">{voiceStats.unknown}</span></span>
+            )}
+            {voiceStats.neverVerified > 0 && (
+              <span className="text-text-secondary">未验证 <span className="text-warning font-semibold">{voiceStats.neverVerified}</span></span>
+            )}
+            {voiceStats.staleVerified > 0 && (
+              <span className="text-text-secondary">过期 <span className="text-warning font-semibold">{voiceStats.staleVerified}</span></span>
+            )}
+            {voiceStats.avgLatencyMs != null && (
+              <span className="text-text-secondary">平均延迟 <span className="text-text-primary font-mono">{(voiceStats.avgLatencyMs / 1000).toFixed(1)}s</span></span>
+            )}
+          </div>
+          {voiceStats.errorSummary.length > 0 && (
+            <div className="mt-1.5 pt-1.5 border-t border-border-subtle">
+              <div className="text-[10px] text-text-tertiary mb-1">错误摘要 (近 {Math.min(voiceStats.errorSummary.length, 5)} 条)</div>
+              <div className="flex flex-col gap-0.5">
+                {voiceStats.errorSummary.slice(0, 5).map((e, i) => (
+                  <div key={i} className="text-[11px] text-text-secondary flex items-center gap-2">
+                    <span className="text-text-primary font-medium w-24 shrink-0 truncate">{e.voice || "--"}</span>
+                    {e.errorCode && <span className="text-error font-mono shrink-0">{e.errorCode}</span>}
+                    <span className="truncate flex-1">{e.errorMessage}</span>
+                    <span className="text-text-tertiary shrink-0">({e.count}次)</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Grid */}
       <div className="flex-1 p-6 overflow-y-auto">
@@ -192,7 +236,7 @@ export function VoicesPage() {
 
                 <div className="flex items-center justify-between mt-auto">
                   <span className="text-[10px] text-text-tertiary">{v.lastVerified ? `上次验证: ${v.lastVerified.slice(5)}` : "未验证"}</span>
-                  <div className="flex gap-2">
+                  <div className="flex items-center gap-2">
                     <button
                       className="text-xs font-medium text-text-secondary hover:text-text-primary transition-colors disabled:opacity-50"
                       onClick={(e) => { e.stopPropagation(); handleProbe(v.name); }}
@@ -200,9 +244,26 @@ export function VoicesPage() {
                     >
                       {probeStatuses[v.name] === "loading" ? (
                         <Loader2 size={12} className="animate-spin inline" />
-                      ) : probeStatuses[v.name] === "no-key" ? (
-                        <span className="text-error flex items-center gap-1"><AlertTriangle size={10} /> 无 Key</span>
-                      ) : probeStatuses[v.name] === "success" ? "验证成功" : probeStatuses[v.name] === "error" ? "验证失败" : "探针"}
+                      ) : probeStatuses[v.name] === "error" ? (
+                        <span className="text-error flex items-center gap-1"><AlertTriangle size={10} /> {probeErrors[v.name] === "MISSING_API_KEY" ? "未配置 Key" : "探针失败"}</span>
+                      ) : probeStatuses[v.name] === "success" ? (
+                        <span className="flex items-center gap-1">
+                          验证成功
+                          {probeMeta[v.name]?.cached ? (
+                            <span className="text-text-tertiary text-[10px]">(缓存)</span>
+                          ) : probeMeta[v.name] !== undefined ? (
+                            <span className="text-accent text-[10px]">(实时)</span>
+                          ) : null}
+                        </span>
+                      ) : "探针"}
+                    </button>
+                    <button
+                      className="text-text-tertiary hover:text-text-primary transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                      onClick={(e) => { e.stopPropagation(); handleProbe(v.name, true); }}
+                      disabled={probeStatuses[v.name] === "loading"}
+                      title="强制刷新探针"
+                    >
+                      <RefreshCw size={11} />
                     </button>
                     <button
                       className="flex items-center gap-1 text-xs font-medium text-accent hover:text-accent-hover transition-colors"

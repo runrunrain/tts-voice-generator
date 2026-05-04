@@ -12,6 +12,7 @@ import type {
   AudioFormat,
   CostEstimate,
   ConnectionStatus,
+  Diagnostics,
   GenerateRequest,
   GenerateResult,
   GeneratePhase,
@@ -20,6 +21,7 @@ import type {
   HistoryStatus,
   HistorySource,
   VoiceProfile,
+  VoiceStats,
   VoiceStatus,
   TtsServiceAdapter,
   AssemblePromptRequest,
@@ -236,32 +238,39 @@ export const httpAdapter: TtsServiceAdapter = {
     }
   },
 
-  async probeVoice(voiceName: string): Promise<{ status: VoiceStatus; latency: string }> {
+  async probeVoice(voiceName: string, force?: boolean): Promise<{ status: VoiceStatus; latency: string; cached?: boolean; cacheTtlSeconds?: number | null; lastVerified?: string | null }> {
     try {
       const result = await apiFetch<{
         voice: string;
         verifiedStatus: string;
         latencyMs: number;
         error: string | null;
+        cached?: boolean;
+        cacheTtlSeconds?: number | null;
+        lastVerified?: string | null;
       }>("/api/voices/probe", {
         method: "POST",
         body: JSON.stringify({
           voice: voiceName,
           model: "google/gemini-3.1-flash-tts-preview",
           format: "wav",
+          ...(force ? { force: true } : {}),
         }),
       });
 
-      if (result.error === "MISSING_API_KEY") {
-        return { status: "error" as VoiceStatus, latency: "N/A" };
+      if (result.error) {
+        return { status: "error" as VoiceStatus, latency: "N/A", error: result.error };
       }
 
       return {
         status: result.verifiedStatus === "verified" ? "success" : "error",
         latency: `${(result.latencyMs / 1000).toFixed(1)}s`,
+        cached: result.cached,
+        cacheTtlSeconds: result.cacheTtlSeconds,
+        lastVerified: result.lastVerified,
       };
     } catch {
-      return { status: "error", latency: "N/A" };
+      return { status: "error", latency: "N/A", error: "NETWORK_ERROR" };
     }
   },
 
@@ -288,7 +297,7 @@ export const httpAdapter: TtsServiceAdapter = {
     return [];
   },
 
-  async listVoicesAsync(): Promise<VoiceProfile[]> {
+  async listVoicesAsync(): Promise<{ voices: VoiceProfile[]; stats: VoiceStats }> {
     const result = await apiFetch<{
       voices: Array<{
         id: number;
@@ -300,19 +309,49 @@ export const httpAdapter: TtsServiceAdapter = {
         verifiedStatus: string;
         lastVerified: number | null;
         verifyDuration: number | null;
+        verifyError: string | null;
       }>;
-      stats: Record<string, number>;
+      stats: {
+        total: number;
+        verified: number;
+        failed: number;
+        unknown: number;
+        staleVerified: number;
+        neverVerified: number;
+        avgLatencyMs: number | null;
+        errorSummary: Array<{
+          voice?: string;
+          errorCode?: string;
+          errorMessage?: string;
+          error?: string;
+          count: number;
+          lastOccurrence?: string;
+        }>;
+      };
     }>("/api/voices");
 
-    return result.voices.map((v) => ({
-      name: v.name,
-      isDefault: v.source === "default",
-      role: v.role || "",
-      provider: v.provider === "openrouter" ? "OpenRouter" : v.provider,
-      status: mapVoiceStatus(v.verifiedStatus),
-      lastVerified: v.lastVerified ? new Date(v.lastVerified).toISOString().split("T")[0] : "",
-      verifyDuration: v.verifyDuration ? `${(v.verifyDuration / 1000).toFixed(1)}s` : undefined,
-    }));
+    return {
+      voices: result.voices.map((v) => ({
+        name: v.name,
+        isDefault: v.source === "default",
+        role: v.role || "",
+        provider: v.provider === "openrouter" ? "OpenRouter" : v.provider,
+        status: mapVoiceStatus(v.verifiedStatus),
+        lastVerified: v.lastVerified ? new Date(v.lastVerified).toISOString().split("T")[0] : "",
+        verifyDuration: v.verifyDuration ? `${(v.verifyDuration / 1000).toFixed(1)}s` : undefined,
+        verifyError: v.verifyError || undefined,
+      })),
+      stats: {
+        ...result.stats,
+        errorSummary: result.stats.errorSummary.map((e) => ({
+          voice: e.voice,
+          errorCode: e.errorCode,
+          errorMessage: e.errorMessage || e.error || "未知错误",
+          count: e.count,
+          lastOccurrence: e.lastOccurrence,
+        })),
+      },
+    };
   },
 
   listHistory(filter: HistoryFilter): { records: HistoryRecord[]; totalPages: number } {
@@ -347,6 +386,11 @@ export const httpAdapter: TtsServiceAdapter = {
         durationMs: number | null;
         assetFormat: string | null;
         sizeBytes: number | null;
+        sampleRate?: number | null;
+        bitDepth?: number | null;
+        channels?: number | null;
+        agentConversationId?: string | null;
+        agentActionLogId?: number | null;
       }>;
       totalPages: number;
       currentPage: number;
@@ -358,10 +402,6 @@ export const httpAdapter: TtsServiceAdapter = {
         id: r.id,
         text: r.textPreview,
         voice: r.voice,
-        // Prefer the actual asset format over the job's requested format.
-        // When a legacy mp3 request produces a wav asset, this ensures
-        // the history list shows "wav" (what the user actually received),
-        // not "mp3" (what was requested but not delivered).
         format: resolveHistoryFormat(r.assetFormat, r.format) as AudioFormat,
         date: r.createdAt ? new Date(r.createdAt).toLocaleString("zh-CN") : "",
         source: (r.source === "用户" ? "用户" : "Agent") as HistorySource,
@@ -376,6 +416,11 @@ export const httpAdapter: TtsServiceAdapter = {
         durationMs: r.durationMs,
         assetFormat: r.assetFormat,
         sizeBytes: r.sizeBytes,
+        sampleRate: r.sampleRate,
+        bitDepth: r.bitDepth,
+        channels: r.channels,
+        agentConversationId: r.agentConversationId ?? null,
+        agentActionLogId: r.agentActionLogId ?? null,
       })),
       totalPages: result.totalPages,
       totalRecords: result.totalRecords,
@@ -475,4 +520,262 @@ function mapHistoryStatus(status: string): HistoryStatus {
     case "running": return "pending";
     default: return "pending";
   }
+}
+
+// ─── Diagnostics ──────────────────────────────────────────────────────────────
+
+/**
+ * Backend diagnostics raw row shapes.
+ * These reflect the ACTUAL fields returned by GET /api/diagnostics,
+ * which differ significantly from the frontend Diagnostics type.
+ */
+interface BackendFailedJob {
+  id: string;
+  status?: string;
+  source?: string;
+  voice?: string;
+  format?: string;
+  inputCharCount?: number;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  error?: string;
+  createdAt?: string | null;
+  completedAt?: string | null;
+}
+
+interface BackendAgentAction {
+  id: number;
+  conversationId?: string | null;
+  action?: string;
+  status?: string;
+  actionType?: string;
+  toolName?: string | null;
+  approvalStatus?: string;
+  approvalScope?: string | null;
+  relatedJobId?: string | null;
+  inputSummary?: string | null;
+  outputSummary?: string | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  createdAt?: string | null;
+  completedAt?: string | null;
+}
+
+interface BackendRecentJob {
+  id: string;
+  status?: string;
+  source?: string;
+  voice?: string;
+  format?: string;
+  inputCharCount?: number;
+  charCount?: number;
+  errorCode?: string | null;
+  createdAt?: string | null;
+  completedAt?: string | null;
+}
+
+interface BackendDiagnosticsResponse {
+  ok?: boolean;
+  timestamp?: string;
+  server?: { version?: string; uptime?: number; nodeEnv?: string };
+  ready?: boolean;
+  checks?: Array<{ name: string; ok: boolean; detail?: string; latencyMs?: number }>;
+  summary?: {
+    keyConfigured?: boolean;
+    dbOk?: boolean;
+    audioDirWritable?: boolean;
+    routesReady?: boolean;
+    orphanFiles?: number;
+    activeJobs?: number;
+  };
+  // Top-level convenience booleans (aliases into summary)
+  dbOk?: boolean;
+  audioDirWritable?: boolean;
+  keyConfigured?: boolean;
+  routesReady?: boolean;
+  // Data arrays -- note the backend field names differ from frontend
+  failedJobs?: BackendFailedJob[];
+  recentAgentActions?: BackendAgentAction[];
+  recentJobs?: BackendRecentJob[];
+  audioDir?: string | { path?: string; writable?: boolean; fileCount?: number; totalSizeBytes?: number };
+  // Frontend aliases (backend may also add these; defense-in-depth: prefer backend names)
+  status?: string;
+  uptime?: number;
+  version?: string;
+  recentFailedJobs?: BackendFailedJob[];
+  audioDirPath?: string;
+}
+
+/**
+ * Defensive string extraction: coerces null/undefined to a fallback.
+ */
+function safeStr(val: unknown, fallback: string): string {
+  if (typeof val === "string" && val.length > 0) return val;
+  return fallback;
+}
+
+/**
+ * Defensive number extraction: coerces undefined/null/NaN to a fallback.
+ */
+function safeNum(val: unknown, fallback: number): number {
+  if (typeof val === "number" && Number.isFinite(val)) return val;
+  return fallback;
+}
+
+/**
+ * Extract the readiness summary as a flat checks object.
+ * The backend returns checks as an array of { name, ok } and a summary object.
+ * We prefer the summary object for simplicity, falling back to scanning the checks array.
+ */
+function extractChecks(raw: BackendDiagnosticsResponse): {
+  keyConfigured: boolean;
+  dbOk: boolean;
+  audioDirWritable: boolean;
+  routesReady: boolean;
+} {
+  const summary = raw.summary;
+  if (summary && typeof summary === "object") {
+    return {
+      keyConfigured: summary.keyConfigured ?? raw.keyConfigured ?? false,
+      dbOk: summary.dbOk ?? raw.dbOk ?? false,
+      audioDirWritable: summary.audioDirWritable ?? raw.audioDirWritable ?? false,
+      routesReady: summary.routesReady ?? raw.routesReady ?? false,
+    };
+  }
+
+  // Fallback: scan the checks array for known names
+  const checksMap: Record<string, boolean> = {};
+  if (Array.isArray(raw.checks)) {
+    for (const c of raw.checks) {
+      if (c && typeof c === "object" && typeof c.name === "string") {
+        checksMap[c.name] = c.ok ?? false;
+      }
+    }
+  }
+
+  return {
+    keyConfigured: checksMap["keyConfigured"] ?? raw.keyConfigured ?? false,
+    dbOk: checksMap["dbOk"] ?? raw.dbOk ?? false,
+    audioDirWritable: checksMap["audioDirWritable"] ?? raw.audioDirWritable ?? false,
+    routesReady: checksMap["routesReady"] ?? raw.routesReady ?? false,
+  };
+}
+
+/**
+ * Adapt backend failedJobs array to frontend DiagnosticFailedJob[].
+ * Backend uses: errorMessage (not error), inputCharCount (not charCount).
+ * Frontend expects: error, charCount.
+ */
+function adaptFailedJobs(jobs: BackendFailedJob[] | undefined): Diagnostics["recentFailedJobs"] {
+  if (!Array.isArray(jobs)) return [];
+  return jobs.map((j) => ({
+    id: safeStr(j.id, "unknown"),
+    voice: safeStr(j.voice, "unknown"),
+    error: safeStr(j.errorMessage ?? j.error, "Unknown error"),
+    status: j.status,
+    charCount: safeNum(j.inputCharCount, 0),
+    errorCode: j.errorCode ?? null,
+    createdAt: safeStr(j.createdAt, new Date().toISOString()),
+  }));
+}
+
+/**
+ * Adapt backend recentAgentActions to frontend DiagnosticAgentAction[].
+ * Backend uses: actionType, approvalStatus (not action, status).
+ * Frontend expects: action, status.
+ */
+function adaptAgentActions(actions: BackendAgentAction[] | undefined): Diagnostics["recentAgentActions"] {
+  if (!Array.isArray(actions)) return [];
+  return actions.map((a) => ({
+    id: a.id ?? 0,
+    conversationId: a.conversationId ?? null,
+    action: safeStr(a.action ?? a.actionType ?? a.toolName, "unknown"),
+    status: safeStr(a.status ?? a.approvalStatus, "unknown"),
+    actionType: a.actionType,
+    toolName: a.toolName ?? null,
+    approvalStatus: a.approvalStatus,
+    createdAt: safeStr(a.createdAt, new Date().toISOString()),
+  }));
+}
+
+/**
+ * Adapt backend recentJobs to frontend DiagnosticJobSummary[].
+ * Backend uses: inputCharCount (not charCount).
+ * Frontend expects: charCount.
+ */
+function adaptRecentJobs(jobs: BackendRecentJob[] | undefined): Diagnostics["recentJobs"] {
+  if (!Array.isArray(jobs)) return [];
+  return jobs.map((j) => ({
+    id: safeStr(j.id, "unknown"),
+    voice: safeStr(j.voice, "unknown"),
+    status: safeStr(j.status, "unknown"),
+    source: safeStr(j.source, "unknown"),
+    charCount: safeNum(j.charCount ?? j.inputCharCount, 0),
+    createdAt: safeStr(j.createdAt, new Date().toISOString()),
+  }));
+}
+
+/**
+ * Adapt audioDir field.
+ * Backend returns an object { path, writable, fileCount, totalSizeBytes }.
+ * Frontend type allows string | AudioDirInfo.
+ * We pass through whatever the backend sends.
+ */
+function adaptAudioDir(val: unknown, pathAlias?: string): Diagnostics["audioDir"] {
+  if (typeof pathAlias === "string" && pathAlias.length > 0) return pathAlias;
+  if (typeof val === "string") return val;
+  if (val && typeof val === "object") {
+    const obj = val as Record<string, unknown>;
+    return {
+      path: safeStr(obj.path, "unknown"),
+      writable: !!obj.writable,
+      fileCount: safeNum(obj.fileCount, 0),
+      totalSizeBytes: safeNum(obj.totalSizeBytes, 0),
+    };
+  }
+  return "unknown";
+}
+
+export async function getDiagnostics(): Promise<Diagnostics> {
+  const response = await fetch("/api/diagnostics");
+
+  if (!response.ok) {
+    const label = response.status === 404
+      ? "诊断接口不可用 (404) -- 后端尚未实现此接口"
+      : `诊断请求失败 (HTTP ${response.status})`;
+    throw new Error(label);
+  }
+
+  const raw = await response.json() as BackendDiagnosticsResponse;
+
+  // Sanitize: ensure no key/token/hash leaked into the response
+  // (defense-in-depth; backend should already strip these)
+  if (typeof raw === "object" && raw !== null) {
+    const forbidden = ["apiKey", "api_key", "token", "hash", "secret", "password", "openRouterApiKey"];
+    for (const key of forbidden) {
+      if (key in raw) {
+        throw new Error(`安全检查失败: 响应包含敏感字段 "${key}"，已拒绝接收`);
+      }
+    }
+  }
+
+  // Extract version/uptime from nested server object or flat aliases
+  const server = raw.server;
+  const version = safeStr(server?.version ?? raw.version, "unknown");
+  const uptime = safeNum(server?.uptime ?? raw.uptime, 0);
+
+  // Derive status from ready/ok flags
+  const status = raw.ready === true || raw.ok === true ? "healthy" : (raw.status ?? "unknown");
+
+  return {
+    status,
+    timestamp: safeStr(raw.timestamp, new Date().toISOString()),
+    uptime,
+    version,
+    checks: extractChecks(raw),
+    recentFailedJobs: adaptFailedJobs(raw.failedJobs ?? raw.recentFailedJobs),
+    recentAgentActions: adaptAgentActions(raw.recentAgentActions),
+    recentJobs: adaptRecentJobs(raw.recentJobs),
+    audioDir: adaptAudioDir(raw.audioDir, raw.audioDirPath),
+  };
 }

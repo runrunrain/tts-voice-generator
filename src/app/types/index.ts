@@ -17,6 +17,30 @@ export interface VoiceProfile {
   status: VoiceStatus;
   lastVerified: string;
   verifyDuration?: string;
+  verifyError?: string;
+}
+
+// ─── Voice Stats ─────────────────────────────────────────────────────────────
+
+export interface VoiceErrorSummary {
+  voice?: string;
+  errorCode?: string;
+  errorMessage: string;
+  count: number;
+  lastOccurrence?: string;
+  /** Legacy field: older backend versions may return { error, count } */
+  error?: string;
+}
+
+export interface VoiceStats {
+  total: number;
+  verified: number;
+  failed: number;
+  unknown: number;
+  staleVerified: number;
+  neverVerified: number;
+  avgLatencyMs: number | null;
+  errorSummary: VoiceErrorSummary[];
 }
 
 // ─── Generation Request / Result ─────────────────────────────────────────────
@@ -97,6 +121,13 @@ export interface HistoryRecord {
   durationMs?: number | null;
   assetFormat?: string | null;
   sizeBytes?: number | null;
+  // Audio metadata
+  sampleRate?: number | null;
+  bitDepth?: number | null;
+  channels?: number | null;
+  // Agent context fields (present when source === "Agent")
+  agentConversationId?: string | null;
+  agentActionLogId?: number | null;
 }
 
 export interface HistoryFilter {
@@ -111,6 +142,18 @@ export interface HistoryFilter {
 
 export type ConnectionStatus = "untested" | "testing" | "connected" | "failed";
 
+export type AgentAuthMode = "confirm_each" | "session_auto";
+
+export interface AgentSettings {
+  authMode: AgentAuthMode;
+  maxRequests: number;
+  maxChars: number;
+  maxCost: number;
+  sessionExpiry: number;
+  hasLocalPluginToken: boolean;
+  localPluginTokenFingerprint: string | null;
+}
+
 export interface AppSettings {
   openRouterApiKey: string;
   defaultModel: string;
@@ -120,6 +163,7 @@ export interface AppSettings {
   maxChars: number;
   maxConcurrent: number;
   connectionStatus: ConnectionStatus;
+  agent: AgentSettings;
 }
 
 // ─── Cost Estimation ─────────────────────────────────────────────────────────
@@ -205,15 +249,85 @@ export interface AssembleResult {
   };
 }
 
+// ─── Diagnostics ──────────────────────────────────────────────────────────────
+
+export type DiagnosticsPhase = "idle" | "loading" | "success" | "error";
+
+export interface DiagnosticCheck {
+  keyConfigured: boolean;
+  dbOk: boolean;
+  audioDirWritable: boolean;
+  routesReady: boolean;
+}
+
+export interface DiagnosticFailedJob {
+  id: string;
+  voice: string;
+  error: string;
+  /** Original status from backend (e.g. "failed") */
+  status?: string;
+  /** Input character count (backend: inputCharCount) */
+  charCount?: number;
+  /** Error code from backend */
+  errorCode?: string | null;
+  createdAt: string;
+}
+
+export interface DiagnosticAgentAction {
+  id: number;
+  conversationId?: string | null;
+  /** Action type -- adapted from backend actionType */
+  action: string;
+  /** Action status -- adapted from backend approvalStatus */
+  status: string;
+  /** Backend raw: actionType */
+  actionType?: string;
+  /** Backend raw: toolName */
+  toolName?: string | null;
+  /** Backend raw: approvalStatus */
+  approvalStatus?: string;
+  createdAt: string;
+}
+
+export interface DiagnosticJobSummary {
+  id: string;
+  voice: string;
+  status: string;
+  source: string;
+  createdAt: string;
+  /** Character count -- adapted from backend inputCharCount */
+  charCount: number;
+}
+
+export interface AudioDirInfo {
+  path: string;
+  writable: boolean;
+  fileCount: number;
+  totalSizeBytes: number;
+}
+
+export interface Diagnostics {
+  status: string;
+  timestamp: string;
+  uptime: number;
+  version: string;
+  checks: DiagnosticCheck;
+  recentFailedJobs: DiagnosticFailedJob[];
+  recentAgentActions: DiagnosticAgentAction[];
+  recentJobs: DiagnosticJobSummary[];
+  /** Audio directory -- either a plain path string or a structured info object */
+  audioDir: string | AudioDirInfo;
+}
+
 // ─── Demo / Adapter Service Contract ─────────────────────────────────────────
 
 export interface TtsServiceAdapter {
   generateSpeech(req: GenerateRequest): Promise<GenerateResult>;
-  probeVoice(voiceName: string): Promise<{ status: VoiceStatus; latency: string }>;
+  probeVoice(voiceName: string, force?: boolean): Promise<{ status: VoiceStatus; latency: string; cached?: boolean; cacheTtlSeconds?: number | null; lastVerified?: string | null; error?: string }>;
   testConnection(): Promise<ConnectionStatus>;
   listVoices(): VoiceProfile[];
   /** Async voice list for backend-backed adapters */
-  listVoicesAsync?(): Promise<VoiceProfile[]>;
+  listVoicesAsync?(): Promise<{ voices: VoiceProfile[]; stats: VoiceStats }>;
   listHistory(filter: HistoryFilter): { records: HistoryRecord[]; totalPages: number };
   /** Async history list for backend-backed adapters */
   listHistoryAsync?(filter: HistoryFilter): Promise<{ records: HistoryRecord[]; totalPages: number; totalRecords?: number }>;

@@ -22,6 +22,8 @@ export interface TtsFormatPlan {
   extension: string;
   /** Whether the PCM buffer needs to be wrapped into WAV before writing */
   wrapPcmToWav: boolean;
+  /** PCM parameters for upstream/raw PCM audio metadata and WAV wrapping */
+  pcmParams?: WavHeaderOptions;
 }
 
 // ─── Format Resolution ────────────────────────────────────────────────────────
@@ -50,6 +52,7 @@ export function resolveTtsFormat(
         mimeType: "audio/pcm",
         extension: "pcm",
         wrapPcmToWav: false,
+        pcmParams: DEFAULT_WAV_OPTIONS,
       };
     }
     // Default: wav (or legacy mp3 -> wav)
@@ -59,6 +62,7 @@ export function resolveTtsFormat(
       mimeType: "audio/wav",
       extension: "wav",
       wrapPcmToWav: true,
+      pcmParams: DEFAULT_WAV_OPTIONS,
     };
   }
 

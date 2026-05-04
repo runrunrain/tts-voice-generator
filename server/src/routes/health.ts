@@ -24,7 +24,7 @@ import { getAudioDir, getAudioBaseDir, writeAudioFile, readAudioFile, computeSha
 
 const health = new Hono();
 
-let startTime = Date.now();
+export const serverStartTime = Date.now();
 
 function buildHealthResponse() {
   return {
@@ -33,7 +33,7 @@ function buildHealthResponse() {
     openRouterConfigured: isOpenRouterConfigured(),
     providerConfigured: isOpenRouterConfigured(),
     localPluginTokenEnabled: false,
-    uptime: Math.floor((Date.now() - startTime) / 1000),
+    uptime: Math.floor((Date.now() - serverStartTime) / 1000),
     activeJobs: getActiveJobCount(),
   };
 }
@@ -56,7 +56,7 @@ interface ReadinessCheck {
   latencyMs?: number;
 }
 
-health.get("/api/ready", (c) => {
+export function buildReadinessSnapshot() {
   const checks: ReadinessCheck[] = [];
   const overallStart = Date.now();
 
@@ -147,7 +147,7 @@ health.get("/api/ready", (c) => {
   const allPassed = checks.every((c) => c.ok);
   const totalLatency = Date.now() - overallStart;
 
-  return c.json({
+  return {
     ready: allPassed,
     timestamp: new Date().toISOString(),
     latencyMs: totalLatency,
@@ -163,7 +163,11 @@ health.get("/api/ready", (c) => {
     // Important: readiness does NOT mean real OpenRouter works
     // It only means the system is configured enough to attempt a call
     realOpenRouterVerified: false,
-  });
+  };
+}
+
+health.get("/api/ready", (c) => {
+  return c.json(buildReadinessSnapshot());
 });
 
 export default health;
