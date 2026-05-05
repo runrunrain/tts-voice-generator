@@ -8,8 +8,10 @@
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "./schema.js";
+import * as schemaExtended from "./schema-extended.js";
 import path from "node:path";
 import fs from "node:fs";
+import crypto from "node:crypto";
 import { env } from "../config/env.js";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -173,6 +175,215 @@ export function initSchema() {
   addColumnIfMissing(rawDb, "audio_asset", "sample_rate", "INTEGER");
   addColumnIfMissing(rawDb, "audio_asset", "bit_depth", "INTEGER");
   addColumnIfMissing(rawDb, "audio_asset", "channels", "INTEGER");
+
+  // ─── P0 Voice Production Extended Tables ──────────────────────────────────
+
+  rawDb.exec(`
+    CREATE TABLE IF NOT EXISTS voice_task (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'draft',
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS requirement_document (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES voice_task(id) ON DELETE CASCADE,
+      file_name TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'paste',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      content_sha256 TEXT,
+      content_size_bytes INTEGER,
+      version INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS director_profile (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      description TEXT NOT NULL DEFAULT '',
+      config TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS production_list_version (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES voice_task(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL,
+      director_profile_id TEXT,
+      speakers_json TEXT NOT NULL DEFAULT '[]',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      line_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS voice_line (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES voice_task(id) ON DELETE CASCADE,
+      version_id TEXT NOT NULL REFERENCES production_list_version(id) ON DELETE CASCADE,
+      "order" INTEGER NOT NULL,
+      speaker TEXT NOT NULL,
+      text TEXT NOT NULL,
+      voice TEXT NOT NULL,
+      style TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS opencode_session (
+      id TEXT PRIMARY KEY,
+      session_type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      task_id TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      completed_at INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_button_preset (
+      id TEXT PRIMARY KEY,
+      button_key TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      prompt_template TEXT NOT NULL DEFAULT '',
+      target_policy_json TEXT NOT NULL DEFAULT '{}',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_button_run (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES voice_task(id) ON DELETE CASCADE,
+      button_key TEXT NOT NULL,
+      target_line_id TEXT NOT NULL,
+      runner TEXT NOT NULL DEFAULT 'fallback',
+      input_snapshot_json TEXT,
+      output_snapshot_json TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      error_code TEXT,
+      error_message TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      completed_at INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_chat_session (
+      id TEXT PRIMARY KEY,
+      opencode_session_id TEXT,
+      task_id TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_chat_message (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES agent_chat_session(id) ON DELETE CASCADE,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS operation_audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      actor TEXT NOT NULL DEFAULT 'user',
+      snapshot_json TEXT,
+      request_id TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+  `);
+
+  // Document version conflict protection migration (must be after table creation)
+  addColumnIfMissing(rawDb, "requirement_document", "version", "INTEGER NOT NULL DEFAULT 1");
+
+  // Seed default button presets if empty
+  seedButtonPresets(rawDb);
+}
+
+function seedButtonPresets(rawDb: Database.Database) {
+  const count = (rawDb.prepare("SELECT COUNT(*) as c FROM agent_button_preset").get() as { c: number }).c;
+  if (count > 0) return;
+
+  const now = Math.floor(Date.now() / 1000);
+  const presets = [
+    {
+      buttonKey: "shorten",
+      name: "Shorten",
+      description: "Shorten the target line text while preserving meaning",
+      promptTemplate: "Shorten the following voice line while preserving its meaning and natural flow for speech: {{text}}",
+      targetPolicyJson: JSON.stringify({ allowedFields: ["text"], scope: "line" }),
+      sortOrder: 1,
+    },
+    {
+      buttonKey: "expand",
+      name: "Expand",
+      description: "Expand the target line text with more detail",
+      promptTemplate: "Expand the following voice line with more descriptive detail while keeping it natural for speech: {{text}}",
+      targetPolicyJson: JSON.stringify({ allowedFields: ["text"], scope: "line" }),
+      sortOrder: 2,
+    },
+    {
+      buttonKey: "rewrite",
+      name: "Rewrite",
+      description: "Rewrite the target line with instruction",
+      promptTemplate: "Rewrite the following voice line according to the instruction: {{instruction}}. Original: {{text}}",
+      targetPolicyJson: JSON.stringify({ allowedFields: ["text"], scope: "line" }),
+      sortOrder: 3,
+    },
+    {
+      buttonKey: "style-formal",
+      name: "Style: Formal",
+      description: "Apply formal tone to the target line",
+      promptTemplate: "Rewrite the following voice line in a formal tone: {{text}}",
+      targetPolicyJson: JSON.stringify({ allowedFields: ["text", "style"], scope: "line" }),
+      sortOrder: 4,
+    },
+    {
+      buttonKey: "style-casual",
+      name: "Style: Casual",
+      description: "Apply casual tone to the target line",
+      promptTemplate: "Rewrite the following voice line in a casual, friendly tone: {{text}}",
+      targetPolicyJson: JSON.stringify({ allowedFields: ["text", "style"], scope: "line" }),
+      sortOrder: 5,
+    },
+    {
+      buttonKey: "style-dramatic",
+      name: "Style: Dramatic",
+      description: "Apply dramatic tone to the target line",
+      promptTemplate: "Rewrite the following voice line in a dramatic, expressive tone: {{text}}",
+      targetPolicyJson: JSON.stringify({ allowedFields: ["text", "style"], scope: "line" }),
+      sortOrder: 6,
+    },
+  ];
+
+  const stmt = rawDb.prepare(
+    `INSERT INTO agent_button_preset (id, button_key, name, description, prompt_template, target_policy_json, sort_order, enabled, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+  );
+
+  for (const p of presets) {
+    stmt.run(
+      crypto.randomUUID(),
+      p.buttonKey,
+      p.name,
+      p.description,
+      p.promptTemplate,
+      p.targetPolicyJson,
+      p.sortOrder,
+      now,
+      now,
+    );
+  }
 }
 
 function addColumnIfMissing(rawDb: Database.Database, table: string, column: string, definition: string) {

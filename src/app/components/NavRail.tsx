@@ -1,5 +1,5 @@
 import { Link, useLocation } from "react-router";
-import { Mic, History, Settings, Play, Clapperboard, Bell } from "lucide-react";
+import { Mic, History, Settings, Play, Clapperboard, Bell, Factory } from "lucide-react";
 
 export function NavRail() {
   const location = useLocation();
@@ -7,6 +7,7 @@ export function NavRail() {
   const navItems = [
     { path: "/generate", label: "生成", icon: Play, exact: true },
     { path: "/generate/director", label: "导演", icon: Clapperboard },
+    { path: "/tasks", label: "任务", icon: Factory },
     { path: "/voices", label: "音色", icon: Mic },
     { path: "/history", label: "历史", icon: History },
     { path: "/settings", label: "设置", icon: Settings },

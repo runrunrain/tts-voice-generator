@@ -33,6 +33,12 @@ import historyRoutes from "./routes/history.js";
 import promptsRoutes from "./routes/prompts.js";
 import agentRoutes from "./routes/agent.js";
 import diagnosticsRoutes from "./routes/diagnostics.js";
+import tasksRoutes from "./routes/tasks.js";
+import documentsRoutes from "./routes/documents.js";
+import productionListRoutes from "./routes/production-list.js";
+import directorProfilesRoutes from "./routes/director-profiles.js";
+import agentButtonsRoutes from "./routes/agent-buttons.js";
+import agentChatRoutes from "./routes/agent-chat.js";
 
 // ─── Create Hono App ─────────────────────────────────────────────────────────
 
@@ -54,7 +60,7 @@ const ALLOWED_ORIGINS = [
 
 app.use("*", cors({
   origin: ALLOWED_ORIGINS,
-  allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowHeaders: ["Content-Type", "Authorization"],
   exposeHeaders: ["Content-Length"],
   maxAge: 86400,
@@ -73,6 +79,12 @@ app.route("/", historyRoutes);
 app.route("/", promptsRoutes);
 app.route("/", agentRoutes);
 app.route("/", diagnosticsRoutes);
+app.route("/", tasksRoutes);
+app.route("/", documentsRoutes);
+app.route("/", productionListRoutes);
+app.route("/", directorProfilesRoutes);
+app.route("/", agentButtonsRoutes);
+app.route("/", agentChatRoutes);
 
 // Keep API semantics JSON-only. Static SPA fallback is registered after this
 // guard so missing /api/* routes never return index.html.

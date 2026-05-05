@@ -108,14 +108,33 @@ echo "OPENROUTER_API_KEY=sk-or-v1-your-key-here" > .env
 
 ### Development Mode
 
+**One-click quick start** (recommended for first-time use):
+
 ```bash
-# Start both frontend dev server and backend API server concurrently
+npm run quickstart
+```
+
+On Windows, you can also **double-click `start.bat`** in Explorer.
+
+This launches both services concurrently with unified log output:
+- Vite dev server on `http://localhost:5173` (with `/api/*` proxied to backend)
+- Hono API server on `http://localhost:3001`
+
+Press **Ctrl+C** or close the terminal window to stop all services. No orphan processes will be left behind.
+
+**Alternative** -- use `concurrently` (the original dev command):
+
+```bash
 npm run dev:all
 ```
 
-This launches:
-- Vite dev server on `http://localhost:5173` (with `/api/*` proxied to backend)
-- Hono API server on `http://localhost:3001`
+**Smoke test** -- verify both services start and respond, then auto-exit:
+
+```bash
+npm run smoke
+```
+
+This is useful for CI/CD or automated validation. It starts the services, checks health endpoints, and exits with code 0 on success or 1 on failure.
 
 The API key can also be configured through the Settings page in the UI (stored encrypted in the database). The `.env` file serves as a fallback.
 

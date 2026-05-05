@@ -154,6 +154,154 @@ export interface AgentSettings {
   localPluginTokenFingerprint: string | null;
 }
 
+// ─── OpenCode Agent Voice Production Tasks ───────────────────────────────────
+
+export type TaskStatus = "draft" | "ready" | "running" | "blocked" | "completed" | "failed";
+
+export interface Task {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  description?: string | null;
+  owner?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
+  documentCount?: number;
+  lineCount?: number;
+  lastRunStatus?: AgentRunStatus | null;
+  documents?: RequirementDocument[];
+}
+
+export interface RequirementDocument {
+  id: string;
+  taskId: string;
+  title: string;
+  filename?: string | null;
+  content: string;
+  contentType?: "markdown" | "json" | "text";
+  enabled: boolean;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
+}
+
+export type ResponseFormat = "wav" | "pcm" | "mp3";
+
+export interface VoiceLine {
+  id: string;
+  sortOrder: number;
+  transcript: string;
+  voice: string;
+  model: string;
+  responseFormat: ResponseFormat;
+  notes?: string;
+  directorProfileId?: string | null;
+  validationErrors?: string[];
+  version?: number;
+}
+
+export interface ProductionList {
+  taskId: string;
+  version: number;
+  updatedAt?: string;
+  lines: VoiceLine[];
+  speakers?: ProductionListSpeaker[];
+  directorProfileId?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ProductionListSpeaker {
+  id: string;
+  label: string;
+  name?: string;
+  voice: string;
+  style?: string;
+}
+
+export interface DirectorSpeakerProfile {
+  id: string;
+  label: string;
+  name: string;
+  voice: string;
+  style?: string;
+}
+
+export interface DirectorProfile {
+  id: string;
+  taskId: string;
+  name: string;
+  audioProfile: string;
+  scene: string;
+  directorNotes: string;
+  sampleContext: string;
+  speakers: DirectorSpeakerProfile[];
+  createdAt: string;
+  updatedAt: string;
+  version: number;
+}
+
+export interface ValidationIssue {
+  lineId?: string;
+  field?: keyof VoiceLine | string;
+  severity: "error" | "warning";
+  message: string;
+}
+
+export interface ProductionListValidationReport {
+  ok: boolean;
+  issues: ValidationIssue[];
+}
+
+export type AgentRunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+export interface AgentButton {
+  key: string;
+  label: string;
+  description?: string;
+  scope: "task" | "line" | "global";
+  available: boolean;
+  disabledReason?: string | null;
+  runner?: "opencode" | "fallback";
+}
+
+export interface AgentButtonListResult {
+  buttons: AgentButton[];
+  opencodeAvailable: boolean;
+  runnerMode: "opencode" | "fallback";
+  disabledReason: string | null;
+}
+
+export interface OpencodeSession {
+  id: string;
+  taskId?: string | null;
+  kind: "automation" | "chat";
+  status: AgentRunStatus | "idle";
+  buttonKey?: string | null;
+  lineId?: string | null;
+  title?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  error?: string | null;
+}
+
+export type AgentMessageRole = "user" | "assistant" | "system";
+
+export interface AgentChatMessage {
+  id: string;
+  sessionId: string;
+  role: AgentMessageRole;
+  content: string;
+  createdAt: string;
+  status?: "sending" | "sent" | "failed";
+  error?: string | null;
+}
+
+export interface ExpectedVersionPayload {
+  expectedVersion: number;
+}
+
 export interface AppSettings {
   openRouterApiKey: string;
   defaultModel: string;

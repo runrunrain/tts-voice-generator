@@ -9,11 +9,13 @@
     "build": "vite build",
     "build:all": "npm run build && npm run server:build",
     "start:all": "npm run build:all && npm run server:start",
-    "server:dev": "tsx watch server/src/index.ts",
+    "server:dev": "node server/node_modules/tsx/dist/cli.mjs watch server/src/index.ts",
     "server:build": "npm run build --prefix server",
     "server:start": "node server/dist/index.js",
     "server:test": "npm test --prefix server",
-    "test": "npm test --prefix server"
+    "test": "npm test --prefix server",
+    "quickstart": "node scripts/start.js",
+    "smoke": "node scripts/start.js --smoke"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",

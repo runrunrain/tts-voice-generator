@@ -3,6 +3,7 @@ import { NavRail } from "./NavRail";
 import { TopBar } from "./TopBar";
 import { BottomBar } from "./BottomBar";
 import { RightPanel } from "./RightPanel";
+import { GlobalAgentDock } from "./GlobalAgentDock";
 import { useState } from "react";
 
 export function Shell() {
@@ -10,23 +11,24 @@ export function Shell() {
   const location = useLocation();
 
   // Certain routes hide the right panel completely
-  const hideRightPanelRoutes = ["/history/:jobId", "/settings"];
+  const hideRightPanelRoutes = ["/history/:jobId", "/settings", "/tasks"];
   const isRightPanelHidden = hideRightPanelRoutes.some(route => {
     if (route.includes(":jobId")) {
       return location.pathname.startsWith("/history/") && location.pathname.split("/").length > 2;
     }
-    return location.pathname === route;
+    return route === "/tasks" ? location.pathname.startsWith("/tasks") : location.pathname === route;
   });
 
   return (
-    <div 
-      className="h-screen w-screen overflow-hidden bg-bg-base text-text-primary"
-      style={{
-        display: "grid",
-        gridTemplateColumns: `72px 1fr ${isRightPanelHidden ? '0px' : isRightPanelOpen ? '384px' : '0px'}`,
-        gridTemplateRows: "48px 1fr 28px",
-      }}
-    >
+    <div className="h-screen w-screen overflow-hidden bg-bg-base text-text-primary relative">
+      <div 
+        className="h-full w-full overflow-hidden"
+        style={{
+          display: "grid",
+          gridTemplateColumns: `72px 1fr ${isRightPanelHidden ? '0px' : isRightPanelOpen ? '384px' : '0px'}`,
+          gridTemplateRows: "48px 1fr 28px",
+        }}
+      >
       <div className="row-span-3 col-start-1 col-end-2 border-r border-border-subtle bg-bg-base">
         <NavRail />
       </div>
@@ -58,6 +60,10 @@ export function Shell() {
       <div className="col-start-2 col-end-4 row-start-3 row-end-4 bg-bg-sunken border-t border-border-subtle">
         <BottomBar />
       </div>
+
+      </div>
+
+      <GlobalAgentDock />
     </div>
   );
 }

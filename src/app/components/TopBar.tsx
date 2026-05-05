@@ -46,6 +46,13 @@ export function TopBar() {
   } else if (location.pathname.includes("/settings")) {
     breadcrumbs = ["设置"];
     title = "系统设置";
+  } else if (location.pathname.includes("/tasks")) {
+    breadcrumbs = ["生产任务"];
+    title = "语音制片工作台";
+    if (location.pathname.length > "/tasks".length) {
+      breadcrumbs.push("工作台");
+      title = "任务工作台";
+    }
   }
 
   const statusColor = !health

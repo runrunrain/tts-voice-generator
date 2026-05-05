@@ -26,9 +26,60 @@ import type {
   TtsServiceAdapter,
   AssemblePromptRequest,
   AssemblePromptResponse,
+  AgentButton,
+  AgentButtonListResult,
+  AgentChatMessage,
+  AgentRunStatus,
+  DirectorProfile,
+  OpencodeSession,
+  ProductionList,
+  ProductionListSpeaker,
+  ProductionListValidationReport,
+  RequirementDocument,
+  ResponseFormat,
+  Task,
+  TaskStatus,
+  VoiceLine,
 } from "../types";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+export class ApiError extends Error {
+  status: number;
+  body: unknown;
+
+  constructor(status: number, message: string, body: unknown) {
+    super(message);
+    this.name = status === 409 ? "VersionConflictError" : "ApiError";
+    this.status = status;
+    this.body = body;
+  }
+
+  get isConflict() {
+    return this.status === 409;
+  }
+}
+
+async function readResponseBody(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function errorMessageFromBody(status: number, body: unknown): string {
+  if (body && typeof body === "object") {
+    const record = body as Record<string, unknown>;
+    const message = record.message ?? record.error ?? record.detail;
+    if (typeof message === "string" && message.length > 0) return message;
+  }
+  if (typeof body === "string" && body.length > 0) return body.slice(0, 200);
+  if (status === 409) return "版本冲突：服务端数据已更新";
+  return `API Error ${status}`;
+}
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -40,11 +91,12 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`API Error ${response.status}: ${body.slice(0, 200)}`);
+    const body = await readResponseBody(response);
+    throw new ApiError(response.status, errorMessageFromBody(response.status, body), body);
   }
 
-  return response.json() as Promise<T>;
+  const body = await readResponseBody(response);
+  return body as T;
 }
 
 function mapVoiceStatus(status: string): VoiceStatus {
@@ -779,3 +831,554 @@ export async function getDiagnostics(): Promise<Diagnostics> {
     audioDir: adaptAudioDir(raw.audioDir, raw.audioDirPath),
   };
 }
+
+// ─── Task Domain API ──────────────────────────────────────────────────────────
+
+function taskQuery(status?: TaskStatus | "all") {
+  if (!status || status === "all") return "";
+  const params = new URLSearchParams({ status });
+  return `?${params.toString()}`;
+}
+
+function withExpectedVersion(expectedVersion: number, payload?: Record<string, unknown>) {
+  return JSON.stringify({ ...(payload ?? {}), expectedVersion });
+}
+
+const DEFAULT_TTS_MODEL = "google/gemini-3.1-flash-tts-preview";
+
+type RawRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is RawRecord {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function asString(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function asNullableString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function asNumber(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function asBoolean(value: unknown, fallback = false): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function unwrapEnvelope<T>(data: unknown, key: string): T {
+  if (isRecord(data) && key in data) return data[key] as T;
+  return data as T;
+}
+
+function mapTaskStatus(status: unknown): TaskStatus {
+  switch (status) {
+    case "draft":
+    case "ready":
+    case "running":
+    case "blocked":
+    case "completed":
+    case "failed":
+      return status;
+    case "in_progress":
+      return "running";
+    case "archived":
+      return "completed";
+    default:
+      return "draft";
+  }
+}
+
+function mapTaskStatusToBackend(status: TaskStatus): string {
+  if (status === "running") return "in_progress";
+  return status;
+}
+
+function mapTask(raw: unknown): Task {
+  const t = isRecord(raw) ? raw : {};
+  return {
+    id: asString(t.id, "unknown"),
+    title: asString(t.title, "未命名任务"),
+    description: asNullableString(t.description),
+    status: mapTaskStatus(t.status),
+    owner: asNullableString(t.owner),
+    createdAt: asString(t.createdAt, new Date().toISOString()),
+    updatedAt: asString(t.updatedAt, asString(t.createdAt, new Date().toISOString())),
+    version: asNumber(t.version, 0),
+    documentCount: asNumber(t.documentCount, undefined as unknown as number),
+    lineCount: asNumber(t.lineCount, undefined as unknown as number),
+    lastRunStatus: (typeof t.lastRunStatus === "string" ? t.lastRunStatus : null) as Task["lastRunStatus"],
+    documents: Array.isArray(t.documents) ? t.documents.map(mapRequirementDocument) : undefined,
+  };
+}
+
+function mapRequirementDocument(raw: unknown): RequirementDocument {
+  const d = isRecord(raw) ? raw : {};
+  const fileName = asString(d.fileName ?? d.filename ?? d.title, "未命名文档");
+  return {
+    id: asString(d.id, "unknown"),
+    taskId: asString(d.taskId),
+    title: asString(d.title ?? d.fileName ?? d.filename, fileName),
+    filename: fileName,
+    content: typeof d.content === "string" ? d.content : "",
+    contentType: (d.contentType === "markdown" || d.contentType === "json" || d.contentType === "text") ? d.contentType : "text",
+    enabled: asBoolean(d.enabled, true),
+    sortOrder: asNumber(d.sortOrder ?? d.order, 0),
+    createdAt: asString(d.createdAt, new Date().toISOString()),
+    updatedAt: asString(d.updatedAt, asString(d.createdAt, new Date().toISOString())),
+    version: asNumber(d.version, 0),
+    ...(typeof d.contentSizeBytes === "number" ? { contentSizeBytes: d.contentSizeBytes } : {}),
+  };
+}
+
+function toBackendDocumentPayload(payload: Partial<RequirementDocument> & { filename?: string | null; title?: string | null; content?: string }) {
+  const fileName = payload.filename ?? payload.title ?? undefined;
+  return {
+    ...(fileName ? { fileName } : {}),
+    ...(payload.content !== undefined ? { content: payload.content } : {}),
+    ...(payload.enabled !== undefined ? { enabled: payload.enabled } : {}),
+  };
+}
+
+function normalizeResponseFormat(value: unknown): ResponseFormat {
+  return value === "pcm" || value === "mp3" || value === "wav" ? value : "wav";
+}
+
+function mapVoiceLine(raw: unknown): VoiceLine {
+  const l = isRecord(raw) ? raw : {};
+  const order = asNumber(l.sortOrder ?? l.order, 0);
+  return {
+    id: asString(l.id, `line-${order}`),
+    sortOrder: l.sortOrder !== undefined ? asNumber(l.sortOrder, order) : order + 1,
+    transcript: asString(l.transcript ?? l.text),
+    voice: asString(l.voice, "Zephyr"),
+    model: asString(l.model, DEFAULT_TTS_MODEL),
+    responseFormat: normalizeResponseFormat(l.responseFormat ?? l.format),
+    notes: asString(l.notes ?? l.style, ""),
+    directorProfileId: asNullableString(l.directorProfileId),
+    validationErrors: Array.isArray(l.validationErrors) ? l.validationErrors.filter((item): item is string => typeof item === "string") : undefined,
+    version: asNumber(l.version, undefined as unknown as number),
+    ...(typeof l.speaker === "string" ? { speaker: l.speaker } : {}),
+    ...(typeof l.style === "string" ? { style: l.style } : {}),
+    ...(typeof l.status === "string" ? { status: l.status } : {}),
+  };
+}
+
+function toBackendVoiceLine(line: VoiceLine, index: number) {
+  const raw = line as unknown as RawRecord;
+  return {
+    id: line.id,
+    order: index,
+    speaker: asString(raw.speaker, "narrator"),
+    text: line.transcript,
+    voice: line.voice,
+    style: asString(raw.style, line.notes ?? ""),
+    notes: line.notes ?? "",
+    status: asString(raw.status, "pending"),
+    model: line.model || DEFAULT_TTS_MODEL,
+    responseFormat: line.responseFormat || "wav",
+    directorProfileId: line.directorProfileId ?? null,
+  };
+}
+
+function mapProductionList(raw: unknown): ProductionList {
+  const pl = isRecord(raw) ? raw : {};
+  return {
+    taskId: asString(pl.taskId),
+    version: asNumber(pl.version, 0),
+    updatedAt: asString(pl.updatedAt ?? pl.createdAt, undefined as unknown as string),
+    lines: asArray(pl.lines).map(mapVoiceLine).sort((a, b) => a.sortOrder - b.sortOrder),
+    speakers: asArray(pl.speakers).map((s): ProductionListSpeaker => {
+      const rec = isRecord(s) ? s : {};
+      return {
+        id: asString(rec.id, `speaker-${Date.now()}`),
+        label: asString(rec.label, "Speaker"),
+        name: asString(rec.name, ""),
+        voice: asString(rec.voice, "Zephyr"),
+        style: asString(rec.style, ""),
+      };
+    }),
+    directorProfileId: asNullableString(pl.directorProfileId),
+    metadata: isRecord(pl.metadata) ? pl.metadata as Record<string, unknown> : {},
+  };
+}
+
+function toBackendProductionPayload(expectedVersion: number, list: Pick<ProductionList, "lines"> & Partial<Record<"speakers" | "directorProfileId" | "metadata", unknown>>) {
+  return {
+    expectedVersion,
+    lines: list.lines.map(toBackendVoiceLine),
+    speakers: Array.isArray(list.speakers) ? list.speakers : [],
+    directorProfileId: typeof list.directorProfileId === "string" ? list.directorProfileId : null,
+    metadata: isRecord(list.metadata) ? list.metadata : {},
+  };
+}
+
+function mapValidationReport(raw: unknown): ProductionListValidationReport {
+  const root = isRecord(raw) ? raw : {};
+  const validation = isRecord(root.validation) ? root.validation : root;
+  const issues = asArray(validation.issues).map((issue) => {
+    const i = isRecord(issue) ? issue : {};
+    return {
+      lineId: asNullableString(i.lineId) ?? undefined,
+      field: asString(i.field, undefined as unknown as string),
+      severity: i.severity === "error" ? "error" : "warning",
+      message: asString(i.message, asString(i.code, "校验问题")),
+    };
+  });
+  return { ok: validation.valid === true || root.ok === true && !issues.some((i) => i.severity === "error"), issues };
+}
+
+function mapDirectorProfile(raw: unknown): DirectorProfile {
+  const p = isRecord(raw) ? raw : {};
+  const config = isRecord(p.config) ? p.config : {};
+  return {
+    id: asString(p.id, "unknown"),
+    taskId: asString(p.taskId),
+    name: asString(p.name, "未命名导演配置"),
+    audioProfile: asString(p.audioProfile ?? config.audioProfile),
+    scene: asString(p.scene ?? config.scene),
+    directorNotes: asString(p.directorNotes ?? config.directorNotes),
+    sampleContext: asString(p.sampleContext ?? config.sampleContext),
+    speakers: asArray(p.speakers ?? config.speakers).map((speaker, index) => {
+      const s = isRecord(speaker) ? speaker : {};
+      return {
+        id: asString(s.id, index === 0 ? "a" : `speaker-${index + 1}`),
+        label: asString(s.label, index === 0 ? "Speaker A" : `Speaker ${index + 1}`),
+        name: asString(s.name),
+        voice: asString(s.voice, "Zephyr"),
+        style: asString(s.style),
+      };
+    }),
+    createdAt: asString(p.createdAt, new Date().toISOString()),
+    updatedAt: asString(p.updatedAt, asString(p.createdAt, new Date().toISOString())),
+    version: asNumber(p.version, 0),
+  };
+}
+
+function toBackendDirectorProfilePayload(payload: Partial<DirectorProfile>) {
+  const raw = payload as Partial<DirectorProfile> & { description?: string };
+  return {
+    ...(payload.name !== undefined ? { name: payload.name } : {}),
+    ...(raw.description !== undefined ? { description: raw.description } : {}),
+    config: {
+      audioProfile: payload.audioProfile ?? "",
+      scene: payload.scene ?? "",
+      directorNotes: payload.directorNotes ?? "",
+      sampleContext: payload.sampleContext ?? "",
+      speakers: payload.speakers ?? [],
+      defaultVoice: payload.speakers?.[0]?.voice ?? "Zephyr",
+      defaultModel: DEFAULT_TTS_MODEL,
+      defaultFormat: "wav",
+    },
+  };
+}
+
+function mapAgentButton(raw: unknown): AgentButton {
+  const b = isRecord(raw) ? raw : {};
+  const policy = isRecord(b.targetPolicy) ? b.targetPolicy : {};
+  const scope = policy.scope === "task" || policy.scope === "global" || policy.scope === "line" ? policy.scope : "line";
+  const runner = b.runner === "opencode" ? "opencode" as const : "fallback" as const;
+  return {
+    key: asString(b.key ?? b.buttonKey, "unknown"),
+    label: asString(b.label ?? b.name, asString(b.buttonKey, "Agent Button")),
+    description: asString(b.description),
+    scope,
+    available: true,
+    disabledReason: asNullableString(b.disabledReason),
+    runner,
+  };
+}
+
+function mapRunStatus(status: unknown): AgentRunStatus | "idle" {
+  switch (status) {
+    case "queued":
+    case "running":
+    case "succeeded":
+    case "failed":
+    case "cancelled":
+    case "idle":
+      return status;
+    case "active":
+      return "running";
+    case "completed":
+      return "succeeded";
+    default:
+      return "idle";
+  }
+}
+
+function mapOpencodeSession(raw: unknown): OpencodeSession {
+  const s = isRecord(raw) ? raw : {};
+  const metadata = isRecord(s.metadata) ? s.metadata : {};
+  const kind = s.kind === "automation" || s.kind === "chat" ? s.kind : (s.sessionType === "chat" ? "chat" : "automation");
+  return {
+    id: asString(s.id, "unknown"),
+    taskId: asNullableString(s.taskId),
+    kind,
+    status: mapRunStatus(s.status),
+    buttonKey: asNullableString(s.buttonKey ?? metadata.buttonKey),
+    lineId: asNullableString(s.lineId ?? s.targetLineId ?? metadata.lineId),
+    title: asNullableString(s.title ?? metadata.title),
+    createdAt: asString(s.createdAt, new Date().toISOString()),
+    updatedAt: asString(s.updatedAt ?? s.completedAt ?? s.createdAt, new Date().toISOString()),
+    error: asNullableString(s.error ?? s.errorMessage),
+  };
+}
+
+function mapAgentChatMessage(raw: unknown): AgentChatMessage {
+  const m = isRecord(raw) ? raw : {};
+  const role = m.role === "assistant" || m.role === "system" || m.role === "user" ? m.role : "assistant";
+  return {
+    id: asString(m.id, `message-${Date.now().toString(36)}`),
+    sessionId: asString(m.sessionId),
+    role,
+    content: asString(m.content),
+    createdAt: asString(m.createdAt, new Date().toISOString()),
+    status: m.status === "sending" || m.status === "failed" ? m.status : "sent",
+    error: asNullableString(m.error),
+  };
+}
+
+export const taskApi = {
+  async listTasks(status?: TaskStatus | "all") {
+    const data = await apiFetch<unknown>(`/api/tasks${taskQuery(status)}`);
+    const tasks = Array.isArray(data) ? data : asArray(isRecord(data) ? data.tasks : undefined);
+    return { tasks: tasks.map(mapTask) };
+  },
+
+  async createTask(payload: { title: string; description?: string }) {
+    const data = await apiFetch<unknown>("/api/tasks", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    return mapTask(unwrapEnvelope(data, "task"));
+  },
+
+  async updateTask(taskId: string, expectedVersion: number, payload: Partial<Pick<Task, "title" | "description" | "status">>) {
+    const backendPayload = {
+      ...payload,
+      ...(payload.status ? { status: mapTaskStatusToBackend(payload.status) } : {}),
+    };
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}`, {
+      method: "PATCH",
+      body: withExpectedVersion(expectedVersion, backendPayload as Record<string, unknown>),
+    });
+    return mapTask(unwrapEnvelope(data, "task"));
+  },
+
+  async getTask(taskId: string) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}`);
+    return mapTask(unwrapEnvelope(data, "task"));
+  },
+
+  async uploadDocument(taskId: string, payload: { filename?: string; fileName?: string; content: string }) {
+    const fileName = payload.fileName ?? payload.filename ?? "uploaded-document.txt";
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/documents/upload`, {
+      method: "POST",
+      body: JSON.stringify({ fileName, content: payload.content }),
+    });
+    return { ...mapRequirementDocument(unwrapEnvelope(data, "document")), content: payload.content };
+  },
+
+  async pasteDocument(taskId: string, payload: { title?: string; filename?: string; fileName?: string; content: string }) {
+    const fileName = payload.fileName ?? payload.filename ?? payload.title ?? "pasted-requirements.md";
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/documents/paste`, {
+      method: "POST",
+      body: JSON.stringify({ fileName, content: payload.content }),
+    });
+    return { ...mapRequirementDocument(unwrapEnvelope(data, "document")), title: fileName, content: payload.content };
+  },
+
+  async listDocuments(taskId: string) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/documents`);
+    const documents = Array.isArray(data) ? data : asArray(isRecord(data) ? data.documents : undefined);
+    return { documents: documents.map(mapRequirementDocument) };
+  },
+
+  async getDocument(taskId: string, documentId: string) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/documents/${encodeURIComponent(documentId)}`);
+    return mapRequirementDocument(unwrapEnvelope(data, "document"));
+  },
+
+  async updateDocument(taskId: string, documentId: string, expectedVersion: number, payload: Partial<RequirementDocument>) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/documents/${encodeURIComponent(documentId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ ...toBackendDocumentPayload(payload), expectedVersion }),
+    });
+    return mapRequirementDocument(unwrapEnvelope(data, "document"));
+  },
+
+  deleteDocument(taskId: string, documentId: string) {
+    return apiFetch<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}/documents/${encodeURIComponent(documentId)}`, {
+      method: "DELETE",
+    });
+  },
+
+  async getProductionList(taskId: string) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/production-list`);
+    return mapProductionList(unwrapEnvelope(data, "productionList"));
+  },
+
+  async saveProductionList(taskId: string, expectedVersion: number, list: Pick<ProductionList, "lines" | "speakers" | "directorProfileId" | "metadata">) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/production-list`, {
+      method: "PUT",
+      body: JSON.stringify(toBackendProductionPayload(expectedVersion, list)),
+    });
+    return mapProductionList(unwrapEnvelope(data, "productionList"));
+  },
+
+  async patchProductionList(taskId: string, expectedVersion: number, payload: Partial<ProductionList>) {
+    const backendPayload = payload.lines
+      ? { ...payload, lines: payload.lines.map(toBackendVoiceLine) }
+      : payload;
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/production-list`, {
+      method: "PATCH",
+      body: withExpectedVersion(expectedVersion, backendPayload as Record<string, unknown>),
+    });
+    return mapProductionList(unwrapEnvelope(data, "productionList"));
+  },
+
+  async validateProductionList(taskId: string, list: Pick<ProductionList, "lines">) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/production-list/validate`, {
+      method: "POST",
+      body: JSON.stringify({ lines: list.lines.map(toBackendVoiceLine), speakers: [] }),
+    });
+    return mapValidationReport(data);
+  },
+
+  async listDirectorProfiles(_taskId?: string) {
+    const data = await apiFetch<unknown>("/api/director-profiles");
+    const profiles = Array.isArray(data) ? data : asArray(isRecord(data) ? data.profiles : undefined);
+    return { profiles: profiles.map(mapDirectorProfile) };
+  },
+
+  async createDirectorProfile(_taskId: string, payload: Partial<DirectorProfile>) {
+    const data = await apiFetch<unknown>("/api/director-profiles", {
+      method: "POST",
+      body: JSON.stringify(toBackendDirectorProfilePayload(payload)),
+    });
+    return mapDirectorProfile(unwrapEnvelope(data, "profile"));
+  },
+
+  async updateDirectorProfile(_taskId: string, profileId: string, _expectedVersion: number, payload: Partial<DirectorProfile>) {
+    const data = await apiFetch<unknown>(`/api/director-profiles/${encodeURIComponent(profileId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(toBackendDirectorProfilePayload(payload)),
+    });
+    return mapDirectorProfile(unwrapEnvelope(data, "profile"));
+  },
+
+  async listAgentButtons() {
+    const data = await apiFetch<unknown>("/api/agent/buttons");
+    const record = isRecord(data) ? data : {};
+    const buttons = Array.isArray(record.buttons) ? record.buttons : asArray(isRecord(data) ? data.buttons : undefined);
+    return {
+      buttons: buttons.map(mapAgentButton),
+      opencodeAvailable: asBoolean(record.opencodeAvailable, false),
+      runnerMode: (record.runnerMode === "opencode" ? "opencode" : "fallback") as "opencode" | "fallback",
+      disabledReason: asNullableString(record.disabledReason),
+    };
+  },
+
+  async normalizeRequirements(taskId: string) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/agent/normalize-requirements`, {
+      method: "POST",
+    });
+    const record = isRecord(data) ? data : {};
+    return {
+      productionList: mapProductionList(record.productionList),
+      runner: asString(record.runner, "fallback"),
+      warnings: asArray(record.warnings).map((warning) => isRecord(warning) ? { code: asString(warning.code), message: asString(warning.message) } : { code: "WARNING", message: String(warning) }),
+    };
+  },
+
+  async executeAgentButton(taskId: string, buttonKey: string, payload?: { lineId?: string; targetLineId?: string; expectedVersion?: number; parameters?: Record<string, unknown> }) {
+    const targetLineId = payload?.targetLineId ?? payload?.lineId;
+    if (!targetLineId) {
+      throw new Error("该 Agent 按钮需要指定生产行");
+    }
+    const productionList = payload?.expectedVersion !== undefined ? null : await this.getProductionList(taskId);
+    const expectedVersion = payload?.expectedVersion ?? productionList?.version ?? 0;
+    if (expectedVersion <= 0) {
+      throw new Error("当前任务还没有可执行的生产列表版本，请先保存或标准化需求");
+    }
+    if (productionList && !productionList.lines.some((line) => line.id === targetLineId)) {
+      throw new Error("目标生产行不在当前生产列表版本中，请刷新后重试");
+    }
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/agent/buttons/${encodeURIComponent(buttonKey)}/execute`, {
+      method: "POST",
+      body: JSON.stringify({ targetLineId, expectedVersion, parameters: payload?.parameters ?? {} }),
+    });
+    const record = isRecord(data) ? data : {};
+    return mapOpencodeSession({
+      id: record.runId,
+      taskId,
+      kind: "automation",
+      status: "completed",
+      buttonKey,
+      lineId: targetLineId,
+      title: `${buttonKey} · ${asString(record.runner, "fallback")}`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+  },
+
+  async listOpencodeSessions(taskId?: string) {
+    const data = await apiFetch<unknown>("/api/opencode/sessions");
+    const sessions = (Array.isArray(data) ? data : asArray(isRecord(data) ? data.sessions : undefined)).map(mapOpencodeSession);
+    return { sessions: taskId ? sessions.filter((session) => session.taskId === taskId) : sessions };
+  },
+
+  async createOpencodeSession(payload: Partial<OpencodeSession>) {
+    const data = await apiFetch<unknown>("/api/opencode/sessions", {
+      method: "POST",
+      body: JSON.stringify({ sessionType: payload.kind ?? "automation", metadata: { title: payload.title, buttonKey: payload.buttonKey, lineId: payload.lineId } }),
+    });
+    return mapOpencodeSession(unwrapEnvelope(data, "session"));
+  },
+
+  async createChatSession(payload: { taskId?: string; pagePath?: string; title?: string }) {
+    const data = await apiFetch<unknown>("/api/agent/chat/sessions", {
+      method: "POST",
+      body: JSON.stringify({ sessionType: "chat", taskId: payload.taskId, metadata: { pagePath: payload.pagePath, title: payload.title } }),
+    });
+    return mapOpencodeSession({ ...(unwrapEnvelope(data, "session") as RawRecord), kind: "chat", title: payload.title });
+  },
+
+  async listChatMessages(sessionId: string) {
+    const data = await apiFetch<unknown>(`/api/agent/chat/sessions/${encodeURIComponent(sessionId)}/messages`);
+    const messages = Array.isArray(data) ? data : asArray(isRecord(data) ? data.messages : undefined);
+    return { messages: messages.map(mapAgentChatMessage) };
+  },
+
+  async sendChatMessage(sessionId: string, content: string) {
+    const data = await apiFetch<unknown>(`/api/agent/chat/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ role: "user", content }),
+    });
+    if (isRecord(data) && Array.isArray(data.messages)) {
+      return { messages: data.messages.map(mapAgentChatMessage) };
+    }
+    const record = isRecord(data) ? data : {};
+    const messages = [record.message, record.assistantMessage]
+      .filter((message) => message !== undefined)
+      .map(mapAgentChatMessage);
+    if (messages.length > 0) return { messages };
+    return {
+      messages: [{
+        id: `assistant-unavailable-${Date.now().toString(36)}`,
+        sessionId,
+        role: "assistant" as const,
+        content: "Agent Chat 暂未返回可展示消息，请稍后重试或检查 OpenCode 可用性。",
+        createdAt: new Date().toISOString(),
+        status: "sent" as const,
+      }],
+    };
+  },
+};
