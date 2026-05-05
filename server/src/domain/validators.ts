@@ -21,6 +21,14 @@ export const VoiceLineSchema = z.object({
   model: z.string().min(1).optional().default("google/gemini-3.1-flash-tts-preview"),
   responseFormat: z.enum(["wav", "pcm", "mp3"]).optional().default("wav"),
   directorProfileId: z.string().optional().nullable(),
+  directorOverrideJson: z.string().optional().nullable(),
+  // Generation tracking fields
+  generationStatus: z.enum(["draft", "ready", "pending", "running", "succeeded", "failed", "needs_revision"]).optional().default("draft"),
+  relatedJobId: z.string().optional().nullable(),
+  relatedAssetId: z.number().int().optional().nullable(),
+  // Generation error tracking (persisted failure reason per line)
+  generationErrorCode: z.string().optional().nullable(),
+  generationErrorMessage: z.string().optional().nullable(),
 });
 
 export type VoiceLine = z.infer<typeof VoiceLineSchema>;
@@ -183,6 +191,41 @@ export const NormalizeRequirementsResultSchema = z.object({
     message: z.string(),
   })),
 });
+
+// ─── Generation Bridge ──────────────────────────────────────────────────────────
+
+export const GenerateFromListSchema = z.object({
+  /** Optional version check; if omitted, no version conflict check is performed. */
+  expectedVersion: z.number().int().min(0).optional(),
+  /** Explicit line IDs to generate. If omitted/empty, all eligible lines are selected. */
+  lineIds: z.array(z.string().min(1)).optional().default([]),
+  /** Whether to skip lines already in succeeded/running state. Default true. */
+  skipCompleted: z.boolean().optional().default(true),
+});
+
+export type GenerateFromListRequest = z.infer<typeof GenerateFromListSchema>;
+
+export type LineGenerationStatus = "draft" | "ready" | "pending" | "running" | "succeeded" | "failed" | "needs_revision";
+
+export interface LineGenerationResult {
+  lineId: string;
+  status: "succeeded" | "failed" | "skipped";
+  jobId?: string | null;
+  assetId?: number | null;
+  audioUrl?: string | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+}
+
+export interface GenerateFromListResponse {
+  taskId: string;
+  version: number;
+  requestedCount: number;
+  succeededCount: number;
+  failedCount: number;
+  skippedCount: number;
+  results: LineGenerationResult[];
+}
 
 // ─── Chat Message ──────────────────────────────────────────────────────────────
 

@@ -171,7 +171,13 @@ app.post("/api/tasks/:taskId/agent/normalize-requirements", async (c) => {
       style: line.style ?? "",
       notes: line.notes ?? "",
       status: "pending",
+      directorProfileId: (line as any).directorProfileId ?? null,
+      directorOverrideJson: (line as any).directorOverrideJson ?? null,
+      generationStatus: "draft",
+      relatedJobId: null,
+      relatedAssetId: null,
       createdAt: now,
+      updatedAt: now,
     }).run();
   }
 
@@ -369,7 +375,13 @@ app.post("/api/tasks/:taskId/agent/buttons/:buttonKey/execute", async (c) => {
       style: isTarget ? newStyle : line.style,
       notes: line.notes,
       status: isTarget ? "pending" : line.status,
+      directorProfileId: line.directorProfileId ?? null,
+      directorOverrideJson: line.directorOverrideJson ?? null,
+      generationStatus: line.generationStatus ?? "draft",
+      relatedJobId: line.relatedJobId ?? null,
+      relatedAssetId: line.relatedAssetId ?? null,
       createdAt: now,
+      updatedAt: now,
     }).run();
   }
 

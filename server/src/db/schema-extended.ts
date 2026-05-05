@@ -79,7 +79,19 @@ export const voiceLine = sqliteTable("voice_line", {
   style: text("style").notNull().default(""),
   notes: text("notes").notNull().default(""),
   status: text("status").notNull().default("pending"), // pending | approved | generating | generated | failed
+  // Director binding: reference to a shared director profile
+  directorProfileId: text("director_profile_id"),
+  // Director override: per-line override JSON (audioProfile, scene, directorNotes, etc.)
+  directorOverrideJson: text("director_override_json"),
+  // Generation tracking fields (Phase 2 bridge readiness)
+  generationStatus: text("generation_status").notNull().default("draft"), // draft | ready | pending | running | succeeded | failed | needs_revision
+  relatedJobId: text("related_job_id"),
+  relatedAssetId: integer("related_asset_id"),
+  // Generation error tracking (MIN-2: persists failure reason per line for post-refresh display)
+  generationErrorCode: text("generation_error_code"),
+  generationErrorMessage: text("generation_error_message"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }),
 });
 
 // ─── OpenCode Session ──────────────────────────────────────────────────────────

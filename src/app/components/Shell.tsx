@@ -4,11 +4,30 @@ import { TopBar } from "./TopBar";
 import { BottomBar } from "./BottomBar";
 import { RightPanel } from "./RightPanel";
 import { GlobalAgentDock } from "./GlobalAgentDock";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 export function Shell() {
   const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
+  const [isAgentDockOpen, setIsAgentDockOpen] = useState(false);
   const location = useLocation();
+  const toggleAgentDock = useCallback(() => setIsAgentDockOpen((prev) => !prev), []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        toggleAgentDock();
+        return;
+      }
+
+      if (event.key === "Escape") {
+        setIsAgentDockOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [toggleAgentDock]);
 
   // Certain routes hide the right panel completely
   const hideRightPanelRoutes = ["/history/:jobId", "/settings", "/tasks"];
@@ -30,7 +49,7 @@ export function Shell() {
         }}
       >
       <div className="row-span-3 col-start-1 col-end-2 border-r border-border-subtle bg-bg-base">
-        <NavRail />
+        <NavRail isAgentDockOpen={isAgentDockOpen} onToggleAgentDock={toggleAgentDock} />
       </div>
 
       <div className="col-start-2 col-end-4 row-start-1 row-end-2 border-b border-border-subtle bg-bg-base">
@@ -63,7 +82,7 @@ export function Shell() {
 
       </div>
 
-      <GlobalAgentDock />
+      <GlobalAgentDock isOpen={isAgentDockOpen} onOpenChange={setIsAgentDockOpen} />
     </div>
   );
 }

@@ -40,6 +40,8 @@ import type {
   Task,
   TaskStatus,
   VoiceLine,
+  GenerateFromListRequest,
+  GenerateFromListResponse,
 } from "../types";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -950,6 +952,10 @@ function normalizeResponseFormat(value: unknown): ResponseFormat {
   return value === "pcm" || value === "mp3" || value === "wav" ? value : "wav";
 }
 
+function normalizeLineGenerationStatus(value: unknown): VoiceLine["generationStatus"] {
+  return value === "ready" || value === "pending" || value === "running" || value === "succeeded" || value === "failed" || value === "needs_revision" ? value : "draft";
+}
+
 function mapVoiceLine(raw: unknown): VoiceLine {
   const l = isRecord(raw) ? raw : {};
   const order = asNumber(l.sortOrder ?? l.order, 0);
@@ -962,6 +968,12 @@ function mapVoiceLine(raw: unknown): VoiceLine {
     responseFormat: normalizeResponseFormat(l.responseFormat ?? l.format),
     notes: asString(l.notes ?? l.style, ""),
     directorProfileId: asNullableString(l.directorProfileId),
+    directorOverrideJson: asNullableString(l.directorOverrideJson),
+    generationStatus: normalizeLineGenerationStatus(l.generationStatus),
+    relatedJobId: asNullableString(l.relatedJobId),
+    relatedAssetId: typeof l.relatedAssetId === "number" ? l.relatedAssetId : null,
+    generationErrorCode: asNullableString(l.generationErrorCode),
+    generationErrorMessage: asNullableString(l.generationErrorMessage),
     validationErrors: Array.isArray(l.validationErrors) ? l.validationErrors.filter((item): item is string => typeof item === "string") : undefined,
     version: asNumber(l.version, undefined as unknown as number),
     ...(typeof l.speaker === "string" ? { speaker: l.speaker } : {}),
@@ -984,6 +996,12 @@ function toBackendVoiceLine(line: VoiceLine, index: number) {
     model: line.model || DEFAULT_TTS_MODEL,
     responseFormat: line.responseFormat || "wav",
     directorProfileId: line.directorProfileId ?? null,
+    directorOverrideJson: line.directorOverrideJson ?? null,
+    generationStatus: line.generationStatus ?? "draft",
+    relatedJobId: line.relatedJobId ?? null,
+    relatedAssetId: line.relatedAssetId ?? null,
+    generationErrorCode: line.generationErrorCode ?? null,
+    generationErrorMessage: line.generationErrorMessage ?? null,
   };
 }
 
@@ -1250,6 +1268,39 @@ export const taskApi = {
       body: JSON.stringify({ lines: list.lines.map(toBackendVoiceLine), speakers: [] }),
     });
     return mapValidationReport(data);
+  },
+
+  async generateLines(taskId: string, payload: GenerateFromListRequest) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/production-list/generate`, {
+      method: "POST",
+      body: JSON.stringify({
+        ...(payload.expectedVersion !== undefined ? { expectedVersion: payload.expectedVersion } : {}),
+        ...(payload.lineIds && payload.lineIds.length > 0 ? { lineIds: payload.lineIds } : {}),
+        skipCompleted: payload.skipCompleted ?? true,
+      }),
+    });
+    const record = isRecord(data) ? data : {};
+    const generation = isRecord(record.generation) ? record.generation : {};
+    return {
+      taskId: asString(generation.taskId, taskId),
+      version: typeof generation.version === "number" ? generation.version : 0,
+      requestedCount: typeof generation.requestedCount === "number" ? generation.requestedCount : 0,
+      succeededCount: typeof generation.succeededCount === "number" ? generation.succeededCount : 0,
+      failedCount: typeof generation.failedCount === "number" ? generation.failedCount : 0,
+      skippedCount: typeof generation.skippedCount === "number" ? generation.skippedCount : 0,
+      results: asArray(generation.results).map((r: unknown) => {
+        const item = isRecord(r) ? r : {};
+        return {
+          lineId: asString(item.lineId),
+          status: (item.status === "succeeded" || item.status === "failed" || item.status === "skipped" ? item.status : "failed") as "succeeded" | "failed" | "skipped",
+          jobId: asNullableString(item.jobId),
+          assetId: typeof item.assetId === "number" ? item.assetId : null,
+          audioUrl: asNullableString(item.audioUrl),
+          errorCode: asNullableString(item.errorCode),
+          errorMessage: asNullableString(item.errorMessage),
+        };
+      }),
+    } as GenerateFromListResponse;
   },
 
   async listDirectorProfiles(_taskId?: string) {

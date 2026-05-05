@@ -1,9 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { useLocation, useParams } from "react-router";
 import { taskApi } from "../services/httpAdapter";
 import type { AgentChatMessage, OpencodeSession } from "../types";
 
 type Phase = "idle" | "creating" | "loading" | "sending" | "success" | "error";
+
+interface UseGlobalAgentDockOptions {
+  isOpen?: boolean;
+  onOpenChange?: (isOpen: boolean) => void;
+}
 
 function pageLabel(pathname: string) {
   if (pathname.startsWith("/tasks/")) return "任务工作台";
@@ -15,10 +20,11 @@ function pageLabel(pathname: string) {
   return "生成";
 }
 
-export function useGlobalAgentDock() {
+export function useGlobalAgentDock(options: UseGlobalAgentDockOptions = {}) {
   const location = useLocation();
   const params = useParams();
-  const [isOpen, setIsOpen] = useState(false);
+  const { isOpen: controlledIsOpen, onOpenChange } = options;
+  const [internalIsOpen, setInternalIsOpen] = useState(false);
   const [session, setSession] = useState<OpencodeSession | null>(null);
   const [messages, setMessages] = useState<AgentChatMessage[]>([]);
   const [draft, setDraft] = useState("");
@@ -30,6 +36,22 @@ export function useGlobalAgentDock() {
     pageLabel: pageLabel(location.pathname),
     taskId: params.taskId,
   }), [location.pathname, params.taskId]);
+
+  const isControlled = typeof controlledIsOpen === "boolean";
+  const isOpen = controlledIsOpen ?? internalIsOpen;
+
+  const setIsOpen: Dispatch<SetStateAction<boolean>> = useCallback((nextOpen) => {
+    const resolvedOpen = typeof nextOpen === "function" ? nextOpen(isOpen) : nextOpen;
+    if (isControlled) {
+      onOpenChange?.(resolvedOpen);
+      return;
+    }
+    setInternalIsOpen(resolvedOpen);
+  }, [isControlled, isOpen, onOpenChange]);
+
+  const toggle = useCallback(() => {
+    setIsOpen((prev) => !prev);
+  }, [setIsOpen]);
 
   useEffect(() => {
     setSession(null);
@@ -92,7 +114,7 @@ export function useGlobalAgentDock() {
   return {
     isOpen,
     setIsOpen,
-    toggle: () => setIsOpen((prev) => !prev),
+    toggle,
     context,
     session,
     messages,

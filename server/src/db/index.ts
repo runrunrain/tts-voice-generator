@@ -232,7 +232,15 @@ export function initSchema() {
       style TEXT NOT NULL DEFAULT '',
       notes TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'pending',
-      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      director_profile_id TEXT,
+      director_override_json TEXT,
+      generation_status TEXT NOT NULL DEFAULT 'draft',
+      related_job_id TEXT,
+      related_asset_id INTEGER,
+      generation_error_code TEXT,
+      generation_error_message TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS opencode_session (
@@ -306,6 +314,18 @@ export function initSchema() {
   // Document version conflict protection migration (must be after table creation)
   addColumnIfMissing(rawDb, "requirement_document", "version", "INTEGER NOT NULL DEFAULT 1");
 
+  // Voice line director binding + generation tracking (P2-phase1 schema extension)
+  // All new columns allow NULL or have safe defaults for backward compatibility.
+  addColumnIfMissing(rawDb, "voice_line", "director_profile_id", "TEXT");
+  addColumnIfMissing(rawDb, "voice_line", "director_override_json", "TEXT");
+  addColumnIfMissing(rawDb, "voice_line", "generation_status", "TEXT NOT NULL DEFAULT 'draft'");
+  addColumnIfMissing(rawDb, "voice_line", "related_job_id", "TEXT");
+  addColumnIfMissing(rawDb, "voice_line", "related_asset_id", "INTEGER");
+  addColumnIfMissing(rawDb, "voice_line", "updated_at", "INTEGER");
+  // Generation error tracking fields (MIN-2)
+  addColumnIfMissing(rawDb, "voice_line", "generation_error_code", "TEXT");
+  addColumnIfMissing(rawDb, "voice_line", "generation_error_message", "TEXT");
+
   // Seed default button presets if empty
   seedButtonPresets(rawDb);
 }
@@ -317,12 +337,36 @@ function seedButtonPresets(rawDb: Database.Database) {
   const now = Math.floor(Date.now() / 1000);
   const presets = [
     {
+      buttonKey: "normalize-requirements",
+      name: "Generate Production List",
+      description: "Normalize requirement documents into a structured production list with voice lines",
+      promptTemplate: "Read the requirement documents for task {{taskId}} and generate a production list. Each voice line must have: id, order, speaker, text, voice. Include a speakers array (max 2). Return the result using tts_save_production_list.",
+      targetPolicyJson: JSON.stringify({ allowedFields: ["text", "voice", "speaker", "style", "notes"], scope: "task" }),
+      sortOrder: 0,
+    },
+    {
+      buttonKey: "complete-director-fields",
+      name: "Complete Director Fields",
+      description: "Fill in missing director profile fields for lines that lack director binding",
+      promptTemplate: "For each voice line in the production list that has no directorProfileId, suggest appropriate audio profile, scene, and director notes based on the line content. Use tts_patch_voice_lines to update the directorProfileId field.",
+      targetPolicyJson: JSON.stringify({ allowedFields: ["directorProfileId", "directorOverrideJson"], scope: "list" }),
+      sortOrder: 7,
+    },
+    {
+      buttonKey: "fix-validation-errors",
+      name: "Fix Validation Errors",
+      description: "Automatically fix validation errors in the production list (missing fields, invalid speaker references, etc.)",
+      promptTemplate: "Check the production list for validation errors using tts_production_validate. For each error found, fix the issue using tts_patch_voice_lines. Common fixes: ensure speaker references match speakers array, fill empty text fields, correct voice names.",
+      targetPolicyJson: JSON.stringify({ allowedFields: ["text", "voice", "speaker", "style", "notes"], scope: "list" }),
+      sortOrder: 8,
+    },
+    {
       buttonKey: "shorten",
       name: "Shorten",
       description: "Shorten the target line text while preserving meaning",
       promptTemplate: "Shorten the following voice line while preserving its meaning and natural flow for speech: {{text}}",
       targetPolicyJson: JSON.stringify({ allowedFields: ["text"], scope: "line" }),
-      sortOrder: 1,
+      sortOrder: 10,
     },
     {
       buttonKey: "expand",
@@ -330,7 +374,7 @@ function seedButtonPresets(rawDb: Database.Database) {
       description: "Expand the target line text with more detail",
       promptTemplate: "Expand the following voice line with more descriptive detail while keeping it natural for speech: {{text}}",
       targetPolicyJson: JSON.stringify({ allowedFields: ["text"], scope: "line" }),
-      sortOrder: 2,
+      sortOrder: 11,
     },
     {
       buttonKey: "rewrite",
@@ -338,7 +382,7 @@ function seedButtonPresets(rawDb: Database.Database) {
       description: "Rewrite the target line with instruction",
       promptTemplate: "Rewrite the following voice line according to the instruction: {{instruction}}. Original: {{text}}",
       targetPolicyJson: JSON.stringify({ allowedFields: ["text"], scope: "line" }),
-      sortOrder: 3,
+      sortOrder: 12,
     },
     {
       buttonKey: "style-formal",
@@ -346,7 +390,7 @@ function seedButtonPresets(rawDb: Database.Database) {
       description: "Apply formal tone to the target line",
       promptTemplate: "Rewrite the following voice line in a formal tone: {{text}}",
       targetPolicyJson: JSON.stringify({ allowedFields: ["text", "style"], scope: "line" }),
-      sortOrder: 4,
+      sortOrder: 13,
     },
     {
       buttonKey: "style-casual",
@@ -354,7 +398,7 @@ function seedButtonPresets(rawDb: Database.Database) {
       description: "Apply casual tone to the target line",
       promptTemplate: "Rewrite the following voice line in a casual, friendly tone: {{text}}",
       targetPolicyJson: JSON.stringify({ allowedFields: ["text", "style"], scope: "line" }),
-      sortOrder: 5,
+      sortOrder: 14,
     },
     {
       buttonKey: "style-dramatic",
@@ -362,7 +406,7 @@ function seedButtonPresets(rawDb: Database.Database) {
       description: "Apply dramatic tone to the target line",
       promptTemplate: "Rewrite the following voice line in a dramatic, expressive tone: {{text}}",
       targetPolicyJson: JSON.stringify({ allowedFields: ["text", "style"], scope: "line" }),
-      sortOrder: 6,
+      sortOrder: 15,
     },
   ];
 

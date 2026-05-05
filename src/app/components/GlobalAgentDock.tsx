@@ -1,19 +1,43 @@
+import { useEffect, useRef } from "react";
 import { Bot, ChevronDown, ChevronUp, Loader2, MessageSquare, Send, ShieldAlert } from "lucide-react";
 import { useGlobalAgentDock } from "../hooks/useGlobalAgentDock";
 
-export function GlobalAgentDock() {
-  const { isOpen, toggle, context, session, messages, draft, setDraft, sending, error, send } = useGlobalAgentDock();
+interface GlobalAgentDockProps {
+  isOpen?: boolean;
+  onOpenChange?: (isOpen: boolean) => void;
+}
+
+export function GlobalAgentDock({ isOpen: controlledIsOpen, onOpenChange }: GlobalAgentDockProps) {
+  const { isOpen, toggle, context, session, messages, draft, setDraft, sending, error, send } = useGlobalAgentDock({
+    isOpen: controlledIsOpen,
+    onOpenChange,
+  });
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const contentId = "global-agent-dock-content";
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const frame = window.requestAnimationFrame(() => composerRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [isOpen]);
 
   return (
-    <div className={`fixed right-4 bottom-10 z-[80] transition-all duration-300 ${isOpen ? "w-[420px]" : "w-[220px]"}`}>
-      <div className="rounded-lg border border-border-subtle bg-bg-elevated shadow-shadow-lg overflow-hidden">
-        <button className="w-full h-11 px-3 flex items-center justify-between bg-bg-sunken border-b border-border-subtle hover:bg-bg-hover transition-colors" onClick={toggle} aria-expanded={isOpen}>
-          <span className="flex items-center gap-2 text-sm font-semibold"><Bot size={16} className="text-accent" /> Global Agent Dock</span>
+    <div id="global-agent-dock" className={`fixed right-0 top-[60px] bottom-[40px] z-[80] flex items-stretch transition-[width] duration-300 ${isOpen ? "w-[min(480px,calc(100vw-96px))]" : "w-9"}`}>
+      <section className={`h-full w-full border border-border-subtle bg-bg-elevated shadow-shadow-lg overflow-hidden ${isOpen ? "rounded-l-lg" : "rounded-l-md"}`} aria-label="Global Agent Dock" data-state={isOpen ? "open" : "closed"}>
+        <button
+          type="button"
+          className={`${isOpen ? "w-full h-11 px-3 flex-row justify-between border-b" : "h-full w-full flex-col justify-center gap-3 py-3"} flex items-center bg-bg-sunken border-border-subtle hover:bg-bg-hover transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60`}
+          onClick={toggle}
+          aria-controls={contentId}
+          aria-expanded={isOpen}
+          aria-label={isOpen ? "收起 Global Agent Dock" : "展开 Global Agent Dock"}
+        >
+          <span className={`${isOpen ? "flex-row text-sm" : "flex-col text-[10px]"} flex items-center gap-2 font-semibold`}><Bot size={16} className="text-accent" /> <span className={isOpen ? "" : "[writing-mode:vertical-rl] tracking-[0.18em]"}>Agent</span>{isOpen && " Global Dock"}</span>
           {isOpen ? <ChevronDown size={15} className="text-text-tertiary" /> : <ChevronUp size={15} className="text-text-tertiary" />}
         </button>
 
         {isOpen && (
-          <div className="h-[540px] flex flex-col">
+          <div id={contentId} className="h-[calc(100%-44px)] flex flex-col" role="complementary" aria-label="Global Agent Dock 聊天面板" aria-busy={sending}>
             <div className="px-3 py-2 border-b border-border-subtle bg-bg-base">
               <div className="text-[10px] uppercase tracking-[0.22em] text-text-tertiary">Context Strip</div>
               <div className="mt-1 flex items-center gap-2 text-xs">
@@ -47,14 +71,14 @@ export function GlobalAgentDock() {
             </div>
 
             <form className="p-3 border-t border-border-subtle bg-bg-sunken flex gap-2" onSubmit={(event) => { event.preventDefault(); send(); }}>
-              <textarea className="flex-1 h-20 bg-bg-base border border-border rounded-md p-2 text-xs resize-none outline-none focus:border-border-focus" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="向 OpenCode-Agent 提问，非流式发送" disabled={sending} />
-              <button className="w-12 rounded-md bg-accent text-bg-base flex items-center justify-center disabled:opacity-50" disabled={!draft.trim() || sending} title="发送消息">
+              <textarea ref={composerRef} className="flex-1 h-20 bg-bg-base border border-border rounded-md p-2 text-xs resize-none outline-none focus:border-border-focus" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="向 OpenCode-Agent 提问，非流式发送" disabled={sending} aria-label="Agent Chat 输入框" />
+              <button type="submit" className="w-12 rounded-md bg-accent text-bg-base flex items-center justify-center disabled:opacity-50" disabled={!draft.trim() || sending} title="发送消息" aria-label="发送 Agent Chat 消息">
                 {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
               </button>
             </form>
           </div>
         )}
-      </div>
+      </section>
     </div>
   );
 }

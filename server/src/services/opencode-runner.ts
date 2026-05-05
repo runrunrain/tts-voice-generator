@@ -205,6 +205,7 @@ export function fallbackNormalize(input: NormalizeRequirementsInput): NormalizeR
         status: "pending",
         model: "google/gemini-3.1-flash-tts-preview",
         responseFormat: "wav",
+        generationStatus: "draft",
       });
 
       order++;

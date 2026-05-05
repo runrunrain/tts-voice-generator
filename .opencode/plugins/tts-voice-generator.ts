@@ -197,11 +197,97 @@ const directorProfileList: ToolDefinition = {
   execute: async () => apiCall("GET", "/api/director-profiles"),
 };
 
+const saveProductionList: ToolDefinition = {
+  name: "tts_save_production_list",
+  description: "Save (replace) the full production list for a task with version conflict detection. Use this after generating a complete production list from requirement documents.",
+  parameters: {
+    type: "object",
+    properties: {
+      taskId: { type: "string", description: "Task ID" },
+      expectedVersion: { type: "number", description: "Current production list version for conflict detection. Use 0 for new lists." },
+      lines: {
+        type: "array",
+        description: "Array of voice lines. Each line must have: id, order, speaker, text, voice.",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "Unique line ID (e.g. line_001)" },
+            order: { type: "number", description: "Sort order (0-based)" },
+            speaker: { type: "string", description: "Speaker ID matching a speaker in the speakers array" },
+            text: { type: "string", description: "Transcript text for TTS generation" },
+            voice: { type: "string", description: "Voice name (e.g. Zephyr)" },
+            style: { type: "string", description: "Optional style instruction" },
+            notes: { type: "string", description: "Optional notes" },
+            model: { type: "string", description: "TTS model (default: google/gemini-3.1-flash-tts-preview)" },
+            responseFormat: { type: "string", enum: ["wav", "pcm", "mp3"], description: "Audio format (default: wav)" },
+            directorProfileId: { type: "string", description: "Optional director profile ID to bind" },
+          },
+          required: ["id", "order", "speaker", "text", "voice"],
+        },
+      },
+      speakers: {
+        type: "array",
+        description: "Array of speakers (max 2). Each speaker must have: id, label, voice.",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "Speaker ID (e.g. narrator)" },
+            label: { type: "string", description: "Display label (e.g. Narrator)" },
+            name: { type: "string", description: "Display name (e.g. narrator)" },
+            voice: { type: "string", description: "Voice name" },
+            style: { type: "string", description: "Style instruction" },
+          },
+          required: ["id", "label", "voice"],
+        },
+      },
+      directorProfileId: { type: "string", description: "Optional default director profile ID for the list" },
+      metadata: { type: "object", description: "Optional metadata object" },
+    },
+    required: ["taskId", "expectedVersion", "lines"],
+  },
+  execute: async (params) =>
+    apiCall("PUT", `/api/tasks/${params.taskId}/production-list`, {
+      expectedVersion: params.expectedVersion,
+      lines: params.lines,
+      speakers: params.speakers || [],
+      directorProfileId: params.directorProfileId || null,
+      metadata: params.metadata || {},
+    }),
+};
+
+const patchVoiceLines: ToolDefinition = {
+  name: "tts_patch_voice_lines",
+  description: "Apply a domain-level patch to the production list. Supported operations: updateLine, addLine, removeLine, reorderLines, updateSpeakers, updateDirectorProfile.",
+  parameters: {
+    type: "object",
+    properties: {
+      taskId: { type: "string", description: "Task ID" },
+      op: {
+        type: "string",
+        enum: ["updateLine", "addLine", "removeLine", "reorderLines", "updateSpeakers", "updateDirectorProfile"],
+        description: "Patch operation type",
+      },
+      payload: {
+        type: "object",
+        description: "Operation-specific payload. updateLine: {lineId, updates}. addLine: {afterLineId?, line}. removeLine: {lineId}. reorderLines: {lineIds}. updateSpeakers: {speakers}. updateDirectorProfile: {directorProfileId, lineIds?}.",
+      },
+      expectedVersion: { type: "number", description: "Current production list version for conflict detection" },
+    },
+    required: ["taskId", "op", "payload", "expectedVersion"],
+  },
+  execute: async (params) =>
+    apiCall("PATCH", `/api/tasks/${params.taskId}/production-list`, {
+      op: params.op,
+      payload: params.payload,
+      expectedVersion: params.expectedVersion,
+    }),
+};
+
 // ─── Plugin Export ─────────────────────────────────────────────────────────────
 
 const plugin: PluginExport = {
   name: "tts-voice-generator",
-  version: "0.1.0",
+  version: "0.2.0",
   tools: [
     taskCreate,
     taskList,
@@ -214,6 +300,8 @@ const plugin: PluginExport = {
     buttonExecute,
     buttonsList,
     directorProfileList,
+    saveProductionList,
+    patchVoiceLines,
   ],
 };
 

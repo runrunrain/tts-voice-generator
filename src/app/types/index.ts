@@ -198,6 +198,12 @@ export interface VoiceLine {
   responseFormat: ResponseFormat;
   notes?: string;
   directorProfileId?: string | null;
+  directorOverrideJson?: string | null;
+  generationStatus?: "draft" | "ready" | "pending" | "running" | "succeeded" | "failed" | "needs_revision";
+  relatedJobId?: string | null;
+  relatedAssetId?: number | null;
+  generationErrorCode?: string | null;
+  generationErrorMessage?: string | null;
   validationErrors?: string[];
   version?: number;
 }
@@ -252,6 +258,36 @@ export interface ValidationIssue {
 export interface ProductionListValidationReport {
   ok: boolean;
   issues: ValidationIssue[];
+}
+
+// ─── Generation Bridge ────────────────────────────────────────────────────────
+
+export type LineGenerationStatus = "draft" | "ready" | "pending" | "running" | "succeeded" | "failed" | "needs_revision";
+
+export interface LineGenerationResult {
+  lineId: string;
+  status: "succeeded" | "failed" | "skipped";
+  jobId?: string | null;
+  assetId?: number | null;
+  audioUrl?: string | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+}
+
+export interface GenerateFromListRequest {
+  expectedVersion?: number;
+  lineIds?: string[];
+  skipCompleted?: boolean;
+}
+
+export interface GenerateFromListResponse {
+  taskId: string;
+  version: number;
+  requestedCount: number;
+  succeededCount: number;
+  failedCount: number;
+  skippedCount: number;
+  results: LineGenerationResult[];
 }
 
 export type AgentRunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
