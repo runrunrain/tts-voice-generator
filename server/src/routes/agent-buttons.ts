@@ -634,6 +634,7 @@ function finalizeBundleNormalizeDraft(options: {
   configuredTimeoutMs: number;
   normalizeStartTime: number;
   candidateLineCount: number;
+  voiceMetadataCount?: number;
   progressPaths?: Pick<RunPaths, "progressPath" | "draftPath">;
   recovery?: { code: string; message: string; reason: string };
 }) {
@@ -651,6 +652,7 @@ function finalizeBundleNormalizeDraft(options: {
     configuredTimeoutMs,
     normalizeStartTime,
     candidateLineCount,
+    voiceMetadataCount = 0,
     progressPaths,
     recovery,
   } = options;
@@ -820,6 +822,7 @@ function finalizeBundleNormalizeDraft(options: {
   const businessQuality = validateBusinessQualityGate({
     draft: parsedPromptDraft,
     candidateLineCount,
+    voiceMetadataCount,
   });
 
   writeValidationReport(paths.validationReportPath, {
@@ -909,7 +912,7 @@ function finalizeBundleNormalizeDraft(options: {
       if (!speakersById.has(speaker.id)) speakersById.set(speaker.id, speaker);
     }
   }
-  const truncatedSpeakers = Array.from(speakersById.values()).slice(0, 2).map((speaker) => ({
+  const normalizedSpeakers = Array.from(speakersById.values()).map((speaker) => ({
     id: speaker.id,
     label: speaker.label,
     name: speaker.name,
@@ -953,7 +956,7 @@ function finalizeBundleNormalizeDraft(options: {
   const productionList = {
     schemaVersion: "tts.production-list.v2",
     lines,
-    speakers: truncatedSpeakers,
+    speakers: normalizedSpeakers,
     promptProfiles,
     directorProfiles: promptProfiles,
     metadata: {
@@ -985,7 +988,7 @@ function finalizeBundleNormalizeDraft(options: {
       taskId,
       currentVersionAtStart,
       lines,
-      truncatedSpeakers as Array<Record<string, unknown>>,
+      normalizedSpeakers as Array<Record<string, unknown>>,
       { ...productionList.metadata, runId, bundleMethod: "path-schema-instruction" },
       "opencode",
       promptProfiles,
@@ -1025,7 +1028,7 @@ function finalizeBundleNormalizeDraft(options: {
     version: committedVersionNum,
     versionId,
     lines,
-    speakers: truncatedSpeakers,
+    speakers: normalizedSpeakers,
     promptProfiles,
     directorProfiles: promptProfiles,
     directorProfileId: null,
@@ -1037,7 +1040,7 @@ function finalizeBundleNormalizeDraft(options: {
     committed: true,
     newVersion: committedVersionNum,
     lineCount: lines.length,
-    speakerCount: truncatedSpeakers.length,
+    speakerCount: normalizedSpeakers.length,
     warnings: [
       ...rawValidationReport.issues
         .filter((i) => i.severity === "warning")
@@ -1076,7 +1079,7 @@ function finalizeBundleNormalizeDraft(options: {
       taskId,
       version: committedVersionNum,
       lines,
-      speakers: truncatedSpeakers,
+      speakers: normalizedSpeakers,
       promptProfiles,
       directorProfiles: promptProfiles,
       metadata: productionList.metadata,
@@ -1290,6 +1293,7 @@ app.post("/api/tasks/:taskId/agent/normalize-requirements", async (c) => {
     }));
     const activeContext = responseContext();
     let candidateLineCountForRun = 0;
+    let voiceMetadataCountForRun = 0;
 
     const executeNormalize = async () => {
     try {
@@ -1330,7 +1334,8 @@ app.post("/api/tasks/:taskId/agent/normalize-requirements", async (c) => {
       // OpenCode authors a schema-valid Prompt-Structured v2 draft from them.
       const candidateExtraction = extractCandidateLines({ documents: docInputs });
       candidateLineCountForRun = candidateExtraction.candidateLines.length;
-      const candidateLinesRef = writeCandidateLinesArtifact(paths.candidateLinesPath, candidateExtraction.candidateLines);
+      voiceMetadataCountForRun = candidateExtraction.voiceMetadata.length;
+      const candidateLinesRef = writeCandidateLinesArtifact(paths.candidateLinesPath, candidateExtraction.candidateLines, candidateExtraction.voiceMetadata);
       mergeRunProgress(progressPaths, {
         stage: "preprocessing",
         message: "候选台词已提取并完成元信息过滤",
@@ -1396,6 +1401,7 @@ app.post("/api/tasks/:taskId/agent/normalize-requirements", async (c) => {
         configuredTimeoutMs,
         normalizeStartTime,
         candidateLineCount: candidateExtraction.candidateLines.length,
+        voiceMetadataCount: candidateExtraction.voiceMetadata.length,
         progressPaths,
       });
     } catch (bundleErr) {
@@ -1431,6 +1437,7 @@ app.post("/api/tasks/:taskId/agent/normalize-requirements", async (c) => {
             configuredTimeoutMs,
             normalizeStartTime,
             candidateLineCount: candidateLineCountForRun,
+            voiceMetadataCount: voiceMetadataCountForRun,
             progressPaths,
             recovery: {
               code: "OPENCODE_PROCESS_TIMEOUT_AFTER_DRAFT",

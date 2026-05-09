@@ -453,7 +453,7 @@ describe("runOpenCodeNormalize success path", () => {
     expect(result.productionList.lines[0].text).toBe("Fenced output");
   });
 
-  it("truncates speakers to max 2 and remaps lines", async () => {
+  it("preserves aggregate speakers without truncating role diversity", async () => {
     const output = {
       lines: [
         { id: "l1", order: 0, speaker: "a", text: "Speaker A", voice: "Zephyr" },
@@ -481,10 +481,9 @@ describe("runOpenCodeNormalize success path", () => {
     const result = await runOpenCodeNormalize(input);
 
     expect(result.runner).toBe("opencode");
-    expect(result.productionList.speakers).toHaveLength(2);
-    // Speaker C should be remapped to speaker B (second speaker)
-    expect(result.productionList.lines[2].speaker).toBe("b");
-    expect(result.warnings.some(w => w.code === "SPEAKER_TRUNCATED")).toBe(true);
+    expect(result.productionList.speakers).toHaveLength(3);
+    expect(result.productionList.lines.map((line) => line.speaker)).toEqual(["a", "b", "c"]);
+    expect(result.warnings.some(w => w.code === "SPEAKER_TRUNCATED")).toBe(false);
   });
 
   it("ensures sequential line ordering even when opencode returns non-sequential", async () => {

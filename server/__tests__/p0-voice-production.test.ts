@@ -86,6 +86,7 @@ import {
   CreateTaskSchema,
   PasteDocumentSchema,
   validateProductionList,
+  validateRawPromptStructuredAgentDraft,
 } from "../src/domain/validators.js";
 import {
   writeArtifact,
@@ -101,6 +102,7 @@ import {
   _resetSpawnRunner,
   _setExecRunner,
   _resetExecRunner,
+  extractCandidateLines,
 } from "../src/services/opencode-runner.js";
 import {
   createNormalizeRun,
@@ -166,7 +168,7 @@ describe("Domain Validators", () => {
     expect(result.success).toBe(true);
   });
 
-  it("rejects production list with >2 speakers", () => {
+  it("allows production list with >2 top-level speakers for multi-profile v2 datasets", () => {
     const result = ProductionListSchema.safeParse({
       taskId: "task-1",
       version: 1,
@@ -177,7 +179,7 @@ describe("Domain Validators", () => {
         { id: "c", label: "C", voice: "Charon" },
       ],
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
   });
 
   it("validates director config", () => {
@@ -206,7 +208,7 @@ describe("Domain Validators", () => {
     expect(PasteDocumentSchema.safeParse({ fileName: "test.txt", content: "" }).success).toBe(false);
   });
 
-  it("validateProductionList catches speaker limit exceeded", () => {
+  it("validateProductionList allows more than 2 top-level speakers", () => {
     const report = validateProductionList({
       lines: [],
       speakers: [
@@ -215,8 +217,43 @@ describe("Domain Validators", () => {
         { id: "c", label: "C", voice: "Charon" },
       ],
     });
-    expect(report.valid).toBe(false);
-    expect(report.issues.some((i) => i.code === "SPEAKER_LIMIT_EXCEEDED")).toBe(true);
+    expect(report.valid).toBe(true);
+    expect(report.issues.some((i) => i.code === "SPEAKER_LIMIT_EXCEEDED")).toBe(false);
+  });
+
+  it("validates multi-profile v2 draft with more than 2 aggregate speakers but max 2 per profile", () => {
+    const report = validateRawPromptStructuredAgentDraft({
+      schemaVersion: "tts.production-list.v2",
+      promptProfiles: [
+        {
+          id: "profile_ab",
+          name: "Dialogue profile",
+          audioProfile: "Two-person dialogue with distinct voices.",
+          scene: "A short conversation scene.",
+          directorNotes: "Natural pacing and clear turns.",
+          sampleContext: "A and B exchange short lines.",
+          speakers: [
+            { id: "a", label: "A", voice: "Zephyr" },
+            { id: "b", label: "B", voice: "Puck" },
+          ],
+        },
+        {
+          id: "profile_c",
+          name: "Third role profile",
+          audioProfile: "Older authoritative role voice.",
+          scene: "A separate NPC role section.",
+          directorNotes: "Steady and authoritative delivery.",
+          sampleContext: "C speaks in a separate section.",
+          speakers: [{ id: "c", label: "C", voice: "Charon" }],
+        },
+      ],
+      lines: [
+        { id: "l1", order: 0, speaker: "a", speakerLabel: "A", transcript: "Hello", promptProfileId: "profile_ab", voice: "Zephyr" },
+        { id: "l2", order: 1, speaker: "b", speakerLabel: "B", transcript: "Hi", promptProfileId: "profile_ab", voice: "Puck" },
+        { id: "l3", order: 2, speaker: "c", speakerLabel: "C", transcript: "Welcome", promptProfileId: "profile_c", voice: "Charon" },
+      ],
+    });
+    expect(report.valid).toBe(true);
   });
 
   it("validateProductionList catches invalid speaker reference", () => {
@@ -323,7 +360,7 @@ describe("OpenCode Runner", () => {
     expect(result.productionList.speakers).toHaveLength(2);
   });
 
-  it("fallbackNormalize caps speakers at 2", () => {
+  it("fallbackNormalize preserves more than 2 detected speakers without global collapse", () => {
     const result = fallbackNormalize({
       documents: [{
         id: "d1",
@@ -332,8 +369,48 @@ describe("OpenCode Runner", () => {
         enabled: true,
       }],
     });
-    expect(result.productionList.speakers).toHaveLength(2);
-    expect(result.warnings.some((w) => w.code === "SPEAKER_MAPPED")).toBe(true);
+    expect(result.productionList.speakers).toHaveLength(3);
+    expect(result.warnings.some((w) => w.code === "SPEAKER_MAPPED")).toBe(false);
+  });
+
+  it("extractCandidateLines retains 声线 metadata and associates section role with candidate lines", () => {
+    const result = extractCandidateLines({
+      documents: [{
+        id: "doc-role-1",
+        fileName: "roles.md",
+        enabled: true,
+        content: [
+          "### 1. 世家大族/门阀子弟/年轻名士",
+          "",
+          "**声线**：男青年到中青年，带天然优越感与轻慢感，语速从容",
+          "",
+          "**台词**：",
+          "- 卖猪屠夫位列三公，简直令天下士人耻笑。",
+          "### 2. 士族女眷",
+          "**声线**：年轻女性，聪慧活泼的贵族女性，少女感",
+          "- 真定玉梨，大如拳，甘如蜜，脆如菱。",
+        ].join("\n"),
+      }],
+    });
+
+    expect(result.voiceMetadata).toHaveLength(2);
+    expect(result.qualitySummary.skippedByReason.voice_metadata).toBe(2);
+    expect(result.qualitySummary.skippedByReason.label_only).toBe(1);
+    expect(result.voiceMetadata[0]).toMatchObject({
+      sectionTitle: "1. 世家大族/门阀子弟/年轻名士",
+      inferredSpeakerLabel: "世家大族/门阀子弟/年轻名士",
+      lineRange: { start: 3, end: 3 },
+    });
+    expect(result.candidateLines[0]).toMatchObject({
+      speakerLabel: "世家大族/门阀子弟/年轻名士",
+      sectionTitle: "1. 世家大族/门阀子弟/年轻名士",
+      voiceMetadataId: result.voiceMetadata[0].id,
+    });
+    expect(result.candidateLines[1]).toMatchObject({
+      speakerLabel: "士族女眷",
+      voice: "Kore",
+      voiceMetadataId: result.voiceMetadata[1].id,
+    });
   });
 
   it("applyFallbackTransform shortens text", () => {
@@ -925,6 +1002,50 @@ describe("API Routes - Agent Buttons", () => {
     }));
   }
 
+  function writeRoleAwareV2DraftFromRequest(normalizeRequestPath: string, draftPath: string) {
+    const bundle = JSON.parse(fs.readFileSync(normalizeRequestPath, "utf-8"));
+    const candidatesArtifact = JSON.parse(fs.readFileSync(bundle.candidateLines.path, "utf-8"));
+    const candidates = candidatesArtifact.candidateLines;
+    expect(candidates.length).toBeGreaterThan(1);
+    expect(candidatesArtifact.voiceMetadata.length).toBeGreaterThan(1);
+
+    const bySpeaker = new Map<string, any[]>();
+    for (const candidate of candidates) {
+      const existing = bySpeaker.get(candidate.speaker) ?? [];
+      existing.push(candidate);
+      bySpeaker.set(candidate.speaker, existing);
+    }
+
+    const promptProfiles = Array.from(bySpeaker.entries()).map(([speakerId, speakerCandidates], index) => {
+      const first = speakerCandidates[0];
+      return {
+        id: `profile_role_${index + 1}`,
+        name: `${first.speakerLabel} profile`,
+        audioProfile: `Role-aware voice profile for ${first.speakerLabel}.`,
+        scene: `NPC requirement section ${first.sectionTitle ?? first.speakerLabel}.`,
+        directorNotes: `Deliver with style derived from source voice metadata for ${first.speakerLabel}.`,
+        sampleContext: `Candidate lines from ${first.speakerLabel} section.`,
+        speakers: [{ id: speakerId, label: first.speakerLabel, voice: first.voice }],
+        reusePolicy: "many-lines",
+      };
+    });
+
+    const profileBySpeaker = new Map(promptProfiles.map((profile) => [profile.speakers[0].id, profile.id]));
+    fs.writeFileSync(draftPath, JSON.stringify({
+      schemaVersion: "tts.production-list.v2",
+      promptProfiles,
+      lines: candidates.map((candidate: any) => ({
+        id: candidate.id,
+        order: candidate.order,
+        speaker: candidate.speaker,
+        speakerLabel: candidate.speakerLabel,
+        transcript: candidate.transcript,
+        promptProfileId: profileBySpeaker.get(candidate.speaker),
+        voice: candidate.voice,
+      })),
+    }));
+  }
+
   async function createManualProductionList() {
     const longButtonText = "This is a very long sentence that should be shortened by the button transform for testing purposes";
     const putRes = await req(app, `/api/tasks/${taskId}/production-list`, {
@@ -1086,6 +1207,47 @@ describe("API Routes - Agent Buttons", () => {
     }
   });
 
+  it("normalize-requirements candidate artifact preserves voice metadata and commits multi-role speakers", async () => {
+    await pasteDocument([
+      "### 1. 世家大族/门阀子弟/年轻名士",
+      "**声线**：男青年到中青年，带天然优越感与轻慢感，语速从容",
+      "- 卖猪屠夫位列三公，简直令天下士人耻笑。",
+      "### 2. 士族女眷",
+      "**声线**：年轻女性，聪慧活泼的贵族女性，少女感",
+      "- 真定玉梨，大如拳，甘如蜜，脆如菱。",
+    ].join("\n"));
+
+    mockOpenCodeAvailable();
+    let capturedNormalizeRequestPath = "";
+    _setSpawnRunner(async (_file, args) => {
+      capturedNormalizeRequestPath = extractNormalizeRequestPathFromArgs(args);
+      writeRoleAwareV2DraftFromRequest(capturedNormalizeRequestPath, extractDraftPathFromArgs(args));
+      return { stdout: JSON.stringify({ type: "text", part: { text: "Role-aware draft written." } }), stderr: "" };
+    });
+
+    try {
+      const normRes = await req(app, `/api/tasks/${taskId}/agent/normalize-requirements`, { method: "POST" });
+      expect(normRes.status).toBe(200);
+      const body = await jsonRes(normRes);
+      expect(body.ok).toBe(true);
+      expect(new Set(body.productionList.lines.map((line: any) => line.speakerLabel)).size).toBeGreaterThan(1);
+      expect(body.productionList.promptProfiles).toHaveLength(2);
+      expect(body.productionList.speakers).toHaveLength(2);
+
+      const bundle = JSON.parse(fs.readFileSync(capturedNormalizeRequestPath, "utf-8"));
+      const candidatesArtifact = JSON.parse(fs.readFileSync(bundle.candidateLines.path, "utf-8"));
+      expect(candidatesArtifact.voiceMetadata).toHaveLength(2);
+      expect(candidatesArtifact.voiceMetadata[0]).toMatchObject({
+        sectionTitle: "1. 世家大族/门阀子弟/年轻名士",
+        inferredSpeakerLabel: "世家大族/门阀子弟/年轻名士",
+      });
+      expect(candidatesArtifact.candidateLines[0].voiceMetadataId).toBe(candidatesArtifact.voiceMetadata[0].id);
+    } finally {
+      _resetSpawnRunner();
+      _resetExecRunner();
+    }
+  });
+
   it("normalize-requirements rejects schema-valid polluted transcript with 422 and no DB write", async () => {
     await pasteDocument("Narrator: 正常候选台词");
     mockOpenCodeAvailable();
@@ -1109,6 +1271,59 @@ describe("API Routes - Agent Buttons", () => {
       expect(progress.stage).toBe("failed");
       expect(progress.error.code).toBe("PRODUCTION_LIST_QUALITY_GATE_FAILED");
       expect(progress.quality.blockingIssueCount).toBeGreaterThan(0);
+    } finally {
+      _resetSpawnRunner();
+      _resetExecRunner();
+    }
+  });
+
+  it("normalize-requirements blocks multi-voice metadata drafts collapsed to Narrator/Zephyr", async () => {
+    await pasteDocument([
+      "### 1. 世家大族/门阀子弟/年轻名士",
+      "**声线**：男青年到中青年，带天然优越感与轻慢感，语速从容",
+      "- 卖猪屠夫位列三公，简直令天下士人耻笑。",
+      "### 2. 士族女眷",
+      "**声线**：年轻女性，聪慧活泼的贵族女性，少女感",
+      "- 真定玉梨，大如拳，甘如蜜，脆如菱。",
+    ].join("\n"));
+    mockOpenCodeAvailable();
+    _setSpawnRunner(async (_file, args) => {
+      const normalizeRequestPath = extractNormalizeRequestPathFromArgs(args);
+      const bundle = JSON.parse(fs.readFileSync(normalizeRequestPath, "utf-8"));
+      const candidatesArtifact = JSON.parse(fs.readFileSync(bundle.candidateLines.path, "utf-8"));
+      const candidates = candidatesArtifact.candidateLines;
+      fs.writeFileSync(extractDraftPathFromArgs(args), JSON.stringify({
+        schemaVersion: "tts.production-list.v2",
+        promptProfiles: [{
+          id: "profile_narrator_collapse",
+          name: "Collapsed narrator profile",
+          audioProfile: "Clear narrator voice with warm tone.",
+          scene: "Incorrectly collapsed multi-role NPC requirements.",
+          directorNotes: "Calm narration that ignores role differences.",
+          sampleContext: "All lines incorrectly bound to one narrator.",
+          speakers: [{ id: "narrator", label: "Narrator", voice: "Zephyr" }],
+          reusePolicy: "many-lines",
+        }],
+        lines: candidates.map((candidate: any, index: number) => ({
+          id: candidate.id,
+          order: index,
+          speaker: "narrator",
+          speakerLabel: "Narrator",
+          transcript: candidate.transcript,
+          promptProfileId: "profile_narrator_collapse",
+          voice: "Zephyr",
+        })),
+      }));
+      return { stdout: JSON.stringify({ type: "text", part: { text: "Collapsed draft written." } }), stderr: "" };
+    });
+
+    try {
+      const normRes = await req(app, `/api/tasks/${taskId}/agent/normalize-requirements`, { method: "POST" });
+      expect(normRes.status).toBe(422);
+      const body = await jsonRes(normRes);
+      expect(body.error.code).toBe("PRODUCTION_LIST_QUALITY_GATE_FAILED");
+      expect(body.qualityReport.issues.map((issue: any) => issue.code)).toContain("ROLE_VOICE_COLLAPSE");
+      await expectProductionListUnchanged(0);
     } finally {
       _resetSpawnRunner();
       _resetExecRunner();

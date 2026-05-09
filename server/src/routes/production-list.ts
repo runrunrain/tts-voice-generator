@@ -697,6 +697,8 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
   let failedCount = 0;
 
   for (const line of eligibleLines) {
+    const lineId = logicalLineId(line);
+
     // Mark as running -- clear stale error fields from previous failure
     db.update(voiceLine).set({
       generationStatus: "running",
@@ -715,7 +717,7 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
       }).where(eq(voiceLine.id, line.id)).run();
 
       results.push({
-        lineId: line.id,
+        lineId,
         status: "failed",
         errorCode: "MISSING_API_KEY",
         errorMessage: "OpenRouter API Key is not configured. Please go to Settings and configure your API key.",
@@ -725,7 +727,6 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
     }
 
     // Build the TTS request from the line data
-    const lineId = logicalLineId(line);
     const artifactLine = productionArtifact?.lines?.find((al) => al?.id === lineId) ?? {};
 
     const promptResolution = resolvePromptAssemblyInput(line, artifactLine, artifactProfiles as any);

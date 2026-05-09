@@ -300,6 +300,7 @@ export interface LineGenerationResult {
   jobId?: string | null;
   assetId?: number | null;
   audioUrl?: string | null;
+  downloadUrl?: string | null;
   errorCode?: string | null;
   errorMessage?: string | null;
 }

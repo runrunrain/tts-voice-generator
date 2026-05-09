@@ -17,7 +17,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { env } from "../config/env.js";
 import type { VoiceLine, Speaker } from "../domain/validators.js";
-import type { CandidateLine } from "./opencode-runner.js";
+import type { CandidateLine, VoiceMetadata } from "./opencode-runner.js";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -391,12 +391,14 @@ export function generateNormalizeRequestBundle(options: {
  * These lines are not a commit source; the server only commits a validated raw
  * Prompt-Structured v2 draft authored by OpenCode.
  */
-export function writeCandidateLinesArtifact(candidateLinesPath: string, candidateLines: CandidateLine[]): CandidateLinesRef {
+export function writeCandidateLinesArtifact(candidateLinesPath: string, candidateLines: CandidateLine[], voiceMetadata: VoiceMetadata[] = []): CandidateLinesRef {
   const content = JSON.stringify({
     schemaVersion: "tts.candidate-lines.v1",
     generatedAt: new Date().toISOString(),
     count: candidateLines.length,
+    voiceMetadataCount: voiceMetadata.length,
     candidateLines,
+    voiceMetadata,
   });
   const buffer = Buffer.from(content, "utf-8");
   const tempPath = candidateLinesPath + ".tmp";
@@ -467,6 +469,10 @@ export function writeInstructionMarkdown(instructionPath: string, context: Instr
     `- A profile may be reused by many lines when role, scene, and delivery style are shared.`,
     `- Do not write placeholder prompt fields such as TODO, TBD, N/A, 待补充, 暂无, 空, or 无.`,
     `- text is only a compatibility alias for transcript and must match transcript if present.`,
+    `- Derive line.speakerLabel, line.voice, and promptProfiles[].speakers from source section headings plus 声线/音色/角色/说话人/speaker/voice/character/role metadata.`,
+    `- Multiple distinct source roles or voice metadata sections must not collapse to all Narrator/Zephyr. Voice names may be reused by reasonable groups, but speakerLabel and profile speakers must preserve role differences.`,
+    `- Speaker limits are profile-scoped: each promptProfile may contain at most 2 speakers; the full dataset may contain different speakers across different profiles.`,
+    `- Each promptProfile's speakers must match the role and voice metadata of the lines bound to that profile.`,
     ``,
     `## Business Rules`,
     ...context.businessRules.map((rule, i) => `${i + 1}. ${rule}`),

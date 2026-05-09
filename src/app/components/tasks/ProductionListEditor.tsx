@@ -1,5 +1,5 @@
-import { AlertCircle, CheckCircle2, Circle, Copy, FileWarning, Loader2, Lock, PanelBottomOpen, Play, Plus, RefreshCw, Save, Scissors, Trash2, Wand2, XCircle } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { AlertCircle, CheckCircle2, Circle, Copy, Download, FileWarning, Loader2, Lock, PanelBottomOpen, Play, Plus, RefreshCw, Save, Scissors, Square, Trash2, Wand2, XCircle } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAppState } from "../../state/AppContext";
 import { useProductionList } from "../../hooks/useProductionList";
 import { getLineGenerationStatus, isGeneratableVoiceLine, useProductionGeneration } from "../../hooks/useProductionGeneration";
@@ -10,6 +10,7 @@ import type { DirectorProfile, LineGenerationResult, LineGenerationStatus, Produ
 const FORMAT_OPTIONS: ResponseFormat[] = ["wav", "pcm", "mp3"];
 const MAX_TRANSCRIPT_CHARS = 5000;
 const CONTROL_CLASS = "w-full bg-bg-base border border-border rounded px-2 py-1.5 text-xs text-text-primary outline-none focus:border-border-focus resize-none disabled:opacity-60";
+const AUDIO_ENDPOINT_PREFIX = "/api/audio/";
 
 type ProductionListController = ReturnType<typeof useProductionList>;
 
@@ -477,8 +478,160 @@ function GenerationStatusBadge({ status, jobId, assetId, result, line }: { statu
   const icon = status === "succeeded" ? <CheckCircle2 size={11} /> : status === "failed" ? <XCircle size={11} /> : status === "running" || status === "pending" ? <Loader2 size={11} className="animate-spin" /> : <Circle size={11} />;
   const errorMessage = result?.errorMessage ?? (status === "failed" ? line?.generationErrorMessage : null) ?? null;
   const errorCode = result?.errorCode ?? (status === "failed" ? line?.generationErrorCode : null) ?? null;
-  const message = errorMessage ?? errorCode ?? (jobId ? `job ${jobId}` : assetId ? `asset ${assetId}` : "未生成");
-  return <span className={`inline-flex w-fit items-center gap-1 rounded border px-2 py-0.5 text-[10px] font-mono ${style}`} title={message}>{icon}{status}</span>;
+  const audioAccess = resolveGenerationAudioAccess({ status, jobId, assetId, result, line });
+  const message = errorMessage ?? errorCode ?? audioAccess.tooltip;
+  return (
+    <div className="flex w-fit max-w-[210px] flex-col gap-1">
+      <span className={`inline-flex w-fit items-center gap-1 rounded border px-2 py-0.5 text-[10px] font-mono ${style}`} title={message}>{icon}{status}</span>
+      {status === "succeeded" && (
+        audioAccess.hasPlayableAsset ? (
+          <AudioAssetControls audioAccess={audioAccess} />
+        ) : (
+          <span className="inline-flex w-fit items-start gap-1 rounded border border-warning/20 bg-warning-muted/30 px-2 py-1 text-[10px] leading-snug text-warning" role="status" title="generationStatus=succeeded，但后端未返回 relatedAssetId、assetId 或 audioUrl，不能伪造播放入口。">
+            <AlertCircle size={11} className="mt-0.5 shrink-0" />
+            成功状态缺少音频资产
+          </span>
+        )
+      )}
+    </div>
+  );
+}
+
+type AudioAccessInput = {
+  status: LineGenerationStatus;
+  jobId?: string | null;
+  assetId?: number | null;
+  result?: LineGenerationResult;
+  line?: VoiceLine;
+};
+
+type ResolvedAudioAccess = {
+  hasPlayableAsset: boolean;
+  audioUrl: string | null;
+  downloadUrl: string | null;
+  jobId: string | null;
+  assetId: number | null;
+  tooltip: string;
+};
+
+export function resolveGenerationAudioAccess({ status, jobId, assetId, result, line }: AudioAccessInput): ResolvedAudioAccess {
+  const resolvedAssetId = firstNumber(result?.assetId, assetId, line?.relatedAssetId);
+  const resolvedJobId = result?.jobId ?? jobId ?? line?.relatedJobId ?? null;
+  const audioUrl = result?.audioUrl ?? (typeof resolvedAssetId === "number" ? `${AUDIO_ENDPOINT_PREFIX}${encodeURIComponent(String(resolvedAssetId))}` : null);
+  const downloadUrl = result?.downloadUrl ?? buildDownloadUrl(resolvedAssetId, audioUrl);
+  const metadata = [
+    resolvedJobId ? `job ${resolvedJobId}` : null,
+    typeof resolvedAssetId === "number" ? `asset ${resolvedAssetId}` : null,
+  ].filter(Boolean).join(" · ");
+
+  return {
+    hasPlayableAsset: status === "succeeded" && Boolean(audioUrl),
+    audioUrl,
+    downloadUrl,
+    jobId: resolvedJobId,
+    assetId: resolvedAssetId,
+    tooltip: metadata || (status === "succeeded" ? "成功状态缺少音频资产" : "未生成"),
+  };
+}
+
+function firstNumber(...values: Array<number | null | undefined>) {
+  return values.find((value): value is number => typeof value === "number") ?? null;
+}
+
+function buildDownloadUrl(assetId: number | null, audioUrl: string | null) {
+  if (typeof assetId === "number") return `${AUDIO_ENDPOINT_PREFIX}${encodeURIComponent(String(assetId))}?download=1`;
+  if (audioUrl?.startsWith(AUDIO_ENDPOINT_PREFIX)) {
+    const [path] = audioUrl.split("?");
+    return `${path}?download=1`;
+  }
+  return null;
+}
+
+function AudioAssetControls({ audioAccess }: { audioAccess: ResolvedAudioAccess }) {
+  const [playing, setPlaying] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+  }, []);
+
+  const stop = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      audioRef.current = null;
+    }
+    setPlaying(false);
+  };
+
+  const play = () => {
+    if (!audioAccess.audioUrl) return;
+    if (playing) {
+      stop();
+      return;
+    }
+    if (audioRef.current) stop();
+    const audio = new Audio(audioAccess.audioUrl);
+    audio.addEventListener("ended", () => {
+      audioRef.current = null;
+      setPlaying(false);
+    });
+    audio.addEventListener("error", () => {
+      audioRef.current = null;
+      setPlaying(false);
+    });
+    audioRef.current = audio;
+    setPlaying(true);
+    void audio.play().catch(() => {
+      audioRef.current = null;
+      setPlaying(false);
+    });
+  };
+
+  const download = () => {
+    if (!audioAccess.downloadUrl) return;
+    const link = document.createElement("a");
+    link.href = audioAccess.downloadUrl;
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  return (
+    <div className="flex flex-col gap-1 rounded border border-success/15 bg-success-muted/15 px-2 py-1" title={audioAccess.tooltip}>
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          className="inline-flex h-6 items-center gap-1 rounded border border-success/25 px-2 text-[10px] text-success hover:bg-success-muted disabled:opacity-50"
+          onClick={play}
+          disabled={!audioAccess.audioUrl}
+          title={playing ? "停止试听" : "试听音频"}
+          aria-label={playing ? "停止试听" : "试听音频"}
+        >
+          {playing ? <Square size={11} /> : <Play size={11} />}
+          {playing ? "停止" : "试听"}
+        </button>
+        <button
+          type="button"
+          className="inline-flex h-6 items-center gap-1 rounded border border-border px-2 text-[10px] text-text-secondary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={download}
+          disabled={!audioAccess.downloadUrl}
+          title={audioAccess.downloadUrl ? "下载音频" : "缺少可下载的资产 URL"}
+          aria-label="下载音频"
+        >
+          <Download size={11} />
+          下载
+        </button>
+      </div>
+      <div className="max-w-[190px] truncate font-mono text-[9px] text-text-tertiary">
+        {audioAccess.assetId != null ? `asset ${audioAccess.assetId}` : "asset --"}{audioAccess.jobId ? ` · job ${audioAccess.jobId}` : ""}
+      </div>
+    </div>
+  );
 }
 
 function buildLocalIssues(lines: VoiceLine[]): ProductionListValidationReport {

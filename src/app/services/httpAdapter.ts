@@ -1743,6 +1743,7 @@ export const taskApi = {
           jobId: asNullableString(item.jobId),
           assetId: typeof item.assetId === "number" ? item.assetId : null,
           audioUrl: asNullableString(item.audioUrl),
+          downloadUrl: asNullableString(item.downloadUrl),
           errorCode: asNullableString(item.errorCode),
           errorMessage: asNullableString(item.errorMessage),
         };

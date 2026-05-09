@@ -58,7 +58,7 @@ export const ProductionListSchema = z.object({
   taskId: z.string().min(1),
   version: z.number().int().min(1),
   lines: z.array(VoiceLineSchema).min(0),
-  speakers: z.array(SpeakerSchema).max(2, "Maximum 2 speakers allowed"),
+  speakers: z.array(SpeakerSchema),
   promptProfiles: z.array(z.record(z.unknown())).optional().default([]),
   directorProfiles: z.array(z.record(z.unknown())).optional().default([]),
   directorProfileId: z.string().optional().nullable(),
@@ -210,7 +210,7 @@ export interface ValidationReport {
 export const ProductionListPutSchema = z.object({
   expectedVersion: z.number().int().min(0),
   lines: z.array(VoiceLineSchema),
-  speakers: z.array(SpeakerSchema).max(2),
+  speakers: z.array(SpeakerSchema),
   promptProfiles: z.array(z.record(z.unknown())).optional().default([]),
   directorProfiles: z.array(z.record(z.unknown())).optional().default([]),
   directorProfileId: z.string().optional().nullable(),
@@ -453,7 +453,8 @@ export type QualityIssueCode =
   | "LOW_CANDIDATE_COVERAGE"
   | "MISSING_PROMPT_PROFILES"
   | "INVALID_PROMPT_PROFILE_BINDING"
-  | "PROFILE_CONTENT_TOO_WEAK";
+  | "PROFILE_CONTENT_TOO_WEAK"
+  | "ROLE_VOICE_COLLAPSE";
 
 export interface QualityIssue {
   code: QualityIssueCode;
@@ -534,11 +535,13 @@ function classifyTranscriptQualityIssue(transcript: string): QualityIssueCode | 
 export function validateBusinessQualityGate(options: {
   draft: RawPromptStructuredAgentDraft;
   candidateLineCount: number;
+  voiceMetadataCount?: number;
 }): BusinessQualityReport {
   const issues: QualityIssue[] = [];
   const candidateLineCount = Math.max(0, Math.floor(options.candidateLineCount));
   const producedLineCount = options.draft.lines.length;
   const candidateCoverageRatio = candidateLineCount > 0 ? producedLineCount / candidateLineCount : null;
+  const voiceMetadataCount = Math.max(0, Math.floor(options.voiceMetadataCount ?? 0));
 
   if (options.draft.promptProfiles.length === 0) {
     issues.push({
@@ -608,6 +611,27 @@ export function validateBusinessQualityGate(options: {
         message: `Draft produced ${producedLineCount} line(s) from ${candidateLineCount} candidates; coverage is lower than expected.`,
         expected: ">= 30% candidate coverage",
         actual: `${Math.round(candidateCoverageRatio * 100)}%`,
+      });
+    }
+  }
+
+  if (voiceMetadataCount >= 2 && producedLineCount >= 2) {
+    const normalizedLineLabels = new Set(
+      options.draft.lines.map((line) => (line.speakerLabel ?? line.speaker).trim()).filter(Boolean),
+    );
+    const normalizedLineVoices = new Set(
+      options.draft.lines.map((line) => line.voice.trim()).filter(Boolean),
+    );
+    const profileSpeakerSignatures = new Set(
+      options.draft.promptProfiles.flatMap((profile) => profile.speakers.map((speaker) => `${speaker.label.trim()}|${speaker.voice.trim()}`)),
+    );
+    if (normalizedLineLabels.size <= 1 && normalizedLineVoices.size <= 1 && profileSpeakerSignatures.size <= 1) {
+      issues.push({
+        code: "ROLE_VOICE_COLLAPSE",
+        severity: "blocking",
+        message: "Input contains multiple role or voice metadata sections, but the draft collapsed all line speakerLabel, line voice, and profile speakers to one identity.",
+        expected: "multiple role-aware speaker labels, voices, or profile speaker identities derived from source metadata",
+        actual: `voiceMetadataCount=${voiceMetadataCount}, lineSpeakerLabels=${normalizedLineLabels.size}, lineVoices=${normalizedLineVoices.size}, profileSpeakerIdentities=${profileSpeakerSignatures.size}`,
       });
     }
   }
@@ -719,7 +743,6 @@ export function validateRawPromptStructuredAgentDraft(rawDraft: unknown): Valida
   const draft = schemaResult.data;
   const profileIds = new Set<string>();
   const profileById = new Map<string, PromptProfile>();
-  const aggregateSpeakerIds = new Set<string>();
 
   for (const profile of draft.promptProfiles) {
     const profileId = profile.id.trim();
@@ -754,18 +777,6 @@ export function validateRawPromptStructuredAgentDraft(rawDraft: unknown): Valida
       });
     }
 
-    for (const speaker of profile.speakers) {
-      aggregateSpeakerIds.add(speaker.id.trim());
-    }
-  }
-
-  if (aggregateSpeakerIds.size > 2) {
-    issues.push({
-      severity: "error",
-      code: "SPEAKER_LIMIT_EXCEEDED",
-      message: `Maximum 2 speakers allowed across the v2 dataset, found ${aggregateSpeakerIds.size}`,
-      field: "promptProfiles.speakers",
-    });
   }
 
   const orders = draft.lines.map((line) => line.order);
@@ -856,16 +867,6 @@ export function validateProductionList(list: {
       severity: "error",
       code: "MISSING_SPEAKERS",
       message: "Draft has lines but no speakers defined. At least one speaker is required.",
-      field: "speakers",
-    });
-  }
-
-  // Check speaker count
-  if (list.speakers.length > 2) {
-    issues.push({
-      severity: "error",
-      code: "SPEAKER_LIMIT_EXCEEDED",
-      message: `Maximum 2 speakers allowed, found ${list.speakers.length}`,
       field: "speakers",
     });
   }

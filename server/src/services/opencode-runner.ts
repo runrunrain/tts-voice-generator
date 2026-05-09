@@ -272,10 +272,29 @@ export interface CandidateLine {
   speakerLabel: string;
   transcript: string;
   voice: string;
+  sectionTitle?: string;
+  sourceDocumentId?: string;
+  sourceFileName?: string;
+  sourceLineNumber?: number;
+  voiceMetadataId?: string;
+}
+
+export interface VoiceMetadata {
+  id: string;
+  documentId: string;
+  fileName: string;
+  kind: "voice" | "tone" | "role" | "speaker" | "character";
+  sectionTitle: string | null;
+  text: string;
+  rawLine: string;
+  lineRange: { start: number; end: number };
+  inferredSpeakerLabel: string;
+  inferredVoice: string;
 }
 
 export interface CandidateLineExtractionOutput {
   candidateLines: CandidateLine[];
+  voiceMetadata: VoiceMetadata[];
   speakers: FallbackSpeaker[];
   warnings: Array<{ code: string; message: string }>;
   parseStats: ParseStats;
@@ -290,6 +309,7 @@ export type CandidateFilterReason =
   | "metadata_title"
   | "metadata_scrape_time"
   | "section_marker"
+  | "voice_metadata"
   | "label_only"
   | "label_prefix"
   | "url_only"
@@ -298,6 +318,7 @@ export type CandidateFilterReason =
 export interface CandidateExtractionQualitySummary {
   inputLineCount: number;
   candidateLineCount: number;
+  voiceMetadataCount: number;
   skippedByReason: Record<CandidateFilterReason, number>;
   examplesByReason: Partial<Record<CandidateFilterReason, string[]>>;
 }
@@ -685,6 +706,7 @@ function emptyCandidateReasonCounts(): Record<CandidateFilterReason, number> {
     metadata_title: 0,
     metadata_scrape_time: 0,
     section_marker: 0,
+    voice_metadata: 0,
     label_only: 0,
     label_prefix: 0,
     url_only: 0,
@@ -723,7 +745,7 @@ function classifyNonSpeechCandidateLine(line: string): CandidateFilterReason | n
     return "label_only";
   }
   if (/^(?:声线|音色|角色|说话人|speaker|voice|voice\s*name|character|role)\s*[：:].+$/i.test(normalized)) {
-    return "label_only";
+    return "voice_metadata";
   }
   if (/^(?:以下是|下面是|本段内容|本文内容|整理后|整理如下|章节说明|备注|说明)\b.*(?:台词|对白|内容|整理|来源|说明)/i.test(normalized)) {
     return "non_speech_description";
@@ -734,6 +756,71 @@ function classifyNonSpeechCandidateLine(line: string): CandidateFilterReason | n
 function stripTranscriptFieldLabel(line: string): { text: string; stripped: boolean } {
   const stripped = line.replace(/^(?:台词|对白|文本|内容|transcript|line|text)\s*[：:]\s*/i, "").trim();
   return { text: stripped, stripped: stripped !== line.trim() };
+}
+
+function extractMarkdownHeading(line: string): string | null {
+  const match = line.trim().match(/^#{1,6}\s+(.+)$/);
+  if (!match) return null;
+  return stripMarkdownDecorators(match[1]).replace(/#+\s*$/, "").trim() || null;
+}
+
+function inferSpeakerLabelFromSection(sectionTitle: string | null, fallback: string): string {
+  const source = stripMarkdownDecorators(sectionTitle ?? "").trim();
+  const withoutOrdinal = source
+    .replace(/^\s*(?:[一二三四五六七八九十百千万]+|\d+)[\.、．)]\s*/, "")
+    .replace(/^\s*第\s*[一二三四五六七八九十百千万\d]+\s*[章节幕集段]?\s*/, "")
+    .trim();
+  return withoutOrdinal || fallback;
+}
+
+function extractVoiceMetadata(line: string): { kind: VoiceMetadata["kind"]; text: string } | null {
+  const normalized = stripMarkdownDecorators(line).trim();
+  const match = normalized.match(/^(声线|音色|角色|说话人|speaker|voice|voice\s*name|character|role)\s*[：:]\s*(.+)$/i);
+  if (!match) return null;
+  const key = match[1].toLowerCase();
+  const kind: VoiceMetadata["kind"] = key === "音色" || key === "voice" || key === "voice name"
+    ? "tone"
+    : key === "角色" || key === "role"
+      ? "role"
+      : key === "说话人" || key === "speaker"
+        ? "speaker"
+        : key === "character"
+          ? "character"
+          : "voice";
+  return { kind, text: match[2].trim() };
+}
+
+function sanitizeSpeakerId(label: string): string {
+  const asciiSlug = label
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  if (asciiSlug) return asciiSlug;
+  return `speaker-${crypto.createHash("sha1").update(label).digest("hex").slice(0, 10)}`;
+}
+
+function inferVoiceFromMetadata(metadataText: string, speakerLabel: string): string {
+  const source = `${metadataText} ${speakerLabel}`.toLowerCase();
+  if (/(女|女性|少女|姑娘|girl|female|woman)/i.test(source)) return "Kore";
+  if (/(中老年|老年|低沉|稳重|权威|训诫|elder|old|senior|deep)/i.test(source)) return "Charon";
+  if (/(青年|年轻|少年|快|尖刻|活泼|young|fast|sharp)/i.test(source)) return "Puck";
+  if (/(温润|舒缓|文气|隐士|沉稳|gentle|calm|soft)/i.test(source)) return "Zephyr";
+  return "Zephyr";
+}
+
+function registerSpeaker(speakerMap: Map<string, FallbackSpeaker>, speakerLabel: string, voice: string): FallbackSpeaker {
+  const existing = speakerMap.get(speakerLabel);
+  if (existing) return existing;
+  const speaker: FallbackSpeaker = {
+    id: sanitizeSpeakerId(speakerLabel),
+    label: speakerLabel,
+    voice,
+    style: "",
+  };
+  speakerMap.set(speakerLabel, speaker);
+  return speaker;
 }
 
 // ─── Table Column Mapping for Fallback Parser ──────────────────────────────────
@@ -885,6 +972,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
     warnings.push({ code: "NO_ENABLED_DOCS", message: "No enabled documents found for normalization" });
     return {
       candidateLines: [],
+      voiceMetadata: [],
       speakers: [],
       warnings,
         parseStats: {
@@ -899,6 +987,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
         qualitySummary: {
           inputLineCount: 0,
           candidateLineCount: 0,
+          voiceMetadataCount: 0,
           skippedByReason: emptyCandidateReasonCounts(),
           examplesByReason: {},
         },
@@ -907,6 +996,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
 
   const speakerMap = new Map<string, FallbackSpeaker>();
   const candidateLines: CandidateLine[] = [];
+  const voiceMetadata: VoiceMetadata[] = [];
   let order = 0;
   let rawLines = 0;
   let totalTableBlocks = 0;
@@ -919,6 +1009,8 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
 
   for (const doc of enabledDocs) {
     const docRawLines = doc.content.split(/\r?\n/);
+    let currentSectionTitle: string | null = null;
+    let activeVoiceMetadata: VoiceMetadata | null = null;
 
     // Phase 1: Identify table blocks (header + separator + body).
     // A table block must have consecutive: header row, separator row, body row(s).
@@ -984,6 +1076,12 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
       const rawLine = docRawLines[lineIdx];
       rawLines++;
       const trimmed = rawLine.trim();
+
+      const headingTitle = extractMarkdownHeading(trimmed);
+      if (headingTitle) {
+        currentSectionTitle = headingTitle;
+        activeVoiceMetadata = null;
+      }
 
       // Skip empty lines
       if (!trimmed) {
@@ -1065,28 +1163,10 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
           const cleanedSub = subText.trim();
           if (!cleanedSub || !hasSemanticContent(cleanedSub)) continue;
 
-          // Register speaker if new (max 2)
-          if (!speakerMap.has(speakerLabel)) {
-            if (speakerMap.size >= 2) {
-              warnings.push({
-                code: "SPEAKER_MAPPED",
-                message: `Speaker "${speakerLabel}" mapped to existing speaker (max 2).`,
-              });
-              const existing = Array.from(speakerMap.keys());
-              speakerLabel = existing[existing.length - 1];
-            } else {
-              speakerMap.set(speakerLabel, {
-                id: speakerLabel.toLowerCase().replace(/\s+/g, "-"),
-                label: speakerLabel,
-                voice: "Zephyr",
-                style: "",
-              });
-            }
-          }
-
-          const speaker = speakerMap.has(speakerLabel)
-            ? speakerMap.get(speakerLabel)!
-            : Array.from(speakerMap.values())[0] ?? { id: "narrator", label: "Narrator", voice: "Zephyr", style: "" };
+          const voiceFromTable = block.columnMapping.voice !== null && block.columnMapping.voice < cells.length && cells[block.columnMapping.voice].trim()
+            ? cells[block.columnMapping.voice].trim()
+            : "Zephyr";
+          const speaker = registerSpeaker(speakerMap, speakerLabel, voiceFromTable);
           candidateLines.push({
             id: crypto.randomUUID(),
             order,
@@ -1094,6 +1174,12 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
             speakerLabel: speaker.label,
             transcript: cleanedSub,
             voice: speaker.voice,
+            sectionTitle: block.columnMapping.module !== null && block.columnMapping.module < cells.length
+              ? cells[block.columnMapping.module].trim() || undefined
+              : currentSectionTitle ?? undefined,
+            sourceDocumentId: doc.id,
+            sourceFileName: doc.fileName,
+            sourceLineNumber: lineIdx + 1,
           });
 
           order++;
@@ -1121,6 +1207,26 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
 
       const candidateReason = classifyNonSpeechCandidateLine(trimmed);
       if (candidateReason) {
+        if (candidateReason === "voice_metadata") {
+          const parsedMetadata = extractVoiceMetadata(trimmed);
+          if (parsedMetadata) {
+            const inferredSpeakerLabel = inferSpeakerLabelFromSection(currentSectionTitle, parsedMetadata.text);
+            const metadata: VoiceMetadata = {
+              id: `${doc.id}:voice-metadata:${lineIdx + 1}`,
+              documentId: doc.id,
+              fileName: doc.fileName,
+              kind: parsedMetadata.kind,
+              sectionTitle: currentSectionTitle,
+              text: parsedMetadata.text,
+              rawLine,
+              lineRange: { start: lineIdx + 1, end: lineIdx + 1 },
+              inferredSpeakerLabel,
+              inferredVoice: inferVoiceFromMetadata(parsedMetadata.text, inferredSpeakerLabel),
+            };
+            voiceMetadata.push(metadata);
+            activeVoiceMetadata = metadata;
+          }
+        }
         metadataRowsSkipped++;
         recordCandidateSkip(skippedByReason, examplesByReason, candidateReason, trimmed);
         continue;
@@ -1136,7 +1242,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
         speakerLabel = speakerMatch[1];
         text = speakerMatch[2].trim();
       } else {
-        speakerLabel = "Narrator";
+        speakerLabel = activeVoiceMetadata?.inferredSpeakerLabel ?? "Narrator";
         text = stripTranscriptFieldLabel(trimmed).text;
       }
 
@@ -1149,28 +1255,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
         continue;
       }
 
-      // Register speaker if new (max 2)
-      if (!speakerMap.has(speakerLabel)) {
-        if (speakerMap.size >= 2) {
-          warnings.push({
-            code: "SPEAKER_MAPPED",
-            message: `Speaker "${speakerLabel}" mapped to existing speaker (max 2).`,
-          });
-          const existing = Array.from(speakerMap.keys());
-          speakerLabel = existing[existing.length - 1];
-        } else {
-          speakerMap.set(speakerLabel, {
-            id: speakerLabel.toLowerCase().replace(/\s+/g, "-"),
-            label: speakerLabel,
-            voice: "Zephyr",
-            style: "",
-          });
-        }
-      }
-
-      const speaker = speakerMap.has(speakerLabel)
-        ? speakerMap.get(speakerLabel)!
-        : Array.from(speakerMap.values())[0] ?? { id: "narrator", label: "Narrator", voice: "Zephyr", style: "" };
+      const speaker = registerSpeaker(speakerMap, speakerLabel, activeVoiceMetadata?.inferredVoice ?? "Zephyr");
       candidateLines.push({
         id: crypto.randomUUID(),
         order,
@@ -1178,6 +1263,11 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
         speakerLabel: speaker.label,
         transcript: text,
         voice: speaker.voice,
+        sectionTitle: currentSectionTitle ?? undefined,
+        sourceDocumentId: doc.id,
+        sourceFileName: doc.fileName,
+        sourceLineNumber: lineIdx + 1,
+        voiceMetadataId: activeVoiceMetadata?.id,
       });
 
       order++;
@@ -1196,12 +1286,14 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
 
   return {
     candidateLines,
+    voiceMetadata,
     speakers: Array.from(speakerMap.values()),
     warnings,
     parseStats,
     qualitySummary: {
       inputLineCount: rawLines,
       candidateLineCount: candidateLines.length,
+      voiceMetadataCount: voiceMetadata.length,
       skippedByReason,
       examplesByReason,
     },
@@ -1262,15 +1354,17 @@ export async function runOpenCodeNormalize(
   const prompt = [
     "You are a voice production assistant. Given the following requirement documents,",
     "generate a Prompt-Structured Production List v2 as JSON with this exact structure:",
-    '{"schemaVersion":"tts.production-list.v2","promptProfiles":[{"id":"profile_narrator_default","name":"Narrator Default","audioProfile":"<voice identity and sound>","scene":"<setting>","directorNotes":"<delivery guidance>","sampleContext":"<brief context>","speakers":[{"id":"narrator","label":"Narrator","voice":"Zephyr","style":""}],"reusePolicy":"many-lines"}],"lines":[{"id":"<uuid>","order":0,"speaker":"narrator","speakerLabel":"Narrator","transcript":"<line text>","text":"<line text>","promptProfileId":"profile_narrator_default","directorProfileId":"profile_narrator_default","voice":"Zephyr","style":"","notes":"","status":"pending","model":"google/gemini-3.1-flash-tts-preview","responseFormat":"wav","generationStatus":"draft"}],"speakers":[{"id":"narrator","label":"Narrator","voice":"Zephyr","style":""}]}',
+    '{"schemaVersion":"tts.production-list.v2","promptProfiles":[{"id":"profile_young_noble","name":"Young noble role","audioProfile":"young to middle-aged male noble voice, composed and slightly arrogant","scene":"NPC single-line production from role sections","directorNotes":"measured pace, restrained pride, clear ancient-Chinese diction","sampleContext":"Lines under the 世家大族 role section with 声线 metadata","speakers":[{"id":"young_noble","label":"世家大族/门阀子弟/年轻名士","voice":"Puck","style":"从容、轻慢、略带傲气"}],"reusePolicy":"many-lines"},{"id":"profile_elder_scholar","name":"Elder scholar role","audioProfile":"older authoritative male voice, deep and steady","scene":"NPC single-line production from role sections","directorNotes":"slow confident pace, instructive authority","sampleContext":"Lines under the 族老/经学大儒 role section with 声线 metadata","speakers":[{"id":"elder_scholar","label":"族老/经学大儒","voice":"Charon","style":"低沉稳重、训诫感"}],"reusePolicy":"many-lines"}],"lines":[{"id":"<uuid>","order":0,"speaker":"young_noble","speakerLabel":"世家大族/门阀子弟/年轻名士","transcript":"<line text>","text":"<line text>","promptProfileId":"profile_young_noble","directorProfileId":"profile_young_noble","voice":"Puck","style":"","notes":"","status":"pending","model":"google/gemini-3.1-flash-tts-preview","responseFormat":"wav","generationStatus":"draft"}],"speakers":[{"id":"young_noble","label":"世家大族/门阀子弟/年轻名士","voice":"Puck","style":"从容、轻慢、略带傲气"},{"id":"elder_scholar","label":"族老/经学大儒","voice":"Charon","style":"低沉稳重、训诫感"}]}',
     "",
     "Rules:",
     "- Split content by logical sentences or dialogue turns",
     "- Detect speaker prefixes like \"A:\", \"B:\", \"Speaker1:\" and map to speaker IDs",
-    "- Maximum 2 speakers; map additional speakers to the second speaker",
+    "- For Markdown role sections, derive speakerLabel, voice, and profile speakers from section titles plus 声线/音色/角色 metadata",
+    "- Multiple different source voices must not all be Narrator/Zephyr; voice names may be grouped, but speakerLabel/profile speakers must preserve role differences",
+    "- Maximum 2 speakers per promptProfile; the full dataset may contain different speakers across different profiles",
     "- Include non-empty promptProfiles with audioProfile, scene, directorNotes, sampleContext, and speakers",
     "- Every line must include transcript and promptProfileId bound to an existing profile",
-    '- Default voice: "Zephyr", default model: "google/gemini-3.1-flash-tts-preview"',
+    '- Default voice: "Zephyr" only when no source role or voice metadata is available; default model: "google/gemini-3.1-flash-tts-preview"',
     "- Each line gets a unique UUID, sequential order starting from 0",
     "- Skip empty lines and comment lines (starting with #)",
     "- Output ONLY valid JSON, no markdown fences, no explanation",
@@ -1404,28 +1498,10 @@ export async function runOpenCodeNormalize(
       speakerMap.set("narrator", { id: "narrator", label: "Narrator", voice: "Zephyr", style: "" });
     }
 
-    // Map speakers to max 2
-    const speakerEntries = Array.from(speakerMap.entries());
-    if (speakerEntries.length > 2) {
-      const kept = speakerEntries.slice(0, 2);
-      const mappedIds = new Set(kept.map(([id]) => id));
-      speakerMap.clear();
-      for (const [id, sp] of kept) {
-        speakerMap.set(id, sp);
-      }
-      warnings.push({
-        code: "SPEAKER_TRUNCATED",
-        message: `opencode returned ${speakerEntries.length} speakers, truncated to 2.`,
-      });
-
-      // Remap lines referencing removed speakers to the second speaker
-      for (const line of productionData.lines) {
-        const l = line as Record<string, unknown>;
-        if (typeof l.speaker === "string" && !mappedIds.has(l.speaker)) {
-          l.speaker = kept[1]?.[0] ?? kept[0]?.[0] ?? "narrator";
-        }
-      }
-    }
+    // Preserve all aggregate speakers returned by the legacy runner. The v2
+    // speaker limit is profile-scoped in the bundle normalize path; truncating
+    // the aggregate list here would collapse role and voice diversity if this
+    // path is ever re-enabled for profile-v2 normalize.
 
     // Build validated lines
     const lines: VoiceLine[] = [];
@@ -1540,10 +1616,10 @@ export async function runBundleOpenCodeNormalize(
     `1. Read the normalize request at: ${input.normalizeRequestPath}`,
     `2. Read the schema at: ${input.schemaPath}`,
     ...(input.instructionPath ? [`3. Read instructions at: ${input.instructionPath}`] : []),
-    "4. If normalizeRequest.candidateLines is present, read that JSON file first and use candidateLines as the authoritative line set.",
+    "4. If normalizeRequest.candidateLines is present, read that JSON file first and use candidateLines as the authoritative line set; also read its voiceMetadata array when present.",
     "5. When candidateLines are present, do NOT reparse Markdown documents and do NOT reread the current production list.",
-    "6. Copy each candidate line's id, order, speaker, speakerLabel, transcript, and voice exactly; only add promptProfileId.",
-    "7. Create a small set of reusable promptProfiles and bind every copied line to the best profile.",
+    "6. Preserve each candidate line's id, order, and transcript exactly; use candidate speaker, speakerLabel, voice, sectionTitle, and voiceMetadataId as role context.",
+    "7. Create reusable promptProfiles from section titles, 声线/音色/角色 metadata, and candidate speakers, then bind every copied line to the best matching profile.",
     "8. If candidateLines are absent, read enabled inputDocuments and extract lines from the document JSON wrapper content fields.",
     "9. Generate a compact Prompt-Structured Production List v2 JSON with schemaVersion, promptProfiles, and lines.",
     `10. Write the result to: ${input.draftPath}`,
@@ -1556,13 +1632,16 @@ export async function runBundleOpenCodeNormalize(
     "- promptProfiles MUST be non-empty; every profile requires audioProfile, scene, directorNotes, sampleContext, and 1-2 speakers",
     "- Do NOT output placeholder profile fields such as TODO, TBD, N/A, 待补充, 暂无, 空, or 无",
     "- Reuse the same prompt profile for multiple lines when role, scene, and delivery style match",
+    "- Derive line.speakerLabel, line.voice, and promptProfiles[].speakers from source section titles plus voiceMetadata entries such as 声线, 音色, 角色, 说话人, speaker, voice, character, and role",
+    "- Multiple different voiceMetadata roles must not all be emitted as Narrator/Zephyr; voice names may be grouped by available system voices, but speakerLabel and profile speakers must preserve role differences",
+    "- Each promptProfile's speakers must match the role and voice metadata of lines bound to that profile",
     "- Every line MUST include only required compact fields: id, order, speaker, transcript, promptProfileId, voice, plus optional speakerLabel",
     "- Do NOT repeat optional defaults on lines: omit text, model, responseFormat, status, generationStatus, style, notes, directorProfileId, and directorOverrideJson unless truly needed",
     "- If line.text is present it MUST match line.transcript after trimming, but prefer omitting text",
     "- line.speaker MUST be one of the speakers defined by its bound prompt profile",
     "- Top-level speakers may be omitted; the server derives final speakers from promptProfiles",
-    "- Maximum 2 speakers",
-    '- Default voice: "Zephyr", default model: "google/gemini-3.1-flash-tts-preview"',
+    "- Maximum 2 speakers per promptProfile; the full dataset may contain different speakers across profiles",
+    '- Default voice: "Zephyr" only when no source role or voice metadata is available; default model: "google/gemini-3.1-flash-tts-preview"',
     "- Each line must have a unique UUID, sequential order starting from 0",
     "- Skip empty lines and comment lines",
     "- Detect speaker prefixes like 'A:', 'B:' and map to speaker IDs",

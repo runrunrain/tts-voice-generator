@@ -139,6 +139,10 @@ async function jsonRes(res: Response) {
   return res.json();
 }
 
+function dbLogicalLineId(line: { id: string; lineId?: string | null }): string {
+  return line.lineId ?? line.id;
+}
+
 /**
  * Helper: create task -> direct PUT v2 production list -> get production list with lines.
  * Agent normalize is strict v2 and no longer commits legacy fallback data when
@@ -398,7 +402,7 @@ describe("Phase 2: Generation Bridge", () => {
 
       // Verify DB state: generationStatus should be "failed"
       const db = getDb();
-      const updatedLine = db.select().from(voiceLine).where(eq(voiceLine.id, lineIds[0])).get();
+      const updatedLine = db.select().from(voiceLine).where(eq(voiceLine.lineId, lineIds[0])).get();
       expect(updatedLine?.generationStatus).toBe("failed");
     });
 
@@ -482,6 +486,7 @@ describe("Phase 2: Generation Bridge", () => {
       const db = getDb();
       const lines = db.select().from(voiceLine).all();
       const targetLine = lines[0];
+      const targetLineId = dbLogicalLineId(targetLine);
       db.update(voiceLine).set({
         generationStatus: "succeeded",
         relatedJobId: "job-existing",
@@ -497,7 +502,7 @@ describe("Phase 2: Generation Bridge", () => {
 
       expect(body.ok).toBe(true);
       // The succeeded line should be skipped
-      const skipped = body.generation.results.find((r: any) => r.lineId === targetLine.id);
+      const skipped = body.generation.results.find((r: any) => r.lineId === targetLineId);
       expect(skipped).toBeDefined();
       expect(skipped.status).toBe("skipped");
       expect(body.generation.skippedCount).toBeGreaterThanOrEqual(1);
@@ -509,6 +514,7 @@ describe("Phase 2: Generation Bridge", () => {
       const db = getDb();
       const lines = db.select().from(voiceLine).all();
       const targetLine = lines[0];
+      const targetLineId = dbLogicalLineId(targetLine);
       db.update(voiceLine).set({
         generationStatus: "running",
       }).where(eq(voiceLine.id, targetLine.id)).run();
@@ -520,7 +526,7 @@ describe("Phase 2: Generation Bridge", () => {
       });
       const body = await jsonRes(res);
 
-      const skipped = body.generation.results.find((r: any) => r.lineId === targetLine.id);
+      const skipped = body.generation.results.find((r: any) => r.lineId === targetLineId);
       expect(skipped).toBeDefined();
       expect(skipped.status).toBe("skipped");
     });
@@ -531,6 +537,7 @@ describe("Phase 2: Generation Bridge", () => {
       const db = getDb();
       const lines = db.select().from(voiceLine).all();
       const targetLine = lines[0];
+      const targetLineId = dbLogicalLineId(targetLine);
       db.update(voiceLine).set({
         generationStatus: "succeeded",
         relatedJobId: "job-existing",
@@ -544,7 +551,7 @@ describe("Phase 2: Generation Bridge", () => {
       const body = await jsonRes(res);
 
       // The succeeded line should NOT be skipped; it should be attempted (and fail due to no API key)
-      const attempted = body.generation.results.find((r: any) => r.lineId === targetLine.id);
+      const attempted = body.generation.results.find((r: any) => r.lineId === targetLineId);
       expect(attempted).toBeDefined();
       expect(attempted.status).toBe("failed");
       expect(attempted.errorCode).toBe("MISSING_API_KEY");
@@ -557,6 +564,7 @@ describe("Phase 2: Generation Bridge", () => {
       const db = getDb();
       const lines = db.select().from(voiceLine).all();
       const targetLine = lines[0];
+      const targetLineId = dbLogicalLineId(targetLine);
       db.update(voiceLine).set({
         generationStatus: "pending",
       }).where(eq(voiceLine.id, targetLine.id)).run();
@@ -568,7 +576,7 @@ describe("Phase 2: Generation Bridge", () => {
       });
       const body = await jsonRes(res);
 
-      const skipped = body.generation.results.find((r: any) => r.lineId === targetLine.id);
+      const skipped = body.generation.results.find((r: any) => r.lineId === targetLineId);
       expect(skipped).toBeDefined();
       expect(skipped.status).toBe("skipped");
       expect(skipped.errorMessage).toContain("pending");
@@ -597,7 +605,7 @@ describe("Phase 2: Generation Bridge", () => {
 
       // Manually set the line's text to empty in DB to simulate edge case
       const db = getDb();
-      db.update(voiceLine).set({ text: "" }).where(eq(voiceLine.id, "line_empty_text")).run();
+      db.update(voiceLine).set({ text: "" }).where(eq(voiceLine.lineId, "line_empty_text")).run();
 
       const res = await req(app, `/api/tasks/${taskId}/production-list/generate`, {
         method: "POST",
@@ -630,7 +638,7 @@ describe("Phase 2: Generation Bridge", () => {
       const version = putBody.productionList.version;
 
       const db = getDb();
-      db.update(voiceLine).set({ voice: "" }).where(eq(voiceLine.id, "line_novoice")).run();
+      db.update(voiceLine).set({ voice: "" }).where(eq(voiceLine.lineId, "line_novoice")).run();
 
       const res = await req(app, `/api/tasks/${taskId}/production-list/generate`, {
         method: "POST",
@@ -654,7 +662,7 @@ describe("Phase 2: Generation Bridge", () => {
 
       // Verify initial state is "draft"
       const db = getDb();
-      const lineBefore = db.select().from(voiceLine).where(eq(voiceLine.id, lineIds[0])).get();
+      const lineBefore = db.select().from(voiceLine).where(eq(voiceLine.lineId, lineIds[0])).get();
       expect(lineBefore?.generationStatus).toBe("draft");
 
       await req(app, `/api/tasks/${taskId}/production-list/generate`, {
@@ -663,7 +671,7 @@ describe("Phase 2: Generation Bridge", () => {
         body: JSON.stringify({ lineIds: [lineIds[0]], expectedVersion: version }),
       });
 
-      const lineAfter = db.select().from(voiceLine).where(eq(voiceLine.id, lineIds[0])).get();
+      const lineAfter = db.select().from(voiceLine).where(eq(voiceLine.lineId, lineIds[0])).get();
       expect(lineAfter?.generationStatus).toBe("failed");
     });
 
@@ -816,7 +824,7 @@ describe("Phase 2: Generation Bridge", () => {
       });
 
       const db = getDb();
-      const updatedLine = db.select().from(voiceLine).where(eq(voiceLine.id, lineIds[0])).get();
+      const updatedLine = db.select().from(voiceLine).where(eq(voiceLine.lineId, lineIds[0])).get();
       expect(updatedLine?.generationErrorCode).toBe("MISSING_API_KEY");
       expect(updatedLine?.generationErrorMessage).toContain("API Key");
     });
@@ -853,7 +861,7 @@ describe("Phase 2: Generation Bridge", () => {
       });
 
       const db = getDb();
-      const failedLine = db.select().from(voiceLine).where(eq(voiceLine.id, lineIds[0])).get();
+      const failedLine = db.select().from(voiceLine).where(eq(voiceLine.lineId, lineIds[0])).get();
       expect(failedLine?.generationErrorCode).toBe("MISSING_API_KEY");
 
       // Simulate external reset: set back to draft with cleared error fields
@@ -861,10 +869,10 @@ describe("Phase 2: Generation Bridge", () => {
         generationStatus: "draft",
         generationErrorCode: null,
         generationErrorMessage: null,
-      }).where(eq(voiceLine.id, lineIds[0])).run();
+      }).where(eq(voiceLine.lineId, lineIds[0])).run();
 
       // Verify error fields are cleared
-      const resetLine = db.select().from(voiceLine).where(eq(voiceLine.id, lineIds[0])).get();
+      const resetLine = db.select().from(voiceLine).where(eq(voiceLine.lineId, lineIds[0])).get();
       expect(resetLine?.generationErrorCode).toBeNull();
       expect(resetLine?.generationErrorMessage).toBeNull();
     });
@@ -933,14 +941,14 @@ describe("Phase 2: Generation Bridge", () => {
       });
 
       const db = getDb();
-      const failedLine = db.select().from(voiceLine).where(eq(voiceLine.id, lineIds[0])).get();
+      const failedLine = db.select().from(voiceLine).where(eq(voiceLine.lineId, lineIds[0])).get();
       expect(failedLine?.generationErrorCode).toBe("MISSING_API_KEY");
       expect(failedLine?.generationErrorMessage).toContain("API Key");
 
       // Reset the line back to draft so it's eligible for re-generation
       db.update(voiceLine).set({
         generationStatus: "draft",
-      }).where(eq(voiceLine.id, lineIds[0])).run();
+      }).where(eq(voiceLine.lineId, lineIds[0])).run();
 
       // Enable mock success path
       testState.mockApiKeyConfigured = true;
@@ -958,7 +966,7 @@ describe("Phase 2: Generation Bridge", () => {
       expect(body.generation.succeededCount).toBe(1);
 
       // Verify error fields are cleared in DB
-      const succeededLine = db.select().from(voiceLine).where(eq(voiceLine.id, lineIds[0])).get();
+      const succeededLine = db.select().from(voiceLine).where(eq(voiceLine.lineId, lineIds[0])).get();
       expect(succeededLine?.generationStatus).toBe("succeeded");
       expect(succeededLine?.generationErrorCode).toBeNull();
       expect(succeededLine?.generationErrorMessage).toBeNull();
@@ -976,7 +984,7 @@ describe("Phase 2: Generation Bridge", () => {
 
       // Reset to draft
       const db = getDb();
-      db.update(voiceLine).set({ generationStatus: "draft" }).where(eq(voiceLine.id, lineIds[0])).run();
+      db.update(voiceLine).set({ generationStatus: "draft" }).where(eq(voiceLine.lineId, lineIds[0])).run();
 
       // Enable mock success path
       testState.mockApiKeyConfigured = true;
@@ -1012,11 +1020,11 @@ describe("Phase 2: Generation Bridge", () => {
       });
 
       const db = getDb();
-      const firstFail = db.select().from(voiceLine).where(eq(voiceLine.id, lineIds[0])).get();
+      const firstFail = db.select().from(voiceLine).where(eq(voiceLine.lineId, lineIds[0])).get();
       expect(firstFail?.generationErrorCode).toBe("MISSING_API_KEY");
 
       // Reset to draft
-      db.update(voiceLine).set({ generationStatus: "draft" }).where(eq(voiceLine.id, lineIds[0])).run();
+      db.update(voiceLine).set({ generationStatus: "draft" }).where(eq(voiceLine.lineId, lineIds[0])).run();
 
       // Enable API key but make generation fail with a different error
       testState.mockApiKeyConfigured = true;
@@ -1029,7 +1037,7 @@ describe("Phase 2: Generation Bridge", () => {
         body: JSON.stringify({ lineIds: [lineIds[0]], expectedVersion: version, skipCompleted: false }),
       });
 
-      const secondFail = db.select().from(voiceLine).where(eq(voiceLine.id, lineIds[0])).get();
+      const secondFail = db.select().from(voiceLine).where(eq(voiceLine.lineId, lineIds[0])).get();
       expect(secondFail?.generationStatus).toBe("failed");
       expect(secondFail?.generationErrorCode).toBe("MOCK_ERROR");
       expect(secondFail?.generationErrorMessage).toBe("Mock generation failure");
@@ -1048,12 +1056,12 @@ describe("Phase 2: Generation Bridge", () => {
       });
 
       const db = getDb();
-      const failedLine = db.select().from(voiceLine).where(eq(voiceLine.id, lineIds[0])).get();
+      const failedLine = db.select().from(voiceLine).where(eq(voiceLine.lineId, lineIds[0])).get();
       expect(failedLine?.generationErrorCode).toBe("MISSING_API_KEY");
       expect(failedLine?.generationStatus).toBe("failed");
 
       // Step 2: Reset to draft in DB
-      db.update(voiceLine).set({ generationStatus: "draft" }).where(eq(voiceLine.id, lineIds[0])).run();
+      db.update(voiceLine).set({ generationStatus: "draft" }).where(eq(voiceLine.lineId, lineIds[0])).run();
 
       // Step 3: Manually write stale artifact with old error fields still present
       // This simulates the scenario where artifact was written during failure
@@ -1091,7 +1099,7 @@ describe("Phase 2: Generation Bridge", () => {
       });
 
       // Verify DB is succeeded with null errors
-      const succeededLine = db.select().from(voiceLine).where(eq(voiceLine.id, lineIds[0])).get();
+      const succeededLine = db.select().from(voiceLine).where(eq(voiceLine.lineId, lineIds[0])).get();
       expect(succeededLine?.generationStatus).toBe("succeeded");
       expect(succeededLine?.generationErrorCode).toBeNull();
       expect(succeededLine?.generationErrorMessage).toBeNull();
