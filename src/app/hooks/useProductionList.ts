@@ -9,13 +9,18 @@ const DEFAULT_MODEL = "google/gemini-3.1-flash-tts-preview";
 export function createEmptyVoiceLine(sortOrder: number): VoiceLine {
   return {
     id: `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+    isLocalDraft: true,
     sortOrder,
     transcript: "",
     voice: "Zephyr",
     model: DEFAULT_MODEL,
     responseFormat: "wav",
+    moduleName: "",
+    title: "",
+    speakerLabel: "Narrator",
     notes: "",
     directorProfileId: null,
+    promptProfileId: null,
   };
 }
 
@@ -55,6 +60,15 @@ export function useProductionList(taskId: string | undefined) {
 
   const updateLine = useCallback((lineId: string, patch: Partial<VoiceLine>) => {
     setDraftLines((prev) => prev.map((line) => line.id === lineId ? { ...line, ...patch } : line));
+  }, []);
+
+  const updateLines = useCallback((lineIds: string[], patch: Partial<VoiceLine>) => {
+    const selected = new Set(lineIds);
+    setDraftLines((prev) => prev.map((line) => selected.has(line.id) ? { ...line, ...patch } : line));
+  }, []);
+
+  const replaceLines = useCallback((mutator: (lines: VoiceLine[]) => VoiceLine[]) => {
+    setDraftLines((prev) => mutator(prev).map((line, index) => ({ ...line, sortOrder: index + 1 })));
   }, []);
 
   const addLine = useCallback(() => {
@@ -111,6 +125,10 @@ export function useProductionList(taskId: string | undefined) {
         lines: draftLines,
         speakers: list.speakers ?? [],
         directorProfileId: list.directorProfileId ?? null,
+        schemaVersion: list.schemaVersion,
+        promptProfiles: list.promptProfiles ?? [],
+        directorProfiles: list.directorProfiles ?? [],
+        promptStructureStatus: list.promptStructureStatus,
         metadata: list.metadata ?? {},
       });
       const normalized = { ...saved, lines: saved.lines ?? [] };
@@ -151,6 +169,8 @@ export function useProductionList(taskId: string | undefined) {
     conflictError,
     setDraftLines,
     updateLine,
+    updateLines,
+    replaceLines,
     addLine,
     deleteLine,
     validateLocal,

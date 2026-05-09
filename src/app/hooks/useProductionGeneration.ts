@@ -12,7 +12,7 @@ export function getLineGenerationStatus(line: VoiceLine): LineGenerationStatus {
 }
 
 export function isPersistedVoiceLine(line: VoiceLine): boolean {
-  return !line.id.startsWith("local-");
+  return line.isLocalDraft !== true;
 }
 
 export function isGeneratableVoiceLine(line: VoiceLine): boolean {
@@ -77,6 +77,8 @@ export function useProductionGeneration(taskId: string | undefined) {
         expectedVersion: list.version,
         lineIds,
         skipCompleted: true,
+        source: "user",
+        confirm: true,
       });
       setResult(generation);
       setTone(classifyGenerationTone(generation));

@@ -47,9 +47,10 @@ const VOICE_CATALOG: VoiceProfile[] = [
 ];
 
 const DEMO_HISTORY: HistoryRecord[] = [
-  { id: "demo-abc123", text: "从前有个叫小明的小朋友，有一天他走进了一片神秘的森林...", voice: "Zephyr", format: "mp3", date: "2026-05-03 14:30", source: "用户", duration: "3.2s", status: "success", cost: "$0.0004", charCount: 247 },
-  { id: "demo-def456", text: "Welcome to the future of voice generation. This is a sample output for demonstration purposes.", voice: "Puck", format: "mp3", date: "2026-05-03 12:15", source: "Agent", duration: "4.5s", status: "success", cost: "$0.0006", charCount: 89 },
-  { id: "demo-err789", text: "测试文本用于验证 API 的容错能力，特别是长文本截断...", voice: "Zephyr", format: "pcm", date: "2026-05-03 10:05", source: "用户", duration: "0.0s", status: "error", error: "RATE_LIMITED" },
+  { id: "demo-abc123", text: "从前有个叫小明的小朋友，有一天他走进了一片神秘的森林...", voice: "Zephyr", format: "mp3", date: "2026-05-03 14:30", source: "user", duration: "3.2s", status: "success", cost: "$0.0004", charCount: 247 },
+  { id: "demo-def456", text: "Welcome to the future of voice generation. This is a sample output for demonstration purposes.", voice: "Puck", format: "mp3", date: "2026-05-03 12:15", source: "agent", duration: "4.5s", status: "success", cost: "$0.0006", charCount: 89 },
+  { id: "demo-cli246", text: "批处理脚本通过 CLI 触发的远端语音生成记录，用于验证审计来源区分。", voice: "Charon", format: "wav", date: "2026-05-03 11:20", source: "cli", duration: "2.8s", status: "success", cost: "$0.0003", charCount: 42 },
+  { id: "demo-err789", text: "测试文本用于验证 API 的容错能力，特别是长文本截断...", voice: "Zephyr", format: "pcm", date: "2026-05-03 10:05", source: "user", duration: "0.0s", status: "error", error: "RATE_LIMITED" },
 ];
 
 // ─── Generate Demo Audio Blob ────────────────────────────────────────────────

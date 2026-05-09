@@ -3,6 +3,13 @@ import { useLocation, Link } from "react-router";
 import { X, Play, Download, Loader2, PlayCircle, AlertCircle, RefreshCw, Clock, Settings, CheckCircle2 } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import type { VoiceProfile } from "../types";
+import { AgentAutomationPanel } from "./tasks/AgentAutomationPanel";
+import { useTaskWorkspaceUi } from "../context/TaskWorkspaceUiContext";
+
+function displaySpeakerLabel(label: string): string {
+  const match = label.match(/^Speaker\s+([A-Z])$/i);
+  return match ? `说话者 ${match[1].toUpperCase()}` : label;
+}
 
 interface RightPanelProps {
   isOpen: boolean;
@@ -11,6 +18,7 @@ interface RightPanelProps {
 
 export function RightPanel({ isOpen, onClose }: RightPanelProps) {
   const location = useLocation();
+  const isTaskWorkspace = /^\/tasks\/[^/]+$/.test(location.pathname);
 
   if (!isOpen) return null;
 
@@ -18,7 +26,8 @@ export function RightPanel({ isOpen, onClose }: RightPanelProps) {
     <div className="w-full h-full flex flex-col">
       <div className="h-12 px-4 flex items-center justify-between border-b border-border-subtle shrink-0">
         <h3 className="font-semibold text-sm">
-          {location.pathname.includes("/voices") ? "音色详情"
+          {isTaskWorkspace ? "Agent 自动化"
+            : location.pathname.includes("/voices") ? "音色详情"
             : location.pathname.includes("/history") ? "记录预览"
             : location.pathname.includes("/director") ? "提示词预览"
             : "生成输出"}
@@ -31,7 +40,7 @@ export function RightPanel({ isOpen, onClose }: RightPanelProps) {
         </button>
       </div>
 
-      <div className="flex-1 p-5 overflow-y-auto">
+      <div className={`flex-1 overflow-y-auto ${isTaskWorkspace ? "p-0" : "p-5"}`}>
         <PanelContent path={location.pathname} />
       </div>
     </div>
@@ -60,7 +69,7 @@ function DirectorPreview() {
           <span className="text-sm font-medium">提示词预览</span>
         </div>
         <div className="bg-bg-sunken p-4 rounded-md border border-border font-mono text-xs text-text-secondary min-h-[200px] max-h-[60vh] overflow-y-auto whitespace-pre-wrap">
-          // 在 Director 页面点击「组装提示词」后，组装结果将在此处展示
+          // 在导演模式页面点击「组装提示词」后，组装结果将在此处展示
         </div>
         <div className="text-[10px] text-text-tertiary text-center border-t border-border-subtle pt-3 mt-2">
           组装提示词不会消耗 API 额度
@@ -136,13 +145,13 @@ function DirectorPreview() {
         {/* Speaker summary */}
         {assembleSuccess.normalized.speakers.length > 0 && (
           <div className="flex flex-col gap-1 text-xs">
-            <span className="text-text-tertiary">Speaker 规范化:</span>
+            <span className="text-text-tertiary">说话者规范化:</span>
             {assembleSuccess.normalized.speakers.map((s) => (
               <div key={s.id} className="flex items-center gap-2 text-text-secondary">
-                <span className="font-medium text-text-primary">{s.label}</span>
+                <span className="font-medium text-text-primary">{displaySpeakerLabel(s.label)}</span>
                 <span className="font-mono text-accent">{s.voice}</span>
                 {s.wasLegacyAlias && (
-                  <span className="text-warning text-[10px]">(legacy mapped)</span>
+                  <span className="text-warning text-[10px]">（旧别名已映射）</span>
                 )}
               </div>
             ))}
@@ -151,7 +160,7 @@ function DirectorPreview() {
 
         <div className="flex items-center justify-between text-xs text-text-tertiary">
           <span>{assembleSuccess.prompt.length} 字符</span>
-          <span>不消耗 Token</span>
+          <span>不消耗额度</span>
         </div>
 
         <div className="text-[10px] text-text-tertiary text-center border-t border-border-subtle pt-3 mt-2">
@@ -662,6 +671,11 @@ function HistoryPreviewPanel() {
 // ─── Panel Router ────────────────────────────────────────────────────────────
 
 function PanelContent({ path }: { path: string }) {
+  const taskWorkspaceMatch = path.match(/^\/tasks\/([^/]+)$/);
+  if (taskWorkspaceMatch) {
+    return <TaskWorkspaceAgentPanel taskId={decodeURIComponent(taskWorkspaceMatch[1])} />;
+  }
+
   if (path.includes("/director")) {
     return <DirectorPreview />;
   }
@@ -676,4 +690,21 @@ function PanelContent({ path }: { path: string }) {
 
   // Default: Generate output panel
   return <GenerateOutputPanel />;
+}
+
+function TaskWorkspaceAgentPanel({ taskId }: { taskId: string }) {
+  const workspace = useTaskWorkspaceUi();
+  return (
+    <AgentAutomationPanel
+      taskId={taskId}
+      lines={workspace.lines}
+      selectedLineIds={workspace.selectedLineIds}
+      productionVersion={workspace.productionVersion}
+      validationSummary={workspace.validationSummary}
+      onProductionListChanged={async () => {
+        await workspace.refreshProduction?.();
+        await workspace.refreshProfiles?.();
+      }}
+    />
+  );
 }

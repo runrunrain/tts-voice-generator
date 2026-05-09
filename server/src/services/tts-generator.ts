@@ -35,7 +35,7 @@ export const GenerateSpeechSchema = z.object({
 export type GenerateSpeechRequest = z.infer<typeof GenerateSpeechSchema>;
 
 export interface SourceContext {
-  source: "user" | "agent";
+  source: "user" | "agent" | "cli";
   agentConversationId?: string;
   agentActionLogId?: number;
 }

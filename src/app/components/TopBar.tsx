@@ -31,8 +31,8 @@ export function TopBar() {
   let title = "语音生成";
 
   if (location.pathname.includes("/director")) {
-    breadcrumbs = ["生成", "Director 模式"];
-    title = "Director 模式";
+    breadcrumbs = ["生成", "导演模式"];
+    title = "导演模式";
   } else if (location.pathname.includes("/voices")) {
     breadcrumbs = ["音色管理"];
     title = "音色管理";
@@ -66,10 +66,10 @@ export function TopBar() {
       ? "shadow-[0_0_8px_rgba(34,197,94,0.4)]"
       : "shadow-[0_0_8px_rgba(197,158,49,0.4)]";
   const statusText = !health
-    ? "Backend: unreachable"
+    ? "后端不可达"
     : health.ok && health.openRouterConfigured
-      ? "Backend OK / Key configured"
-      : "Backend OK / Key missing";
+      ? "后端正常 / 密钥已配置"
+      : "后端正常 / 缺少密钥";
 
   return (
     <div className="h-full px-5 flex items-center justify-between">

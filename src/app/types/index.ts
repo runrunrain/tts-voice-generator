@@ -100,7 +100,7 @@ export interface SpeakerConfig {
 // ─── History ─────────────────────────────────────────────────────────────────
 
 export type HistoryStatus = "success" | "error" | "pending";
-export type HistorySource = "用户" | "Agent";
+export type HistorySource = "user" | "agent" | "cli";
 
 export interface HistoryRecord {
   id: string;
@@ -125,7 +125,7 @@ export interface HistoryRecord {
   sampleRate?: number | null;
   bitDepth?: number | null;
   channels?: number | null;
-  // Agent context fields (present when source === "Agent")
+  // Agent context fields (present when source === "agent")
   agentConversationId?: string | null;
   agentActionLogId?: number | null;
 }
@@ -191,7 +191,10 @@ export type ResponseFormat = "wav" | "pcm" | "mp3";
 
 export interface VoiceLine {
   id: string;
+  isLocalDraft?: boolean;
   sortOrder: number;
+  moduleName?: string | null;
+  title?: string | null;
   transcript: string;
   voice: string;
   model: string;
@@ -199,6 +202,10 @@ export interface VoiceLine {
   notes?: string;
   directorProfileId?: string | null;
   directorOverrideJson?: string | null;
+  promptProfileId?: string | null;
+  speakerLabel?: string | null;
+  promptOverride?: PromptOverride | null;
+  promptOverrideJson?: string | null;
   generationStatus?: "draft" | "ready" | "pending" | "running" | "succeeded" | "failed" | "needs_revision";
   relatedJobId?: string | null;
   relatedAssetId?: number | null;
@@ -211,10 +218,14 @@ export interface VoiceLine {
 export interface ProductionList {
   taskId: string;
   version: number;
+  schemaVersion?: string;
   updatedAt?: string;
   lines: VoiceLine[];
   speakers?: ProductionListSpeaker[];
   directorProfileId?: string | null;
+  promptProfiles?: PromptProfile[];
+  directorProfiles?: DirectorProfile[];
+  promptStructureStatus?: "complete" | "missing" | "incomplete";
   metadata?: Record<string, unknown>;
 }
 
@@ -234,9 +245,12 @@ export interface DirectorSpeakerProfile {
   style?: string;
 }
 
+export type DirectorProfileSource = "global" | "production-list";
+
 export interface DirectorProfile {
   id: string;
   taskId: string;
+  source: DirectorProfileSource;
   name: string;
   audioProfile: string;
   scene: string;
@@ -246,6 +260,22 @@ export interface DirectorProfile {
   createdAt: string;
   updatedAt: string;
   version: number;
+}
+
+export interface PromptSpeaker extends DirectorSpeakerProfile {}
+
+export interface PromptOverride {
+  audioProfile?: string;
+  scene?: string;
+  directorNotes?: string;
+  sampleContext?: string;
+  speakers?: PromptSpeaker[];
+}
+
+export interface PromptProfile extends DirectorProfile {
+  description?: string;
+  reusePolicy?: "one-line" | "many-lines";
+  sourceDocumentIds?: string[];
 }
 
 export interface ValidationIssue {
@@ -278,6 +308,8 @@ export interface GenerateFromListRequest {
   expectedVersion?: number;
   lineIds?: string[];
   skipCompleted?: boolean;
+  source?: "user" | "agent" | "cli";
+  confirm?: boolean;
 }
 
 export interface GenerateFromListResponse {
@@ -290,13 +322,103 @@ export interface GenerateFromListResponse {
   results: LineGenerationResult[];
 }
 
+export interface ProductionListVersionEntry {
+  version: number;
+  versionId: string;
+  lineCount: number;
+  directorProfileId?: string | null;
+  createdAt: string;
+}
+
+export interface ProductionListDiff {
+  fromVersion: number;
+  toVersion: number;
+  summary: {
+    addedCount: number;
+    removedCount: number;
+    changedCount: number;
+    unchangedCount: number;
+    fromLineCount: number;
+    toLineCount: number;
+  };
+  added: string[];
+  removed: string[];
+  changed: Array<{ lineId: string; fields: string[] }>;
+}
+
+export interface ProductionListRollbackResult {
+  productionList: ProductionList;
+  rollback: {
+    fromVersion: number;
+    targetVersion: number;
+    newVersion: number;
+  };
+}
+
+export type ProductionListExportFormat = "json" | "md" | "csv";
+
+export interface ProductionListExportResult {
+  format: ProductionListExportFormat;
+  fileName: string;
+  content: string;
+  mimeType: string;
+}
+
+export interface ProductionListImportResult {
+  productionList: ProductionList;
+  import: {
+    importedLines: number;
+    skippedLines: number;
+    errors?: Array<{ index: number; message: string }>;
+    directorWarnings?: string[];
+  };
+}
+
+export interface ProductionListQualityIssue {
+  severity: "info" | "warning" | "error" | string;
+  code: string;
+  message: string;
+  lineId?: string;
+}
+
+export interface ProductionListQualityReport {
+  taskId: string;
+  version: number;
+  totalLines: number;
+  generatedAt: string;
+  metrics: {
+    missingFields?: Record<string, number>;
+    unboundDirectorCount?: number;
+    invalidDirectorReferences?: string[];
+    directorReuse?: {
+      uniqueProfiles: number;
+      sharedProfiles: number;
+      maxReuseCount: number;
+      reuseDetails: Array<{ profileId: string; lineCount: number }>;
+    };
+    suspectedDuplicates?: {
+      groups: number;
+      details: Array<{ text: string; lineIds: string[] }>;
+    };
+    longText?: {
+      threshold: number;
+      count: number;
+      details: Array<{ lineId: string; length: number }>;
+    };
+    validationSummary?: Record<string, number>;
+    generationSummary?: Record<string, number>;
+    [key: string]: unknown;
+  };
+  issues: ProductionListQualityIssue[];
+}
+
 export type AgentRunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export interface AgentButton {
   key: string;
   label: string;
   description?: string;
-  scope: "task" | "line" | "global";
+  scope: "task" | "list" | "line" | "global";
   available: boolean;
   disabledReason?: string | null;
   runner?: "opencode" | "fallback";
@@ -320,6 +442,163 @@ export interface OpencodeSession {
   createdAt: string;
   updatedAt: string;
   error?: string | null;
+}
+
+export type AgentRunKind = "normalize" | "button";
+
+export type CapabilityAvailability =
+  | { available: true; reason?: string | null; code?: string | null }
+  | { available: false; code: string; reason: string };
+
+export interface AgentRunSummary {
+  runId: string;
+  taskId: string;
+  kind: AgentRunKind;
+  buttonKey: string;
+  title: string;
+  status: AgentRunStatus;
+  runner: "opencode" | "fallback";
+  targetLineIds: string[];
+  beforeVersion?: number;
+  afterVersion?: number;
+  createdAt: string;
+  completedAt?: string | null;
+  error?: { code?: string; message: string } | null;
+  retry: CapabilityAvailability;
+  diff: CapabilityAvailability;
+  cancel: CapabilityAvailability;
+}
+
+export interface AgentRunDetail extends AgentRunSummary {
+  promptSummary?: string;
+  inputSnapshot?: unknown;
+  outputSnapshot?: unknown;
+  normalizeProgress?: NormalizeRunProgress;
+  artifactRefs: Array<{ label: string; path?: string; available: boolean }>;
+}
+
+export interface AgentRunDiff {
+  runId: string;
+  available: boolean;
+  unavailableReason?: string;
+  beforeVersion?: number;
+  afterVersion?: number;
+  summary?: {
+    addedCount: number;
+    removedCount: number;
+    changedCount: number;
+  };
+  lineChanges?: Array<{
+    lineId: string;
+    before?: Record<string, unknown>;
+    after?: Record<string, unknown>;
+    fields: string[];
+  }>;
+}
+
+export interface AgentRunCancelResult {
+  available: boolean;
+  reason: string;
+  code?: string;
+}
+
+export type NormalizeRunStage =
+  | "queued"
+  | "preprocessing"
+  | "opencode_running"
+  | "draft_detected"
+  | "validating"
+  | "committing"
+  | "completed"
+  | "failed";
+
+export type NormalizeRunnerStatus = "not_started" | "running" | "completed" | "timeout" | "failed";
+
+export type NormalizeIssueSeverity = "warning" | "blocking";
+
+export interface CandidateExtractionQualitySummary {
+  inputLineCount?: number;
+  candidateLineCount?: number;
+  skippedByReason?: Record<string, number>;
+  examplesByReason?: Partial<Record<string, string[]>>;
+}
+
+export interface NormalizeQualityIssue {
+  code: string;
+  severity: NormalizeIssueSeverity | string;
+  message: string;
+  lineId?: string;
+  lineIndex?: number;
+  transcriptSample?: string;
+  expected?: string;
+  actual?: string;
+}
+
+export interface NormalizeTimeoutBasis {
+  mode?: "quality-priority" | "standard" | string;
+  baseTimeoutMs?: number;
+  maxTimeoutMs?: number;
+  selectedTimeoutMs?: number;
+  timeoutMs?: number;
+  estimatedLineCount?: number;
+  docCount?: number;
+  charCount?: number;
+  [key: string]: unknown;
+}
+
+export interface NormalizeRunProgress {
+  ok: true;
+  requestId?: string;
+  runId: string;
+  taskId: string;
+  stage: NormalizeRunStage;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  elapsedMs: number;
+  timeoutMs: number;
+  timeoutBasis: NormalizeTimeoutBasis;
+  candidateLineCount: number;
+  candidateQualitySummary?: CandidateExtractionQualitySummary;
+  draft: {
+    exists: boolean;
+    parseable: boolean;
+    sizeBytes: number;
+    updatedAt?: string;
+  };
+  quality: {
+    checked: boolean;
+    passed?: boolean;
+    issueCount?: number;
+    blockingIssueCount?: number;
+    warningIssueCount?: number;
+    issuesPreview?: NormalizeQualityIssue[];
+  };
+  runner: {
+    status: NormalizeRunnerStatus;
+  };
+  result?: {
+    versionId: string;
+    lineCount: number;
+  };
+  error?: {
+    code: string;
+    message: string;
+    httpStatus?: number;
+    recoverability: "retryable" | "user_action_required" | "not_retryable" | string;
+  };
+  message: string;
+}
+
+export interface NormalizeStartResponse {
+  ok: true;
+  status: "accepted";
+  requestId?: string;
+  runId: string;
+  progressUrl: string;
+  stage: NormalizeRunStage;
+  timeoutMs: number;
+  timeoutBasis?: NormalizeTimeoutBasis;
 }
 
 export type AgentMessageRole = "user" | "assistant" | "system";

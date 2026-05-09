@@ -933,4 +933,85 @@ describe("TTS Generate API", () => {
       expect(snapshot.speakers[0].style).toBe("calm");
     });
   });
+
+  // ── History source display mapping ─────────────────────────────────────
+
+  describe("History source display mapping", () => {
+    /**
+     * Insert a generation_job row with a given source value directly into DB,
+     * then verify that GET /api/history returns the correct display label.
+     */
+    async function insertJobWithSource(source: string): Promise<string> {
+      const db = getDb();
+      const jobId = `test-src-${source}-${Date.now()}`;
+      const now = new Date();
+      db.insert(generationJob).values({
+        id: jobId,
+        model: "google/gemini-3.1-flash-tts-preview",
+        voice: "Zephyr",
+        responseFormat: "wav",
+        input: `Source mapping test for ${source}`,
+        inputCharCount: 30,
+        status: "succeeded",
+        source,
+        estimatedCost: "0.001",
+        actualCost: "0.001",
+        generationId: `gen-src-${source}`,
+        createdAt: now,
+        completedAt: now,
+      }).run();
+      return jobId;
+    }
+
+    it("maps source='user' to display label '用户'", async () => {
+      const jobId = await insertJobWithSource("user");
+
+      const res = await r(app, "/api/history");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      const record = body.records.find((rec: { id: string }) => rec.id === jobId);
+      expect(record).toBeDefined();
+      expect(record.source).toBe("用户");
+    });
+
+    it("maps source='agent' to display label 'Agent'", async () => {
+      const jobId = await insertJobWithSource("agent");
+
+      const res = await r(app, "/api/history");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      const record = body.records.find((rec: { id: string }) => rec.id === jobId);
+      expect(record).toBeDefined();
+      expect(record.source).toBe("Agent");
+    });
+
+    it("maps source='cli' to display label 'CLI' (not 'Agent')", async () => {
+      const jobId = await insertJobWithSource("cli");
+
+      const res = await r(app, "/api/history");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      const record = body.records.find((rec: { id: string }) => rec.id === jobId);
+      expect(record).toBeDefined();
+      expect(record.source).toBe("CLI");
+      // Explicit guard: cli must NOT be mapped to "Agent"
+      expect(record.source).not.toBe("Agent");
+    });
+
+    it("safely degrades unknown source values to 'Agent'", async () => {
+      const jobId = await insertJobWithSource("unknown_future_source");
+
+      const res = await r(app, "/api/history");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      const record = body.records.find((rec: { id: string }) => rec.id === jobId);
+      expect(record).toBeDefined();
+      // Unknown source should degrade gracefully to "Agent"
+      expect(record.source).toBe("Agent");
+    });
+  });
 });

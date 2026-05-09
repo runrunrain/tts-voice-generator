@@ -1,23 +1,20 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
-import { AlertCircle, Bot, FileText, Loader2, ListChecks, Settings2, SlidersHorizontal } from "lucide-react";
-import { AgentAutomationPanel } from "../components/tasks/AgentAutomationPanel";
+import { AlertCircle, FileText, Loader2, ListChecks, Settings2, ShieldAlert, SlidersHorizontal } from "lucide-react";
 import { DirectorProfilesPanel } from "../components/tasks/DirectorProfilesPanel";
-import { ProductionListEditor } from "../components/tasks/ProductionListEditor";
+import { ProductionListEditorView } from "../components/tasks/ProductionListEditor";
 import { RequirementDocsPanel } from "../components/tasks/RequirementDocsPanel";
-import { useAgentRuns } from "../hooks/useAgentRuns";
+import { buildValidationSummary, useTaskWorkspaceUi, type WorkspaceTab } from "../context/TaskWorkspaceUiContext";
 import { useProductionList } from "../hooks/useProductionList";
 import { useTask } from "../hooks/useTasks";
 import { taskApi } from "../services/httpAdapter";
-import type { DirectorProfile } from "../types";
-
-type WorkspaceTab = "documents" | "production" | "directors" | "automation";
+import type { DirectorProfile, ValidationIssue } from "../types";
 
 const TABS: Array<{ key: WorkspaceTab; label: string; icon: React.ComponentType<{ size?: number; className?: string }> }> = [
   { key: "documents", label: "需求文档", icon: FileText },
   { key: "production", label: "生产列表", icon: ListChecks },
   { key: "directors", label: "导演配置", icon: SlidersHorizontal },
-  { key: "automation", label: "Agent 自动化", icon: Bot },
+  { key: "audit", label: "审计", icon: ShieldAlert },
 ];
 
 export function TaskWorkspacePage() {
@@ -26,19 +23,57 @@ export function TaskWorkspacePage() {
   const { task, loading, error, refresh } = useTask(taskId);
   const [tab, setTab] = useState<WorkspaceTab>("documents");
   const [profiles, setProfiles] = useState<DirectorProfile[]>([]);
-  const productionForAutomation = useProductionList(tab === "automation" ? taskId : undefined);
-  const agentRuns = useAgentRuns(taskId);
+  const [profilesLoading, setProfilesLoading] = useState(false);
+  const [profilesError, setProfilesError] = useState<string | null>(null);
+  const production = useProductionList(taskId);
+  const workspace = useTaskWorkspaceUi();
+  const { selectedLineIds, setSelectedLineIds, setActiveTab, patchSnapshot, resetSnapshot } = workspace;
 
   const loadProfiles = useCallback(async () => {
+    if (!taskId) return;
+    setProfilesLoading(true);
+    setProfilesError(null);
     try {
       const result = await taskApi.listDirectorProfiles(taskId);
       setProfiles(result.profiles);
-    } catch { /* profiles remain empty, editor shows no dropdown options */ }
+    } catch (err) {
+      setProfilesError(err instanceof Error ? err.message : "导演配置加载失败");
+      /* profiles remain unchanged so the editor keeps any previously loaded dropdown options */
+    } finally {
+      setProfilesLoading(false);
+    }
   }, [taskId]);
 
   useEffect(() => {
     loadProfiles();
   }, [loadProfiles]);
+
+  const validationSummary = useMemo(() => buildValidationSummary(buildWorkspaceIssues(production.draftLines, production.validationReport?.issues ?? [])), [production.draftLines, production.validationReport]);
+
+  useEffect(() => {
+    if (!taskId) {
+      resetSnapshot();
+      return;
+    }
+    patchSnapshot({
+      taskId,
+      taskTitle: task?.title,
+      activeTab: tab,
+      productionVersion: production.list?.version ?? null,
+      lines: production.draftLines,
+      validationSummary,
+      dirty: Boolean(production.list && JSON.stringify(production.list.lines) !== JSON.stringify(production.draftLines)),
+      refreshProduction: production.refresh,
+      refreshProfiles: loadProfiles,
+    });
+  }, [loadProfiles, patchSnapshot, production.draftLines, production.list, production.refresh, resetSnapshot, tab, task?.title, taskId, validationSummary]);
+
+  useEffect(() => () => resetSnapshot(), [resetSnapshot]);
+
+  const setWorkspaceTab = (nextTab: WorkspaceTab) => {
+    setTab(nextTab);
+    setActiveTab(nextTab);
+  };
 
   if (!taskId) {
     return <WorkspaceState title="缺少任务 ID" hint="请从任务列表进入工作台" />;
@@ -59,16 +94,36 @@ export function TaskWorkspacePage() {
       <div className="h-11 shrink-0 border-b border-border-subtle bg-bg-sunken px-6 flex items-center gap-2">
         {TABS.map((item) => {
           const Icon = item.icon;
-          return <button key={item.key} className={`h-8 px-3 rounded-md text-xs border flex items-center gap-2 transition-colors ${tab === item.key ? "border-accent/40 bg-accent-muted text-accent" : "border-border text-text-secondary hover:bg-bg-hover"}`} onClick={() => setTab(item.key)}><Icon size={14} /> {item.label}</button>;
+            return <button key={item.key} className={`h-8 px-3 rounded-md text-xs border flex items-center gap-2 transition-colors ${tab === item.key ? "border-accent/40 bg-accent-muted text-accent" : "border-border text-text-secondary hover:bg-bg-hover"}`} onClick={() => setWorkspaceTab(item.key)}><Icon size={14} /> {item.label}</button>;
         })}
       </div>
 
       <main className="flex-1 overflow-hidden p-5">
         {tab === "documents" && <RequirementDocsPanel taskId={taskId} />}
-        {tab === "production" && <ProductionListEditor taskId={taskId} directorProfiles={profiles} onExecuteLine={async (lineId) => { await agentRuns.executeButton("shorten", lineId); }} />}
-        {tab === "directors" && <DirectorProfilesPanel taskId={taskId} onProfilesChange={setProfiles} />}
-        {tab === "automation" && <AgentAutomationPanel taskId={taskId} lines={productionForAutomation.draftLines} onProductionListChanged={productionForAutomation.refresh} />}
+        {tab === "production" && <ProductionListEditorView taskId={taskId} controller={production} directorProfiles={profiles} selectedLineIds={selectedLineIds} onSelectedLineIdsChange={setSelectedLineIds} />}
+        {tab === "directors" && <DirectorProfilesPanel taskId={taskId} profiles={profiles} productionLines={production.draftLines} loading={profilesLoading} loadError={profilesError} onProfilesChange={setProfiles} onReload={loadProfiles} />}
+        {tab === "audit" && <AuditUnavailableState />}
       </main>
+    </div>
+  );
+}
+
+function buildWorkspaceIssues(lines: import("../types").VoiceLine[], remoteIssues: ValidationIssue[]) {
+  const localIssues: ValidationIssue[] = [];
+  lines.forEach((line, index) => {
+    if (!line.transcript.trim()) localIssues.push({ lineId: line.id, field: "transcript", severity: "error", message: `第 ${index + 1} 行缺少语音文本` });
+    if (!line.voice.trim()) localIssues.push({ lineId: line.id, field: "voice", severity: "error", message: `第 ${index + 1} 行缺少音色` });
+    if (line.transcript.length > 5000) localIssues.push({ lineId: line.id, field: "transcript", severity: "warning", message: `第 ${index + 1} 行超过 5000 字符` });
+  });
+  return [...localIssues, ...remoteIssues];
+}
+
+function AuditUnavailableState() {
+  return (
+    <div className="h-full border border-border-subtle bg-bg-surface flex flex-col items-center justify-center gap-3 text-center text-text-tertiary">
+      <ShieldAlert size={22} className="text-warning" />
+      <div className="text-sm font-semibold text-text-secondary">审计记录暂不可用</div>
+      <div className="max-w-md text-xs leading-5">当前前端未发现任务审计时间线 API；此处保持真实不可用空态，不渲染假审计日志。Agent run 历史可在右侧 Agent 自动化面板查看。</div>
     </div>
   );
 }

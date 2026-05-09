@@ -73,6 +73,7 @@ import documentsRoutes from "../src/routes/documents.js";
 import productionListRoutes from "../src/routes/production-list.js";
 import directorProfilesRoutes from "../src/routes/director-profiles.js";
 import agentButtonsRoutes from "../src/routes/agent-buttons.js";
+import { _setExecRunner, _resetExecRunner } from "../src/services/opencode-runner.js";
 import Database from "better-sqlite3";
 
 // ─── Test App ────────────────────────────────────────────────────────────────
@@ -101,11 +102,15 @@ let app: Hono;
 let testTaskId: string;
 
 beforeAll(() => {
+  _setExecRunner(async () => {
+    throw new Error("opencode unavailable in test environment");
+  });
   initSchema();
   app = createTestApp();
 });
 
 afterAll(() => {
+  _resetExecRunner();
   closeDb();
   try {
     if (testState.tmpDir) fs.rmSync(testState.tmpDir, { recursive: true, force: true });

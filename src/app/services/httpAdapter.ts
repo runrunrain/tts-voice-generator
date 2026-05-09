@@ -29,8 +29,20 @@ import type {
   AgentButton,
   AgentButtonListResult,
   AgentChatMessage,
+  AgentRunCancelResult,
+  AgentRunDetail,
+  AgentRunDiff,
+  AgentRunSummary,
   AgentRunStatus,
+  CandidateExtractionQualitySummary,
   DirectorProfile,
+  NormalizeRunProgress,
+  NormalizeRunStage,
+  NormalizeStartResponse,
+  NormalizeTimeoutBasis,
+  PromptOverride,
+  PromptProfile,
+  PromptSpeaker,
   OpencodeSession,
   ProductionList,
   ProductionListSpeaker,
@@ -42,6 +54,13 @@ import type {
   VoiceLine,
   GenerateFromListRequest,
   GenerateFromListResponse,
+  ProductionListDiff,
+  ProductionListExportFormat,
+  ProductionListExportResult,
+  ProductionListImportResult,
+  ProductionListQualityReport,
+  ProductionListRollbackResult,
+  ProductionListVersionEntry,
 } from "../types";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -108,6 +127,20 @@ function mapVoiceStatus(status: string): VoiceStatus {
     case "unknown": return "pending";
     default: return "pending";
   }
+}
+
+function mapHistorySource(source: string | null | undefined): HistorySource {
+  const normalized = (source ?? "").trim().toLowerCase();
+  if (normalized === "cli") return "cli";
+  if (normalized === "agent") return "agent";
+  if (normalized === "user") return "user";
+
+  // Backward-compatible mapping for legacy localized values that older
+  // adapters could still emit. Unknown values fall back to user rather than
+  // agent so CLI-originated records are never merged into the Agent bucket.
+  if (source === "Agent") return "agent";
+  if (source === "用户") return "user";
+  return "user";
 }
 
 // ─── Format Resolution ────────────────────────────────────────────────────────
@@ -420,7 +453,7 @@ export const httpAdapter: TtsServiceAdapter = {
     params.set("pageSize", filter.pageSize.toString());
     if (filter.voice) params.set("voice", filter.voice);
     if (filter.status) params.set("status", filter.status);
-    if (filter.source) params.set("source", filter.source === "用户" ? "user" : "agent");
+    if (filter.source) params.set("source", filter.source);
 
     const result = await apiFetch<{
       records: Array<{
@@ -458,7 +491,7 @@ export const httpAdapter: TtsServiceAdapter = {
         voice: r.voice,
         format: resolveHistoryFormat(r.assetFormat, r.format) as AudioFormat,
         date: r.createdAt ? new Date(r.createdAt).toLocaleString("zh-CN") : "",
-        source: (r.source === "用户" ? "用户" : "Agent") as HistorySource,
+        source: mapHistorySource(r.source),
         duration: r.durationMs != null ? `${(r.durationMs / 1000).toFixed(1)}s` : "0.0s",
         status: mapHistoryStatus(r.status),
         cost: r.cost || undefined,
@@ -956,19 +989,63 @@ function normalizeLineGenerationStatus(value: unknown): VoiceLine["generationSta
   return value === "ready" || value === "pending" || value === "running" || value === "succeeded" || value === "failed" || value === "needs_revision" ? value : "draft";
 }
 
+function mapPromptSpeaker(raw: unknown, index: number): PromptSpeaker {
+  const s = isRecord(raw) ? raw : {};
+  return {
+    id: asString(s.id, index === 0 ? "a" : `speaker-${index + 1}`),
+    label: asString(s.label, index === 0 ? "Speaker A" : `Speaker ${index + 1}`),
+    name: asString(s.name ?? s.label),
+    voice: asString(s.voice, "Zephyr"),
+    style: asString(s.style),
+  };
+}
+
+function mapPromptOverride(raw: unknown): PromptOverride | null {
+  if (!isRecord(raw)) return null;
+  const override: PromptOverride = {};
+  if (typeof raw.audioProfile === "string") override.audioProfile = raw.audioProfile;
+  if (typeof raw.scene === "string") override.scene = raw.scene;
+  if (typeof raw.directorNotes === "string") override.directorNotes = raw.directorNotes;
+  if (typeof raw.sampleContext === "string") override.sampleContext = raw.sampleContext;
+  if (Array.isArray(raw.speakers)) override.speakers = raw.speakers.map(mapPromptSpeaker);
+  return Object.keys(override).length > 0 ? override : null;
+}
+
+function parsePromptOverrideJson(raw: unknown): PromptOverride | null {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    return mapPromptOverride(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+function normalizePromptStructureStatus(value: unknown): ProductionList["promptStructureStatus"] | undefined {
+  return value === "complete" || value === "missing" || value === "incomplete" ? value : undefined;
+}
+
 function mapVoiceLine(raw: unknown): VoiceLine {
   const l = isRecord(raw) ? raw : {};
   const order = asNumber(l.sortOrder ?? l.order, 0);
+  const promptProfileId = asNullableString(l.promptProfileId ?? l.directorProfileId);
+  const directorProfileId = asNullableString(l.directorProfileId ?? l.promptProfileId);
   return {
     id: asString(l.id, `line-${order}`),
+    isLocalDraft: false,
     sortOrder: l.sortOrder !== undefined ? asNumber(l.sortOrder, order) : order + 1,
+    moduleName: asNullableString(l.moduleName) ?? "",
+    title: asNullableString(l.title) ?? "",
     transcript: asString(l.transcript ?? l.text),
     voice: asString(l.voice, "Zephyr"),
     model: asString(l.model, DEFAULT_TTS_MODEL),
     responseFormat: normalizeResponseFormat(l.responseFormat ?? l.format),
     notes: asString(l.notes ?? l.style, ""),
-    directorProfileId: asNullableString(l.directorProfileId),
+    directorProfileId,
     directorOverrideJson: asNullableString(l.directorOverrideJson),
+    promptProfileId,
+    speakerLabel: asNullableString(l.speakerLabel),
+    promptOverride: mapPromptOverride(l.promptOverride) ?? parsePromptOverrideJson(l.promptOverrideJson ?? l.directorOverrideJson),
+    promptOverrideJson: asNullableString(l.promptOverrideJson ?? l.directorOverrideJson),
     generationStatus: normalizeLineGenerationStatus(l.generationStatus),
     relatedJobId: asNullableString(l.relatedJobId),
     relatedAssetId: typeof l.relatedAssetId === "number" ? l.relatedAssetId : null,
@@ -984,10 +1061,17 @@ function mapVoiceLine(raw: unknown): VoiceLine {
 
 function toBackendVoiceLine(line: VoiceLine, index: number) {
   const raw = line as unknown as RawRecord;
+  const promptProfileId = line.promptProfileId ?? line.directorProfileId ?? null;
+  const directorProfileId = line.directorProfileId ?? line.promptProfileId ?? null;
+  const promptOverrideJson = line.promptOverrideJson ?? line.directorOverrideJson ?? null;
   return {
     id: line.id,
     order: index,
+    moduleName: line.moduleName ?? null,
+    title: line.title ?? null,
     speaker: asString(raw.speaker, "narrator"),
+    speakerLabel: line.speakerLabel ?? null,
+    transcript: line.transcript,
     text: line.transcript,
     voice: line.voice,
     style: asString(raw.style, line.notes ?? ""),
@@ -995,8 +1079,11 @@ function toBackendVoiceLine(line: VoiceLine, index: number) {
     status: asString(raw.status, "pending"),
     model: line.model || DEFAULT_TTS_MODEL,
     responseFormat: line.responseFormat || "wav",
-    directorProfileId: line.directorProfileId ?? null,
-    directorOverrideJson: line.directorOverrideJson ?? null,
+    directorProfileId,
+    promptProfileId,
+    directorOverrideJson: promptOverrideJson,
+    promptOverride: line.promptOverride ?? null,
+    promptOverrideJson,
     generationStatus: line.generationStatus ?? "draft",
     relatedJobId: line.relatedJobId ?? null,
     relatedAssetId: line.relatedAssetId ?? null,
@@ -1007,9 +1094,16 @@ function toBackendVoiceLine(line: VoiceLine, index: number) {
 
 function mapProductionList(raw: unknown): ProductionList {
   const pl = isRecord(raw) ? raw : {};
+  const directorProfiles = asArray(pl.directorProfiles).map(mapDirectorProfile);
+  const promptProfiles = asArray(pl.promptProfiles).length > 0
+    ? asArray(pl.promptProfiles).map(mapPromptProfile)
+    : directorProfiles.map((profile) => profile as PromptProfile);
+  const metadata = isRecord(pl.metadata) ? pl.metadata as Record<string, unknown> : {};
+  const promptStructureStatus = normalizePromptStructureStatus(pl.promptStructureStatus ?? metadata.promptStructureStatus);
   return {
     taskId: asString(pl.taskId),
     version: asNumber(pl.version, 0),
+    schemaVersion: asString(pl.schemaVersion ?? metadata.schemaVersion, undefined as unknown as string),
     updatedAt: asString(pl.updatedAt ?? pl.createdAt, undefined as unknown as string),
     lines: asArray(pl.lines).map(mapVoiceLine).sort((a, b) => a.sortOrder - b.sortOrder),
     speakers: asArray(pl.speakers).map((s): ProductionListSpeaker => {
@@ -1023,16 +1117,96 @@ function mapProductionList(raw: unknown): ProductionList {
       };
     }),
     directorProfileId: asNullableString(pl.directorProfileId),
-    metadata: isRecord(pl.metadata) ? pl.metadata as Record<string, unknown> : {},
+    promptProfiles,
+    directorProfiles: directorProfiles.length > 0 ? directorProfiles : promptProfiles,
+    promptStructureStatus,
+    metadata,
   };
 }
 
-function toBackendProductionPayload(expectedVersion: number, list: Pick<ProductionList, "lines"> & Partial<Record<"speakers" | "directorProfileId" | "metadata", unknown>>) {
+function mapProductionListVersion(raw: unknown): ProductionListVersionEntry {
+  const v = isRecord(raw) ? raw : {};
+  return {
+    version: asNumber(v.version, 0),
+    versionId: asString(v.versionId ?? v.id, ""),
+    lineCount: asNumber(v.lineCount, 0),
+    directorProfileId: asNullableString(v.directorProfileId),
+    createdAt: asString(v.createdAt, new Date().toISOString()),
+  };
+}
+
+function mapProductionListDiff(raw: unknown): ProductionListDiff {
+  const root = isRecord(raw) ? raw : {};
+  const diff = isRecord(root.diff) ? root.diff : root;
+  const summary = isRecord(diff.summary) ? diff.summary : {};
+  return {
+    fromVersion: asNumber(diff.fromVersion, 0),
+    toVersion: asNumber(diff.toVersion, 0),
+    summary: {
+      addedCount: asNumber(summary.addedCount, 0),
+      removedCount: asNumber(summary.removedCount, 0),
+      changedCount: asNumber(summary.changedCount, 0),
+      unchangedCount: asNumber(summary.unchangedCount, 0),
+      fromLineCount: asNumber(summary.fromLineCount, 0),
+      toLineCount: asNumber(summary.toLineCount, 0),
+    },
+    added: asArray(diff.added).filter((item): item is string => typeof item === "string"),
+    removed: asArray(diff.removed).filter((item): item is string => typeof item === "string"),
+    changed: asArray(diff.changed).map((item) => {
+      const change = isRecord(item) ? item : {};
+      return {
+        lineId: asString(change.lineId),
+        fields: asArray(change.fields).filter((field): field is string => typeof field === "string"),
+      };
+    }),
+  };
+}
+
+function mapProductionListQualityReport(raw: unknown): ProductionListQualityReport {
+  const root = isRecord(raw) ? raw : {};
+  const report = isRecord(root.qualityReport) ? root.qualityReport : root;
+  const metrics = isRecord(report.metrics) ? report.metrics : {};
+  return {
+    taskId: asString(report.taskId),
+    version: asNumber(report.version, 0),
+    totalLines: asNumber(report.totalLines, 0),
+    generatedAt: asString(report.generatedAt, new Date().toISOString()),
+    metrics: metrics as ProductionListQualityReport["metrics"],
+    issues: asArray(report.issues).map((item) => {
+      const issue = isRecord(item) ? item : {};
+      return {
+        severity: asString(issue.severity, "info"),
+        code: asString(issue.code, "QUALITY_ISSUE"),
+        message: asString(issue.message, "质量问题"),
+        lineId: asNullableString(issue.lineId) ?? undefined,
+      };
+    }),
+  };
+}
+
+function filenameFromDisposition(disposition: string | null, fallback: string): string {
+  if (!disposition) return fallback;
+  const quoted = disposition.match(/filename="([^"]+)"/i);
+  if (quoted?.[1]) return quoted[1];
+  const plain = disposition.match(/filename=([^;]+)/i);
+  return plain?.[1]?.trim() || fallback;
+}
+
+function toBackendProductionPayload(expectedVersion: number, list: Pick<ProductionList, "lines"> & Partial<Pick<ProductionList, "speakers" | "directorProfileId" | "metadata" | "promptProfiles" | "directorProfiles" | "schemaVersion" | "promptStructureStatus">>) {
+  const stripProfileSource = (profile: DirectorProfile | PromptProfile) => {
+    const { source, ...rest } = profile;
+    void source;
+    return rest;
+  };
   return {
     expectedVersion,
     lines: list.lines.map(toBackendVoiceLine),
     speakers: Array.isArray(list.speakers) ? list.speakers : [],
     directorProfileId: typeof list.directorProfileId === "string" ? list.directorProfileId : null,
+    ...(list.schemaVersion ? { schemaVersion: list.schemaVersion } : {}),
+    ...(Array.isArray(list.promptProfiles) ? { promptProfiles: list.promptProfiles.map(stripProfileSource) } : {}),
+    ...(Array.isArray(list.directorProfiles) ? { directorProfiles: list.directorProfiles.map(stripProfileSource) } : {}),
+    ...(list.promptStructureStatus ? { promptStructureStatus: list.promptStructureStatus } : {}),
     metadata: isRecord(list.metadata) ? list.metadata : {},
   };
 }
@@ -1055,9 +1229,11 @@ function mapValidationReport(raw: unknown): ProductionListValidationReport {
 function mapDirectorProfile(raw: unknown): DirectorProfile {
   const p = isRecord(raw) ? raw : {};
   const config = isRecord(p.config) ? p.config : {};
+  const source = p.source === "production-list" ? "production-list" : "global";
   return {
     id: asString(p.id, "unknown"),
     taskId: asString(p.taskId),
+    source,
     name: asString(p.name, "未命名导演配置"),
     audioProfile: asString(p.audioProfile ?? config.audioProfile),
     scene: asString(p.scene ?? config.scene),
@@ -1079,6 +1255,21 @@ function mapDirectorProfile(raw: unknown): DirectorProfile {
   };
 }
 
+function mapPromptProfile(raw: unknown): PromptProfile {
+  const p = isRecord(raw) ? raw : {};
+  const base = mapDirectorProfile(raw);
+  const description = asString(p.description, undefined as unknown as string);
+  const reusePolicy = p.reusePolicy === "one-line" || p.reusePolicy === "many-lines" ? p.reusePolicy : undefined;
+  const sourceDocumentIds = asArray(p.sourceDocumentIds).filter((item): item is string => typeof item === "string");
+  return {
+    ...base,
+    speakers: asArray(p.speakers ?? (isRecord(p.config) ? p.config.speakers : undefined)).map(mapPromptSpeaker),
+    ...(description !== undefined ? { description } : {}),
+    ...(reusePolicy ? { reusePolicy } : {}),
+    ...(sourceDocumentIds.length > 0 ? { sourceDocumentIds } : {}),
+  };
+}
+
 function toBackendDirectorProfilePayload(payload: Partial<DirectorProfile>) {
   const raw = payload as Partial<DirectorProfile> & { description?: string };
   return {
@@ -1097,14 +1288,51 @@ function toBackendDirectorProfilePayload(payload: Partial<DirectorProfile>) {
   };
 }
 
+const AGENT_BUTTON_LABELS_ZH: Record<string, string> = {
+  "complete-director-fields": "补全导演字段",
+  "fix-validation-errors": "修复校验问题",
+  shorten: "缩短",
+  expand: "扩写",
+  rewrite: "改写",
+  "style-formal": "正式风格",
+  "style-casual": "口语风格",
+  "style-dramatic": "戏剧化风格",
+};
+
+function displayAgentButtonLabel(key: string, rawLabel: string): string {
+  return AGENT_BUTTON_LABELS_ZH[key.trim().toLowerCase()] ?? rawLabel;
+}
+
+function productionListProfilesForTask(list: ProductionList, taskId: string): DirectorProfile[] {
+  const taskVersion = list.version > 0 ? list.version : 0;
+  return [...(list.promptProfiles ?? []), ...(list.directorProfiles ?? [])].map((profile) => ({
+    ...profile,
+    source: "production-list" as const,
+    taskId: profile.taskId || taskId,
+    version: profile.version > 0 ? profile.version : taskVersion,
+  }));
+}
+
+function mergeDirectorProfilesById(primary: DirectorProfile[], secondary: DirectorProfile[]): DirectorProfile[] {
+  const byId = new Map<string, DirectorProfile>();
+  [...primary, ...secondary].forEach((profile) => {
+    const id = profile.id.trim();
+    if (!id || byId.has(id)) return;
+    byId.set(id, profile);
+  });
+  return Array.from(byId.values());
+}
+
 function mapAgentButton(raw: unknown): AgentButton {
   const b = isRecord(raw) ? raw : {};
   const policy = isRecord(b.targetPolicy) ? b.targetPolicy : {};
-  const scope = policy.scope === "task" || policy.scope === "global" || policy.scope === "line" ? policy.scope : "line";
+  const scope = policy.scope === "task" || policy.scope === "global" || policy.scope === "line" || policy.scope === "list" ? policy.scope : "line";
   const runner = b.runner === "opencode" ? "opencode" as const : "fallback" as const;
+  const key = asString(b.key ?? b.buttonKey, "unknown");
+  const rawLabel = asString(b.label ?? b.name, asString(b.buttonKey, "Agent Button"));
   return {
-    key: asString(b.key ?? b.buttonKey, "unknown"),
-    label: asString(b.label ?? b.name, asString(b.buttonKey, "Agent Button")),
+    key,
+    label: displayAgentButtonLabel(key, rawLabel),
     description: asString(b.description),
     scope,
     available: true,
@@ -1146,6 +1374,223 @@ function mapOpencodeSession(raw: unknown): OpencodeSession {
     createdAt: asString(s.createdAt, new Date().toISOString()),
     updatedAt: asString(s.updatedAt ?? s.completedAt ?? s.createdAt, new Date().toISOString()),
     error: asNullableString(s.error ?? s.errorMessage),
+  };
+}
+
+function mapNormalizeStage(value: unknown): NormalizeRunStage {
+  switch (value) {
+    case "queued":
+    case "preprocessing":
+    case "opencode_running":
+    case "draft_detected":
+    case "validating":
+    case "committing":
+    case "completed":
+    case "failed":
+      return value;
+    default:
+      return "queued";
+  }
+}
+
+function mapNormalizeTimeoutBasis(value: unknown): NormalizeTimeoutBasis {
+  return isRecord(value) ? value as NormalizeTimeoutBasis : {};
+}
+
+function mapCandidateQualitySummary(value: unknown): CandidateExtractionQualitySummary | undefined {
+  if (!isRecord(value)) return undefined;
+  const skippedByReason = isRecord(value.skippedByReason)
+    ? Object.fromEntries(Object.entries(value.skippedByReason).map(([key, count]) => [key, asNumber(count, 0)]))
+    : undefined;
+  const examplesByReason = isRecord(value.examplesByReason) ? value.examplesByReason as Record<string, string[]> : undefined;
+  return {
+    inputLineCount: typeof value.inputLineCount === "number" ? value.inputLineCount : undefined,
+    candidateLineCount: typeof value.candidateLineCount === "number" ? value.candidateLineCount : undefined,
+    skippedByReason,
+    examplesByReason,
+  };
+}
+
+function mapNormalizeStartResponse(raw: unknown): NormalizeStartResponse {
+  const record = isRecord(raw) ? raw : {};
+  return {
+    ok: true,
+    status: "accepted",
+    requestId: asNullableString(record.requestId) ?? undefined,
+    runId: asString(record.runId),
+    progressUrl: asString(record.progressUrl),
+    stage: mapNormalizeStage(record.stage),
+    timeoutMs: asNumber(record.timeoutMs, asNumber(isRecord(record.timeoutBasis) ? record.timeoutBasis.timeoutMs : undefined, 0)),
+    timeoutBasis: mapNormalizeTimeoutBasis(record.timeoutBasis),
+  };
+}
+
+function mapNormalizeRunProgress(raw: unknown, taskId: string, runId: string): NormalizeRunProgress {
+  const record = isRecord(raw) ? raw : {};
+  const draft = isRecord(record.draft) ? record.draft : {};
+  const quality = isRecord(record.quality) ? record.quality : {};
+  const runner = isRecord(record.runner) ? record.runner : {};
+  const result = isRecord(record.result) ? record.result : null;
+  const error = isRecord(record.error) ? record.error : null;
+
+  return {
+    ok: true,
+    requestId: asNullableString(record.requestId) ?? undefined,
+    runId: asString(record.runId, runId),
+    taskId: asString(record.taskId, taskId),
+    stage: mapNormalizeStage(record.stage),
+    startedAt: asString(record.startedAt, new Date().toISOString()),
+    updatedAt: asString(record.updatedAt, new Date().toISOString()),
+    completedAt: asNullableString(record.completedAt) ?? undefined,
+    elapsedMs: asNumber(record.elapsedMs, 0),
+    timeoutMs: asNumber(record.timeoutMs, asNumber(isRecord(record.timeoutBasis) ? record.timeoutBasis.timeoutMs : undefined, 0)),
+    timeoutBasis: mapNormalizeTimeoutBasis(record.timeoutBasis),
+    candidateLineCount: asNumber(record.candidateLineCount, 0),
+    candidateQualitySummary: mapCandidateQualitySummary(record.candidateQualitySummary),
+    draft: {
+      exists: asBoolean(draft.exists, false),
+      parseable: asBoolean(draft.parseable, false),
+      sizeBytes: asNumber(draft.sizeBytes, 0),
+      updatedAt: asNullableString(draft.updatedAt) ?? undefined,
+    },
+    quality: {
+      checked: asBoolean(quality.checked, false),
+      passed: typeof quality.passed === "boolean" ? quality.passed : undefined,
+      issueCount: typeof quality.issueCount === "number" ? quality.issueCount : undefined,
+      blockingIssueCount: typeof quality.blockingIssueCount === "number" ? quality.blockingIssueCount : undefined,
+      warningIssueCount: typeof quality.warningIssueCount === "number" ? quality.warningIssueCount : undefined,
+      issuesPreview: asArray(quality.issuesPreview).map((item) => {
+        const issue = isRecord(item) ? item : {};
+        return {
+          code: asString(issue.code, "QUALITY_ISSUE"),
+          severity: asString(issue.severity, "warning"),
+          message: asString(issue.message, "质量检查问题"),
+          lineId: asNullableString(issue.lineId) ?? undefined,
+          lineIndex: typeof issue.lineIndex === "number" ? issue.lineIndex : undefined,
+          transcriptSample: asNullableString(issue.transcriptSample) ?? undefined,
+          expected: asNullableString(issue.expected) ?? undefined,
+          actual: asNullableString(issue.actual) ?? undefined,
+        };
+      }),
+    },
+    runner: {
+      status: runner.status === "running" || runner.status === "completed" || runner.status === "timeout" || runner.status === "failed" || runner.status === "not_started" ? runner.status : "not_started",
+    },
+    result: result ? {
+      versionId: asString(result.versionId),
+      lineCount: asNumber(result.lineCount, 0),
+    } : undefined,
+    error: error ? {
+      code: asString(error.code, "NORMALIZE_FAILED"),
+      message: asString(error.message, "Normalize 执行失败"),
+      httpStatus: typeof error.httpStatus === "number" ? error.httpStatus : undefined,
+      recoverability: asString(error.recoverability, "retryable"),
+    } : undefined,
+    message: asString(record.message, "Normalize 任务状态已更新"),
+  };
+}
+
+function mapCapabilityAvailability(raw: unknown, fallbackAvailable: boolean): AgentRunSummary["retry"] {
+  if (isRecord(raw)) {
+    const available = asBoolean(raw.available, fallbackAvailable);
+    if (available) return { available: true, reason: asNullableString(raw.reason), code: asNullableString(raw.code) };
+    return {
+      available: false,
+      code: asString(raw.code, "CAPABILITY_UNAVAILABLE"),
+      reason: asString(raw.reason ?? raw.message, "该能力当前不可用"),
+    };
+  }
+  return fallbackAvailable
+    ? { available: true }
+    : { available: false, code: "CAPABILITY_UNAVAILABLE", reason: "该能力当前不可用" };
+}
+
+function mapAgentRunSummary(raw: unknown, taskIdFallback = ""): AgentRunSummary {
+  const r = isRecord(raw) ? raw : {};
+  const error = isRecord(r.error) ? r.error : null;
+  const kind = r.kind === "normalize" || r.kind === "button" ? r.kind : (asString(r.runId ?? r.id).startsWith("normalize") ? "normalize" : "button");
+  const status = mapRunStatus(r.status);
+  const normalizedStatus: AgentRunStatus = status === "idle" ? "queued" : status;
+  const runId = asString(r.runId ?? r.id, "unknown");
+  const targetLineIds = asArray(r.targetLineIds ?? r.lineIds ?? r.targetLines)
+    .filter((item): item is string => typeof item === "string");
+  const lineId = asNullableString(r.lineId ?? r.targetLineId);
+  return {
+    runId,
+    taskId: asString(r.taskId, taskIdFallback),
+    kind,
+    buttonKey: asString(r.buttonKey, kind === "normalize" ? "normalize-requirements" : "unknown"),
+    title: asString(r.title ?? r.label, kind === "normalize" ? "Normalize Requirements" : asString(r.buttonKey, "Agent Run")),
+    status: normalizedStatus,
+    runner: r.runner === "opencode" ? "opencode" : "fallback",
+    targetLineIds: targetLineIds.length > 0 ? targetLineIds : lineId ? [lineId] : [],
+    beforeVersion: typeof r.beforeVersion === "number" ? r.beforeVersion : undefined,
+    afterVersion: typeof r.afterVersion === "number" ? r.afterVersion : undefined,
+    createdAt: asString(r.createdAt ?? r.startedAt, new Date().toISOString()),
+    completedAt: asNullableString(r.completedAt ?? r.updatedAt),
+    error: error ? { code: asNullableString(error.code) ?? undefined, message: asString(error.message, "运行失败") } : asNullableString(r.error) ? { message: asString(r.error) } : null,
+    retry: mapCapabilityAvailability(r.retry, normalizedStatus === "failed"),
+    diff: mapCapabilityAvailability(r.diff, false),
+    cancel: mapCapabilityAvailability(r.cancel, false),
+  };
+}
+
+function mapAgentRunDetail(raw: unknown, taskId: string, runId: string): AgentRunDetail {
+  const record = isRecord(raw) ? raw : {};
+  const detail = isRecord(record.run) ? record.run : record;
+  const summary = mapAgentRunSummary({ ...detail, runId: detail.runId ?? runId }, taskId);
+  return {
+    ...summary,
+    promptSummary: asNullableString(detail.promptSummary ?? detail.prompt) ?? undefined,
+    inputSnapshot: detail.inputSnapshot,
+    outputSnapshot: detail.outputSnapshot,
+    normalizeProgress: isRecord(detail.normalizeProgress) ? mapNormalizeRunProgress(detail.normalizeProgress, taskId, runId) : undefined,
+    artifactRefs: asArray(detail.artifactRefs).map((item) => {
+      const ref = isRecord(item) ? item : {};
+      return {
+        label: asString(ref.label, "artifact"),
+        path: asNullableString(ref.path) ?? undefined,
+        available: asBoolean(ref.available, Boolean(ref.path)),
+      };
+    }),
+  };
+}
+
+function mapAgentRunDiff(raw: unknown, runId: string): AgentRunDiff {
+  const record = isRecord(raw) ? raw : {};
+  const diff = isRecord(record.diff) ? record.diff : record;
+  const summary = isRecord(diff.summary) ? diff.summary : null;
+  return {
+    runId: asString(diff.runId, runId),
+    available: asBoolean(diff.available, false),
+    unavailableReason: asNullableString(diff.unavailableReason ?? diff.reason) ?? undefined,
+    beforeVersion: typeof diff.beforeVersion === "number" ? diff.beforeVersion : undefined,
+    afterVersion: typeof diff.afterVersion === "number" ? diff.afterVersion : undefined,
+    summary: summary ? {
+      addedCount: asNumber(summary.addedCount, 0),
+      removedCount: asNumber(summary.removedCount, 0),
+      changedCount: asNumber(summary.changedCount, 0),
+    } : undefined,
+    lineChanges: asArray(diff.lineChanges ?? diff.changed).map((item) => {
+      const change = isRecord(item) ? item : {};
+      return {
+        lineId: asString(change.lineId, "unknown"),
+        before: isRecord(change.before) ? change.before : undefined,
+        after: isRecord(change.after) ? change.after : undefined,
+        fields: asArray(change.fields).filter((field): field is string => typeof field === "string"),
+      };
+    }),
+  };
+}
+
+function mapAgentRunCancelResult(err: ApiError): AgentRunCancelResult {
+  const body = isRecord(err.body) ? err.body : {};
+  const error = isRecord(body.error) ? body.error : {};
+  const metadata = isRecord(error.metadata) ? error.metadata : {};
+  return {
+    available: asBoolean(metadata.available, false),
+    reason: asString(metadata.reason ?? error.message, err.message),
+    code: asString(error.code, "RUN_CANCEL_UNAVAILABLE"),
   };
 }
 
@@ -1243,7 +1688,7 @@ export const taskApi = {
     return mapProductionList(unwrapEnvelope(data, "productionList"));
   },
 
-  async saveProductionList(taskId: string, expectedVersion: number, list: Pick<ProductionList, "lines" | "speakers" | "directorProfileId" | "metadata">) {
+  async saveProductionList(taskId: string, expectedVersion: number, list: Pick<ProductionList, "lines"> & Partial<Pick<ProductionList, "speakers" | "directorProfileId" | "metadata" | "promptProfiles" | "directorProfiles" | "schemaVersion" | "promptStructureStatus">>) {
     const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/production-list`, {
       method: "PUT",
       body: JSON.stringify(toBackendProductionPayload(expectedVersion, list)),
@@ -1277,6 +1722,8 @@ export const taskApi = {
         ...(payload.expectedVersion !== undefined ? { expectedVersion: payload.expectedVersion } : {}),
         ...(payload.lineIds && payload.lineIds.length > 0 ? { lineIds: payload.lineIds } : {}),
         skipCompleted: payload.skipCompleted ?? true,
+        source: payload.source ?? "user",
+        confirm: payload.confirm ?? false,
       }),
     });
     const record = isRecord(data) ? data : {};
@@ -1303,10 +1750,107 @@ export const taskApi = {
     } as GenerateFromListResponse;
   },
 
-  async listDirectorProfiles(_taskId?: string) {
-    const data = await apiFetch<unknown>("/api/director-profiles");
-    const profiles = Array.isArray(data) ? data : asArray(isRecord(data) ? data.profiles : undefined);
-    return { profiles: profiles.map(mapDirectorProfile) };
+  async listProductionListVersions(taskId: string) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/production-list/versions`);
+    const versions = Array.isArray(data) ? data : asArray(isRecord(data) ? data.versions : undefined);
+    return { versions: versions.map(mapProductionListVersion).filter((version) => version.version > 0) };
+  },
+
+  async getProductionListDiff(taskId: string, fromVersion: number, toVersion: number) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/production-list/versions/${encodeURIComponent(String(fromVersion))}/diff/${encodeURIComponent(String(toVersion))}`);
+    return mapProductionListDiff(data);
+  },
+
+  async rollbackProductionList(taskId: string, expectedVersion: number, targetVersion: number, summary?: string) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/production-list/rollback`, {
+      method: "POST",
+      body: JSON.stringify({ expectedVersion, targetVersion, summary: summary ?? "frontend rollback" }),
+    });
+    const record = isRecord(data) ? data : {};
+    return {
+      productionList: mapProductionList(record.productionList),
+      rollback: {
+        fromVersion: asNumber(isRecord(record.rollback) ? record.rollback.fromVersion : undefined, expectedVersion),
+        targetVersion: asNumber(isRecord(record.rollback) ? record.rollback.targetVersion : undefined, targetVersion),
+        newVersion: asNumber(isRecord(record.rollback) ? record.rollback.newVersion : undefined, expectedVersion + 1),
+      },
+    } as ProductionListRollbackResult;
+  },
+
+  async exportProductionList(taskId: string, format: ProductionListExportFormat): Promise<ProductionListExportResult> {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/production-list/export?format=${encodeURIComponent(format)}`);
+    if (!response.ok) {
+      const body = await readResponseBody(response);
+      throw new ApiError(response.status, errorMessageFromBody(response.status, body), body);
+    }
+    const mimeType = response.headers.get("Content-Type") ?? (format === "csv" ? "text/csv" : format === "md" ? "text/markdown" : "application/json");
+    const rawText = await response.text();
+    let content = rawText;
+    if (format === "json") {
+      try {
+        content = JSON.stringify(JSON.parse(rawText), null, 2);
+      } catch { /* keep raw JSON text */ }
+    }
+    return {
+      format,
+      fileName: filenameFromDisposition(response.headers.get("Content-Disposition"), `production-list.${format === "md" ? "md" : format}`),
+      content,
+      mimeType,
+    };
+  },
+
+  async importProductionList(taskId: string, expectedVersion: number, format: "json" | "csv", data: unknown, summary?: string) {
+    const response = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/production-list/import`, {
+      method: "POST",
+      body: JSON.stringify({ expectedVersion, format, data, summary: summary ?? "frontend import" }),
+    });
+    const record = isRecord(response) ? response : {};
+    const importInfo = isRecord(record.import) ? record.import : {};
+    return {
+      productionList: mapProductionList(record.productionList),
+      import: {
+        importedLines: asNumber(importInfo.importedLines, 0),
+        skippedLines: asNumber(importInfo.skippedLines, 0),
+        errors: asArray(importInfo.errors).map((item) => {
+          const err = isRecord(item) ? item : {};
+          return { index: asNumber(err.index, 0), message: asString(err.message, "导入错误") };
+        }),
+        directorWarnings: asArray(importInfo.directorWarnings).filter((item): item is string => typeof item === "string"),
+      },
+    } as ProductionListImportResult;
+  },
+
+  async getProductionListQualityReport(taskId: string) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/production-list/quality-report`);
+    return mapProductionListQualityReport(data);
+  },
+
+  async listDirectorProfiles(taskId?: string) {
+    const globalProfilesRequest = apiFetch<unknown>("/api/director-profiles");
+
+    if (!taskId) {
+      const data = await globalProfilesRequest;
+      const profiles = Array.isArray(data) ? data : asArray(isRecord(data) ? data.profiles : undefined);
+      return { profiles: profiles.map(mapDirectorProfile) };
+    }
+
+    const [globalResult, productionListResult] = await Promise.allSettled([
+      globalProfilesRequest,
+      apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/production-list`),
+    ]);
+
+    const globalProfiles = globalResult.status === "fulfilled"
+      ? (Array.isArray(globalResult.value) ? globalResult.value : asArray(isRecord(globalResult.value) ? globalResult.value.profiles : undefined)).map(mapDirectorProfile)
+      : [];
+    const taskProfiles = productionListResult.status === "fulfilled"
+      ? productionListProfilesForTask(mapProductionList(unwrapEnvelope(productionListResult.value, "productionList")), taskId)
+      : [];
+
+    if (globalResult.status === "rejected" && productionListResult.status === "rejected") {
+      throw globalResult.reason instanceof Error ? globalResult.reason : productionListResult.reason;
+    }
+
+    return { profiles: mergeDirectorProfilesById(taskProfiles, globalProfiles) };
   },
 
   async createDirectorProfile(_taskId: string, payload: Partial<DirectorProfile>) {
@@ -1342,46 +1886,81 @@ export const taskApi = {
       method: "POST",
     });
     const record = isRecord(data) ? data : {};
+    const bundleMeta = isRecord(record.bundleMeta) ? record.bundleMeta : null;
+    const runnerStatus = isRecord(record.runnerStatus) ? record.runnerStatus : null;
+    const validationReport = isRecord(record.validationReport) ? record.validationReport : null;
     return {
       productionList: mapProductionList(record.productionList),
       runner: asString(record.runner, "fallback"),
       warnings: asArray(record.warnings).map((warning) => isRecord(warning) ? { code: asString(warning.code), message: asString(warning.message) } : { code: "WARNING", message: String(warning) }),
+      runId: asNullableString(record.runId),
+      attemptedRunner: asString(record.attemptedRunner, "none"),
+      fallbackUsed: asBoolean(record.fallbackUsed, false),
+      fallbackReason: asNullableString(record.fallbackReason),
+      bundleMethod: bundleMeta ? asString(bundleMeta.method, "legacy") : null,
+      runnerStatus: runnerStatus ? {
+        status: asString(runnerStatus.status, "idle"),
+        reasonCode: asString(runnerStatus.reasonCode),
+        elapsedMs: runnerStatus.elapsedMs as number | undefined,
+        fallbackUsed: asBoolean(runnerStatus.fallbackUsed, false),
+      } : null,
+      validationReport: validationReport ? {
+        valid: asBoolean(validationReport.valid, true),
+        errorCount: (validationReport.errorCount as number) ?? 0,
+        warningCount: (validationReport.warningCount as number) ?? 0,
+        issueCount: (validationReport.issueCount as number) ?? 0,
+      } : null,
     };
   },
 
-  async executeAgentButton(taskId: string, buttonKey: string, payload?: { lineId?: string; targetLineId?: string; expectedVersion?: number; parameters?: Record<string, unknown> }) {
-    const targetLineId = payload?.targetLineId ?? payload?.lineId;
-    if (!targetLineId) {
-      throw new Error("该 Agent 按钮需要指定生产行");
-    }
+  async startNormalizeRequirements(taskId: string): Promise<NormalizeStartResponse> {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/agent/normalize-requirements`, {
+      method: "POST",
+      body: JSON.stringify({ async: true, qualityPriority: true }),
+    });
+    return mapNormalizeStartResponse(data);
+  },
+
+  async getNormalizeProgress(taskId: string, runId: string): Promise<NormalizeRunProgress> {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/agent/normalize-runs/${encodeURIComponent(runId)}/progress`);
+    return mapNormalizeRunProgress(data, taskId, runId);
+  },
+
+  async executeAgentButton(taskId: string, buttonKey: string, payload?: { lineId?: string; targetLineId?: string; target?: { scope: "line"; lineId: string } | { scope: "selection"; lineIds: string[] } | { scope: "list" } | { scope: "task" }; expectedVersion?: number; automationSessionId?: string; parameters?: Record<string, unknown> }) {
+    const targetLineId = payload?.targetLineId ?? payload?.lineId ?? (payload?.target?.scope === "line" ? payload.target.lineId : undefined);
     const productionList = payload?.expectedVersion !== undefined ? null : await this.getProductionList(taskId);
     const expectedVersion = payload?.expectedVersion ?? productionList?.version ?? 0;
     if (expectedVersion <= 0) {
       throw new Error("当前任务还没有可执行的生产列表版本，请先保存或标准化需求");
     }
-    if (productionList && !productionList.lines.some((line) => line.id === targetLineId)) {
+    if (targetLineId && productionList && !productionList.lines.some((line) => line.id === targetLineId)) {
       throw new Error("目标生产行不在当前生产列表版本中，请刷新后重试");
     }
+    const target = payload?.target ?? (targetLineId ? { scope: "line" as const, lineId: targetLineId } : { scope: "list" as const });
     const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/agent/buttons/${encodeURIComponent(buttonKey)}/execute`, {
       method: "POST",
-      body: JSON.stringify({ targetLineId, expectedVersion, parameters: payload?.parameters ?? {} }),
+      body: JSON.stringify({ ...(targetLineId ? { targetLineId } : {}), target, expectedVersion, automationSessionId: payload?.automationSessionId, parameters: payload?.parameters ?? {} }),
     });
     const record = isRecord(data) ? data : {};
-    return mapOpencodeSession({
-      id: record.runId,
+    return mapAgentRunSummary({
+      ...record,
+      runId: record.runId,
       taskId,
-      kind: "automation",
-      status: "completed",
+      kind: "button",
+      status: record.status ?? "succeeded",
       buttonKey,
-      lineId: targetLineId,
+      targetLineIds: target.scope === "selection" ? target.lineIds : targetLineId ? [targetLineId] : [],
       title: `${buttonKey} · ${asString(record.runner, "fallback")}`,
+      runner: record.runner,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
   },
 
   async listOpencodeSessions(taskId?: string) {
-    const data = await apiFetch<unknown>("/api/opencode/sessions");
+    const query = new URLSearchParams({ sessionType: "automation" });
+    if (taskId) query.set("taskId", taskId);
+    const data = await apiFetch<unknown>(`/api/opencode/sessions?${query.toString()}`);
     const sessions = (Array.isArray(data) ? data : asArray(isRecord(data) ? data.sessions : undefined)).map(mapOpencodeSession);
     return { sessions: taskId ? sessions.filter((session) => session.taskId === taskId) : sessions };
   },
@@ -1389,9 +1968,36 @@ export const taskApi = {
   async createOpencodeSession(payload: Partial<OpencodeSession>) {
     const data = await apiFetch<unknown>("/api/opencode/sessions", {
       method: "POST",
-      body: JSON.stringify({ sessionType: payload.kind ?? "automation", metadata: { title: payload.title, buttonKey: payload.buttonKey, lineId: payload.lineId } }),
+      body: JSON.stringify({ sessionType: payload.kind ?? "automation", taskId: payload.taskId, metadata: { title: payload.title, buttonKey: payload.buttonKey, lineId: payload.lineId } }),
     });
     return mapOpencodeSession(unwrapEnvelope(data, "session"));
+  },
+
+  async listAgentRuns(taskId: string, limit = 20) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/agent/runs?limit=${encodeURIComponent(String(limit))}`);
+    const runs = Array.isArray(data) ? data : asArray(isRecord(data) ? data.runs : undefined);
+    return { runs: runs.map((run) => mapAgentRunSummary(run, taskId)) };
+  },
+
+  async getAgentRunDetail(taskId: string, runId: string) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/agent/runs/${encodeURIComponent(runId)}`);
+    return mapAgentRunDetail(data, taskId, runId);
+  },
+
+  async getAgentRunDiff(taskId: string, runId: string) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/agent/runs/${encodeURIComponent(runId)}/diff`);
+    return mapAgentRunDiff(data, runId);
+  },
+
+  async cancelAgentRun(taskId: string, runId: string) {
+    try {
+      const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/agent/runs/${encodeURIComponent(runId)}`, { method: "DELETE" });
+      const record = isRecord(data) ? data : {};
+      return { available: asBoolean(record.available ?? record.ok, true), reason: asString(record.reason, "运行已取消") } as AgentRunCancelResult;
+    } catch (err) {
+      if (err instanceof ApiError) return mapAgentRunCancelResult(err);
+      throw err;
+    }
   },
 
   async createChatSession(payload: { taskId?: string; pagePath?: string; title?: string }) {

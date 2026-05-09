@@ -21,7 +21,7 @@ import path from "node:path";
 
 // ─── Mock env with isolated temp DB ──────────────────────────────────────────
 
-const testState = vi.hoisted(() => ({ tmpDir: "", dbFilePath: "", mockApiKeyConfigured: false, mockGenerateSuccess: false }));
+const testState = vi.hoisted(() => ({ tmpDir: "", dbFilePath: "", mockApiKeyConfigured: false, mockGenerateSuccess: false, lastGenerateRequest: null as any }));
 
 vi.mock("../src/config/env.js", async () => {
   const nc = await import("node:crypto");
@@ -78,7 +78,8 @@ vi.mock("../src/services/key-resolver.js", () => ({
 }));
 
 vi.mock("../src/services/tts-generator.js", () => ({
-  generateSpeech: () => {
+  generateSpeech: (request: unknown) => {
+    testState.lastGenerateRequest = request;
     if (testState.mockGenerateSuccess) {
       return Promise.resolve({
         status: 200,
@@ -110,6 +111,12 @@ import { getDb } from "../src/db/index.js";
 import { voiceLine } from "../src/db/schema-extended.js";
 import { eq } from "drizzle-orm";
 import { writeArtifact, productionListArtifactName } from "../src/services/artifact-store.js";
+import {
+  _setSpawnRunner,
+  _resetSpawnRunner,
+  _setExecRunner,
+  _resetExecRunner,
+} from "../src/services/opencode-runner.js";
 
 // ─── Test App ────────────────────────────────────────────────────────────────
 
@@ -133,8 +140,23 @@ async function jsonRes(res: Response) {
 }
 
 /**
- * Helper: create task -> paste doc -> normalize -> get production list with lines
+ * Helper: create task -> direct PUT v2 production list -> get production list with lines.
+ * Agent normalize is strict v2 and no longer commits legacy fallback data when
+ * OpenCode is unavailable, so generation tests build their fixture directly.
  */
+function testPromptProfile() {
+  return {
+    id: "profile_test_narrator",
+    name: "Test narrator profile",
+    audioProfile: "Warm, clear narrator voice for backend tests.",
+    scene: "Controlled test scene for production-list generation.",
+    directorNotes: "Steady pace, clean pronunciation, neutral emotion.",
+    sampleContext: "Automated test generation should use full prompt structure.",
+    speakers: [{ id: "Alice", label: "Alice", voice: "Zephyr" }, { id: "Bob", label: "Bob", voice: "Puck" }],
+    reusePolicy: "many-lines",
+  };
+}
+
 async function setupProductionList(app: Hono, title = "Phase2 Gen Test"): Promise<{ taskId: string; lineIds: string[]; version: number }> {
   const createRes = await req(app, "/api/tasks", {
     method: "POST",
@@ -144,25 +166,45 @@ async function setupProductionList(app: Hono, title = "Phase2 Gen Test"): Promis
   const { task } = await jsonRes(createRes);
   const taskId = task.id;
 
-  await req(app, `/api/tasks/${taskId}/documents/paste`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fileName: "script.txt", content: "Alice: Hello world\nBob: Hi Alice, nice to meet you" }),
+  const profile = testPromptProfile();
+  const fixtureLines = [
+    {
+      id: "line_alice",
+      order: 0,
+      speaker: "Alice",
+      text: "Hello world",
+      voice: "Zephyr",
+    },
+    {
+      id: "line_bob",
+      order: 1,
+      speaker: "Bob",
+      text: "Hi Alice, nice to meet you",
+      voice: "Puck",
+    },
+  ];
+  const v2Body = await putProductionList(app, taskId, fixtureLines.map((line: any) => ({
+    ...line,
+    transcript: line.text,
+    promptProfileId: profile.id,
+    directorProfileId: profile.id,
+    speakerLabel: line.speaker,
+  })), 0, {
+    speakers: profile.speakers,
+    promptProfiles: [profile],
+    metadata: { schemaVersion: "tts.production-list.v2" },
   });
-
-  const normRes = await req(app, `/api/tasks/${taskId}/agent/normalize-requirements`, { method: "POST" });
-  const normBody = await jsonRes(normRes);
   return {
     taskId,
-    lineIds: normBody.productionList.lines.map((l: any) => l.id),
-    version: normBody.productionList.version,
+    lineIds: v2Body.productionList.lines.map((l: any) => l.id),
+    version: v2Body.productionList.version,
   };
 }
 
 /**
  * Helper: PUT a production list with specific line data
  */
-async function putProductionList(app: Hono, taskId: string, lines: any[], version: number) {
+async function putProductionList(app: Hono, taskId: string, lines: any[], version: number, extra?: Record<string, unknown>) {
   const res = await req(app, `/api/tasks/${taskId}/production-list`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -178,6 +220,7 @@ async function putProductionList(app: Hono, taskId: string, lines: any[], versio
         ...l,
       })),
       speakers: [],
+      ...extra,
     }),
   });
   return jsonRes(res);
@@ -198,10 +241,19 @@ describe("Phase 2: Generation Bridge", () => {
       }
     } catch { /* ignore */ }
     initSchema();
+    // Mock _spawnRunner to avoid real opencode run calls in tests
+    _setSpawnRunner(async () => {
+      throw new Error("opencode run not available in test environment");
+    });
+    _setExecRunner(async () => {
+      throw new Error("opencode unavailable in test environment");
+    });
     app = createApp();
   });
 
   afterAll(() => {
+    _resetSpawnRunner();
+    _resetExecRunner();
     closeDb();
     try {
       if (testState.tmpDir) {
@@ -641,6 +693,37 @@ describe("Phase 2: Generation Bridge", () => {
     });
   });
 
+  describe("Prompt-structured generation bridge", () => {
+    afterEach(() => {
+      testState.mockApiKeyConfigured = false;
+      testState.mockGenerateSuccess = false;
+      testState.lastGenerateRequest = null;
+    });
+
+    it("uses assembled prompt instead of bare transcript", async () => {
+      const { taskId, lineIds, version } = await setupProductionList(app);
+      testState.mockApiKeyConfigured = true;
+      testState.mockGenerateSuccess = true;
+
+      const res = await req(app, `/api/tasks/${taskId}/production-list/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lineIds: [lineIds[0]], expectedVersion: version }),
+      });
+      const body = await jsonRes(res);
+
+      expect(body.ok).toBe(true);
+      expect(body.generation.succeededCount).toBe(1);
+      expect(testState.lastGenerateRequest).toBeTruthy();
+      expect(testState.lastGenerateRequest.input).toContain("Audio Profile:");
+      expect(testState.lastGenerateRequest.input).toContain("Scene:");
+      expect(testState.lastGenerateRequest.input).toContain("Director's Notes:");
+      expect(testState.lastGenerateRequest.input).toContain("Sample Context:");
+      expect(testState.lastGenerateRequest.directorSnapshot.transcript).toBeTruthy();
+      expect(testState.lastGenerateRequest.input).toContain(testState.lastGenerateRequest.directorSnapshot.transcript);
+    });
+  });
+
   // ─── Structured Response Format ────────────────────────────────────────────
 
   describe("Response format", () => {
@@ -976,6 +1059,7 @@ describe("Phase 2: Generation Bridge", () => {
       // This simulates the scenario where artifact was written during failure
       // but not yet cleaned up
       const artifact = {
+        schemaVersion: "tts.production-list.v2",
         version: 1,
         versionId: failedLine?.versionId,
         lines: [{
@@ -983,12 +1067,16 @@ describe("Phase 2: Generation Bridge", () => {
           order: 0,
           speaker: "Alice",
           text: "Hello world",
+          transcript: "Hello world",
           voice: "Zephyr",
+          promptProfileId: "profile_test_narrator",
+          directorProfileId: "profile_test_narrator",
           generationStatus: "failed",
           generationErrorCode: "MISSING_API_KEY",
           generationErrorMessage: "Old stale error from artifact",
         }],
         speakers: [],
+        promptProfiles: [testPromptProfile()],
       };
       writeArtifact(taskId, productionListArtifactName(), artifact);
 

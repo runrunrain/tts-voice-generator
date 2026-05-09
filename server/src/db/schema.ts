@@ -67,7 +67,7 @@ export const generationJob = sqliteTable("generation_job", {
   errorCode: text("error_code"),
   errorMessage: text("error_message"),
   errorMetadata: text("error_metadata"), // JSON string
-  source: text("source").notNull().default("user"), // user | agent
+  source: text("source").notNull().default("user"), // user | agent | cli
   agentConversationId: text("agent_conversation_id"),
   agentActionLogId: integer("agent_action_log_id"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),

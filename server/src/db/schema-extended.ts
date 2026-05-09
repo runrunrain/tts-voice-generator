@@ -14,7 +14,7 @@
  * - operation_audit_log: audit trail for all operations
  */
 
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 // ─── Voice Task ────────────────────────────────────────────────────────────────
 
@@ -64,12 +64,17 @@ export const productionListVersion = sqliteTable("production_list_version", {
   metadataJson: text("metadata_json").notNull().default("{}"), // JSON
   lineCount: integer("line_count").notNull().default(0),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
-});
+}, (table) => ({
+  // R-M2: Unique constraint prevents two concurrent normalize runs from creating
+  // the same (taskId, version) pair. DB-level protection supplements application check.
+  taskVersionUnique: uniqueIndex("production_list_version_task_id_version_unique").on(table.taskId, table.version),
+}));
 
 // ─── Voice Line (stored in artifact, indexed for queries) ──────────────────────
 
 export const voiceLine = sqliteTable("voice_line", {
   id: text("id").primaryKey(),
+  lineId: text("line_id"),
   taskId: text("task_id").notNull().references(() => voiceTask.id, { onDelete: "cascade" }),
   versionId: text("version_id").notNull().references(() => productionListVersion.id, { onDelete: "cascade" }),
   order: integer("order").notNull(),

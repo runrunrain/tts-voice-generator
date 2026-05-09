@@ -107,7 +107,7 @@ app.get("/api/history", (c) => {
       voice: job.voice,
       format: job.responseFormat,
       status: job.status,
-      source: job.source === "user" ? "用户" : "Agent",
+      source: job.source === "user" ? "用户" : job.source === "cli" ? "CLI" : "Agent",
       charCount: job.inputCharCount,
       cost: job.estimatedCost,
       createdAt: job.createdAt ? new Date(job.createdAt).toISOString() : null,

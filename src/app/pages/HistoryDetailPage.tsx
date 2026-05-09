@@ -51,6 +51,30 @@ interface JobDetail {
   } | null;
 }
 
+type HistorySource = "user" | "agent" | "cli";
+
+const HISTORY_SOURCE_LABEL: Record<HistorySource, string> = {
+  user: "用户",
+  agent: "Agent",
+  cli: "CLI",
+};
+
+const HISTORY_SOURCE_BADGE_CLASS: Record<HistorySource, string> = {
+  user: "bg-bg-surface text-text-secondary border-border",
+  agent: "bg-accent-muted text-accent border-accent/20",
+  cli: "bg-warning-muted text-warning border-warning/20",
+};
+
+function mapHistorySource(source: string | null | undefined): HistorySource {
+  const normalized = (source ?? "").trim().toLowerCase();
+  if (normalized === "cli") return "cli";
+  if (normalized === "agent") return "agent";
+  if (normalized === "user") return "user";
+  if (source === "Agent") return "agent";
+  if (source === "用户") return "user";
+  return "user";
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
@@ -191,6 +215,7 @@ export function HistoryDetailPage() {
   const job = detail.job;
   const audio = detail.audio;
   const isSucceeded = job.status === "succeeded";
+  const source = mapHistorySource(job.source);
 
   return (
     <div className="flex flex-col h-full bg-bg-base overflow-y-auto">
@@ -218,8 +243,9 @@ export function HistoryDetailPage() {
               创建: {job.createdAt ? new Date(job.createdAt).toLocaleString("zh-CN") : "--"}
             </span>
           </div>
-          <div className="text-sm text-text-secondary">
-            来源: {job.source === "user" ? "用户" : "Agent"}
+          <div className="text-sm text-text-secondary flex items-center gap-2">
+            <span>来源:</span>
+            <span className={`px-1.5 py-0.5 rounded border text-[10px] font-medium ${HISTORY_SOURCE_BADGE_CLASS[source]}`}>{HISTORY_SOURCE_LABEL[source]}</span>
             {audio?.duration ? ` | 耗时: ${audio.duration}` : ""}
             {job.completedAt ? ` | 完成: ${new Date(job.completedAt).toLocaleString("zh-CN")}` : ""}
           </div>
@@ -377,7 +403,7 @@ export function HistoryDetailPage() {
               <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-3 text-sm">
                 <div className="flex justify-between">
                   <span className="text-text-tertiary">来源</span>
-                  <span className="text-text-primary">{job.source === "user" ? "用户" : "Agent"}</span>
+                  <span className={`px-1.5 py-0.5 rounded border text-[10px] font-medium ${HISTORY_SOURCE_BADGE_CLASS[source]}`}>{HISTORY_SOURCE_LABEL[source]}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-text-tertiary">状态</span>

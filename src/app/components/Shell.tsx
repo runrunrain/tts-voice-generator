@@ -5,6 +5,7 @@ import { BottomBar } from "./BottomBar";
 import { RightPanel } from "./RightPanel";
 import { GlobalAgentDock } from "./GlobalAgentDock";
 import { useCallback, useEffect, useState } from "react";
+import { TaskWorkspaceUiProvider } from "../context/TaskWorkspaceUiContext";
 
 export function Shell() {
   const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
@@ -29,22 +30,19 @@ export function Shell() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [toggleAgentDock]);
 
-  // Certain routes hide the right panel completely
-  const hideRightPanelRoutes = ["/history/:jobId", "/settings", "/tasks"];
-  const isRightPanelHidden = hideRightPanelRoutes.some(route => {
-    if (route.includes(":jobId")) {
-      return location.pathname.startsWith("/history/") && location.pathname.split("/").length > 2;
-    }
-    return route === "/tasks" ? location.pathname.startsWith("/tasks") : location.pathname === route;
-  });
+  // Certain routes hide the right panel completely. /tasks is exact-only so
+  // /tasks/:taskId can show the task-scoped Agent inspector in the Shell panel.
+  const isHistoryDetail = location.pathname.startsWith("/history/") && location.pathname.split("/").length > 2;
+  const isRightPanelHidden = location.pathname === "/tasks" || location.pathname === "/settings" || isHistoryDetail;
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-bg-base text-text-primary relative">
+      <TaskWorkspaceUiProvider>
       <div 
         className="h-full w-full overflow-hidden"
         style={{
           display: "grid",
-          gridTemplateColumns: `72px 1fr ${isRightPanelHidden ? '0px' : isRightPanelOpen ? '384px' : '0px'}`,
+          gridTemplateColumns: `72px minmax(0, 1fr) ${isRightPanelHidden ? '0px' : isRightPanelOpen ? 'clamp(320px, 20vw, 384px)' : '0px'}`,
           gridTemplateRows: "48px 1fr 28px",
         }}
       >
@@ -63,7 +61,7 @@ export function Shell() {
       {!isRightPanelHidden && (
         <div 
           className="col-start-3 col-end-4 row-start-2 row-end-3 bg-bg-elevated border-l border-border-subtle flex flex-col relative"
-          style={{ width: isRightPanelOpen ? 384 : 0, transition: "width 400ms cubic-bezier(0.4, 0, 0.2, 1)" }}
+          style={{ width: isRightPanelOpen ? "clamp(320px, 20vw, 384px)" : 0, transition: "width 400ms cubic-bezier(0.4, 0, 0.2, 1)" }}
         >
           {/* Splitter */}
           <div 
@@ -81,6 +79,7 @@ export function Shell() {
       </div>
 
       </div>
+      </TaskWorkspaceUiProvider>
 
       <GlobalAgentDock isOpen={isAgentDockOpen} onOpenChange={setIsAgentDockOpen} />
     </div>

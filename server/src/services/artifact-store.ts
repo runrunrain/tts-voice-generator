@@ -36,12 +36,28 @@ function validateTaskId(taskId: string): void {
 }
 
 function validateArtifactName(name: string): void {
-  if (!ALLOWED_ARTIFACT_NAMES.has(name) && !name.startsWith("document-") && !name.startsWith("button-run-")) {
+  if (!ALLOWED_ARTIFACT_NAMES.has(name) &&
+      !name.startsWith("document-") &&
+      !name.startsWith("button-run-") &&
+      !name.startsWith("production-list.v") &&
+      !isRunArtifactPath(name)) {
     throw new Error(`Artifact name not in allowlist: ${name}`);
   }
-  if (name.includes("..") || name.includes("/") || name.includes("\\")) {
+  if (name.includes("..") || name.includes("\\") || name.includes("/..") ||
+      (name.includes("/") && !isRunArtifactPath(name))) {
     throw new Error(`Artifact name contains invalid characters: ${name}`);
   }
+}
+
+/**
+ * Check if a path is a valid run-scoped artifact path.
+ * Format: agent-runs/normalize-{uuid}/{fixed-name}.json
+ */
+function isRunArtifactPath(name: string): boolean {
+  // Match: agent-runs/normalize-{uuid}/known-artifact.json
+  const runArtifactPattern = /^agent-runs\/normalize-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/(normalize-request|production-list\.schema|candidate-lines|run-progress|production-list\.draft|instruction|validation-report|commit-result)\.json$/;
+  const runArtifactMdPattern = /^agent-runs\/normalize-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/instruction\.md$/;
+  return runArtifactPattern.test(name) || runArtifactMdPattern.test(name);
 }
 
 function sanitizeFileName(name: string): string {
@@ -210,4 +226,81 @@ export function buttonRunArtifactName(runId: string): string {
  */
 export function productionListArtifactName(): string {
   return "production-list.json";
+}
+
+/**
+ * Get a versioned production list artifact name.
+ * Format: production-list.v{n}.json
+ */
+export function productionListVersionArtifactName(version: number): string {
+  return `production-list.v${version}.json`;
+}
+
+/**
+ * Read raw text content of an artifact.
+ * Returns null if the artifact does not exist.
+ */
+export function readArtifactRaw(taskId: string, artifactName: string): string | null {
+  validateTaskId(taskId);
+  if (artifactName.includes("..") || artifactName.includes("/") && !isRunArtifactPath(artifactName) && !artifactName.startsWith("agent-runs/")) {
+    return null;
+  }
+  const taskDir = getTaskDir(taskId);
+  const filePath = path.join(taskDir, artifactName);
+
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+
+  return fs.readFileSync(filePath, "utf-8");
+}
+
+/**
+ * Write an artifact to a run-scoped path.
+ * The path must be in the form: agent-runs/normalize-{uuid}/name.json
+ * Returns metadata including SHA-256 hash.
+ */
+export function writeRunArtifact(
+  taskId: string,
+  relativePath: string,
+  data: unknown,
+): ArtifactMeta {
+  validateTaskId(taskId);
+  if (!isRunArtifactPath(relativePath) && !isRunArtifactMdPath(relativePath)) {
+    throw new Error(`Run artifact path not in allowlist: ${relativePath}`);
+  }
+  const taskDir = getTaskDir(taskId);
+  const filePath = path.join(taskDir, relativePath);
+  const dir = path.dirname(filePath);
+  ensureDir(dir);
+
+  const content = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  const buffer = Buffer.from(content, "utf-8");
+  const sha256 = crypto.createHash("sha256").update(buffer).digest("hex");
+
+  const tempPath = filePath + TEMP_SUFFIX;
+
+  try {
+    fs.writeFileSync(tempPath, buffer, "utf-8");
+    fs.renameSync(tempPath, filePath);
+  } catch (err) {
+    try {
+      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    } catch {
+      // best effort cleanup
+    }
+    throw err;
+  }
+
+  return {
+    path: filePath.replace(/\\/g, "/"),
+    sha256,
+    sizeBytes: buffer.length,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function isRunArtifactMdPath(name: string): boolean {
+  const pattern = /^agent-runs\/normalize-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/instruction\.md$/;
+  return pattern.test(name);
 }

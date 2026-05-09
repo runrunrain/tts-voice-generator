@@ -223,6 +223,7 @@ export function initSchema() {
 
     CREATE TABLE IF NOT EXISTS voice_line (
       id TEXT PRIMARY KEY,
+      line_id TEXT,
       task_id TEXT NOT NULL REFERENCES voice_task(id) ON DELETE CASCADE,
       version_id TEXT NOT NULL REFERENCES production_list_version(id) ON DELETE CASCADE,
       "order" INTEGER NOT NULL,
@@ -314,8 +315,17 @@ export function initSchema() {
   // Document version conflict protection migration (must be after table creation)
   addColumnIfMissing(rawDb, "requirement_document", "version", "INTEGER NOT NULL DEFAULT 1");
 
+  // R-M2: Unique index on (task_id, version) to prevent concurrent normalize runs
+  // from creating duplicate versions. This is the DB-level backstop for the
+  // application-level version check inside the DB transaction.
+  rawDb.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS production_list_version_task_id_version_unique
+    ON production_list_version(task_id, version)
+  `);
+
   // Voice line director binding + generation tracking (P2-phase1 schema extension)
   // All new columns allow NULL or have safe defaults for backward compatibility.
+  addColumnIfMissing(rawDb, "voice_line", "line_id", "TEXT");
   addColumnIfMissing(rawDb, "voice_line", "director_profile_id", "TEXT");
   addColumnIfMissing(rawDb, "voice_line", "director_override_json", "TEXT");
   addColumnIfMissing(rawDb, "voice_line", "generation_status", "TEXT NOT NULL DEFAULT 'draft'");

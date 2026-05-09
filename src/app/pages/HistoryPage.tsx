@@ -4,6 +4,18 @@ import { Play, Square, Download, Copy, ChevronRight, Search, Loader2, AlertCircl
 import { useAppState } from "../state/AppContext";
 import type { HistoryStatus, HistorySource } from "../types";
 
+const HISTORY_SOURCE_LABEL: Record<HistorySource, string> = {
+  user: "用户",
+  agent: "Agent",
+  cli: "CLI",
+};
+
+const HISTORY_SOURCE_BADGE_CLASS: Record<HistorySource, string> = {
+  user: "bg-bg-surface text-text-secondary border-border",
+  agent: "bg-accent-muted text-accent border-accent/20",
+  cli: "bg-warning-muted text-warning border-warning/20",
+};
+
 export function HistoryPage() {
   const {
     historyRecords,
@@ -94,7 +106,7 @@ export function HistoryPage() {
   if (historyFilter.voice) activeFilters.push(historyFilter.voice);
   if (historyFilter.status)
     activeFilters.push(historyFilter.status === "success" ? "成功" : "错误");
-  if (historyFilter.source) activeFilters.push(historyFilter.source);
+  if (historyFilter.source) activeFilters.push(HISTORY_SOURCE_LABEL[historyFilter.source]);
 
   const clearFilters = useCallback(() => {
     setHistoryFilter({ voice: undefined, status: undefined, source: undefined, page: 1 });
@@ -157,8 +169,9 @@ export function HistoryPage() {
             }}
           >
             <option value="">全部来源</option>
-            <option value="用户">用户</option>
-            <option value="Agent">Agent</option>
+            <option value="user">用户</option>
+            <option value="agent">Agent</option>
+            <option value="cli">CLI</option>
           </select>
           {activeFilters.length > 0 && (
             <button
@@ -181,7 +194,7 @@ export function HistoryPage() {
                   onClick={() => {
                     if (f === historyFilter.voice) setHistoryFilter({ voice: undefined, page: 1 });
                     else if (f === "成功" || f === "错误") setHistoryFilter({ status: undefined, page: 1 });
-                    else if (f === historyFilter.source) setHistoryFilter({ source: undefined, page: 1 });
+                    else if (historyFilter.source && f === HISTORY_SOURCE_LABEL[historyFilter.source]) setHistoryFilter({ source: undefined, page: 1 });
                   }}
                 >
                   x
@@ -270,7 +283,7 @@ export function HistoryPage() {
                   <span className="w-px h-2.5 bg-border-subtle" />
                   <span>{r.date}</span>
                   <span className="w-px h-2.5 bg-border-subtle" />
-                  <span>{r.source}</span>
+                  <span className={`px-1.5 py-0.5 rounded border text-[10px] font-medium ${HISTORY_SOURCE_BADGE_CLASS[r.source]}`}>{HISTORY_SOURCE_LABEL[r.source]}</span>
                   {r.status === "success" && r.durationMs != null && (
                     <>
                       <span className="w-px h-2.5 bg-border-subtle" />

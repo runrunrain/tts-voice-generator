@@ -2,7 +2,7 @@
  * OpenCode Runner - CLI availability detection, execution, and fallback.
  *
  * Responsibilities:
- * - Detect if OpenCode CLI is available
+ * - Detect if OpenCode CLI is available (binary + credentials)
  * - Execute OpenCode commands with proper error handling
  * - Provide deterministic fallback for requirement normalization
  * - Sanitize errors (no token/key leaks)
@@ -12,8 +12,11 @@
  * All results are tagged with runner="opencode" or runner="fallback".
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import crypto from "node:crypto";
 import type { VoiceLine } from "../domain/validators.js";
 
@@ -29,12 +32,219 @@ export interface FallbackSpeaker {
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Internal subprocess runner for detection commands (--version, providers list).
+ * Uses execFile which is fine for short-lived commands that don't read stdin.
+ * Exposed for test mocking via _setExecRunner / _resetExecRunner.
+ */
+let _execRunner: (file: string, args: string[], options: Record<string, unknown>) => Promise<{ stdout: string; stderr: string }> =
+  execFileAsync as unknown as (file: string, args: string[], options: Record<string, unknown>) => Promise<{ stdout: string; stderr: string }>;
+
+/**
+ * Replace the detection subprocess runner (for testing only).
+ */
+export function _setExecRunner(runner: typeof _execRunner): void {
+  _execRunner = runner;
+  cachedAvailability = null;
+  lastCheckTime = 0;
+}
+
+/**
+ * Reset the detection subprocess runner to the real implementation.
+ */
+export function _resetExecRunner(): void {
+  _execRunner = execFileAsync as unknown as typeof _execRunner;
+  cachedAvailability = null;
+  lastCheckTime = 0;
+}
+
+// ─── Spawn Runner for `opencode run` (stdin-safe) ─────────────────────────────
+
+/**
+ * Spawn-based runner for `opencode run`. Uses spawn instead of execFile because
+ * `opencode run` enters interactive mode when stdin is not closed, causing the
+ * process to hang indefinitely.
+ *
+ * The spawn approach:
+ * 1. Opens stdin as a pipe (not inherited)
+ * 2. Immediately closes stdin via child.stdin.end()
+ * 3. Collects stdout/stderr into buffers
+ * 4. Enforces output size limits while allowing long-running OpenCode sessions
+ */
+function spawnOpenCodeRun(
+  args: string[],
+  options: {
+    timeout: number;
+    maxOutputBytes: number;
+    env: Record<string, string | undefined>;
+    draftPath?: string;
+    draftReadyPollIntervalMs?: number;
+  },
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("opencode", args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: options.env,
+      windowsHide: true,
+    });
+
+    // Immediately close stdin to prevent opencode from entering interactive mode.
+    // This is the critical fix: without stdin.end(), opencode run waits for
+    // interactive input and never completes.
+    child.stdin!.end();
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let earlyDraftReady = false;
+    let outputBytes = 0;
+    let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const cleanupTimers = () => {
+      if (draftReadyTimer) clearInterval(draftReadyTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+    };
+
+    const isDraftReady = (): boolean => {
+      const draftPath = options.draftPath;
+      if (!draftPath || !existsSync(draftPath)) return false;
+      try {
+        const content = readFileSync(draftPath, "utf8").trim();
+        if (!content) return false;
+        const parsed = JSON.parse(content);
+        return typeof parsed === "object" && parsed !== null;
+      } catch {
+        return false;
+      }
+    };
+
+    const resolveAfterDraftReady = () => {
+      if (settled) return;
+      settled = true;
+      earlyDraftReady = true;
+      if (draftReadyTimer) clearInterval(draftReadyTimer);
+      stderr += `${stderr ? "\n" : ""}OPENCODE_DRAFT_READY: parseable JSON draft detected at ${options.draftPath}; terminated opencode run early.`;
+      child.kill("SIGTERM");
+      forceKillTimer = setTimeout(() => {
+        child.kill("SIGKILL");
+      }, 1500);
+    };
+
+    const draftReadyTimer = options.draftPath
+      ? setInterval(() => {
+          if (isDraftReady()) resolveAfterDraftReady();
+        }, Math.max(100, options.draftReadyPollIntervalMs ?? 1000))
+      : null;
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (settled && !earlyDraftReady) return;
+      outputBytes += chunk.length;
+      if (outputBytes > options.maxOutputBytes) {
+        if (settled) return;
+        settled = true;
+        child.kill("SIGKILL");
+        cleanupTimers();
+        reject(new Error(`opencode run output exceeded ${options.maxOutputBytes} bytes`));
+        return;
+      }
+      stdout += chunk.toString("utf8");
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (settled && !earlyDraftReady) return;
+      stderr += chunk.toString("utf8");
+    });
+
+    child.on("close", (code: number | null) => {
+      cleanupTimers();
+      if (earlyDraftReady) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      if (settled) return; // Already rejected via timeout or output limit
+      settled = true;
+      if (code !== 0) {
+        reject(new Error(`opencode run exited with code ${code}: ${sanitizeError(stderr.slice(0, 200))}`));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+
+    child.on("error", (err: Error) => {
+      cleanupTimers();
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+  });
+}
+
+/** Type signature for the spawn runner (matches execRunner for easy mocking) */
+type SpawnRunner = (file: string, args: string[], options: Record<string, unknown>) => Promise<{ stdout: string; stderr: string }>;
+
+/**
+ * Spawn-based runner for `opencode run` commands.
+ * Exposed for test mocking via _setSpawnRunner / _resetSpawnRunner.
+ */
+let _spawnRunner: SpawnRunner = async (file, args, options) => {
+  if (file !== "opencode") {
+    throw new Error(`spawnRunner: unexpected command '${file}', expected 'opencode'`);
+  }
+  return spawnOpenCodeRun(args, {
+    timeout: typeof options.timeout === "number" ? options.timeout : OPENCODE_RUN_TIMEOUT_MS,
+    maxOutputBytes: typeof options.maxBuffer === "number" ? options.maxBuffer : OPENCODE_MAX_OUTPUT_BYTES,
+    env: (options.env as Record<string, string | undefined>) || process.env,
+    draftPath: typeof options.draftPath === "string" ? options.draftPath : undefined,
+    draftReadyPollIntervalMs: typeof options.draftReadyPollIntervalMs === "number" ? options.draftReadyPollIntervalMs : undefined,
+  });
+};
+
+/**
+ * Replace the spawn runner (for testing only).
+ */
+export function _setSpawnRunner(runner: SpawnRunner): void {
+  _spawnRunner = runner;
+}
+
+/**
+ * Reset the spawn runner to the real implementation.
+ */
+export function _resetSpawnRunner(): void {
+  _spawnRunner = async (file, args, options) => {
+    if (file !== "opencode") {
+      throw new Error(`spawnRunner: unexpected command '${file}', expected 'opencode'`);
+    }
+    return spawnOpenCodeRun(args, {
+      timeout: typeof options.timeout === "number" ? options.timeout : OPENCODE_RUN_TIMEOUT_MS,
+      maxOutputBytes: typeof options.maxBuffer === "number" ? options.maxBuffer : OPENCODE_MAX_OUTPUT_BYTES,
+      env: (options.env as Record<string, string | undefined>) || process.env,
+      draftPath: typeof options.draftPath === "string" ? options.draftPath : undefined,
+      draftReadyPollIntervalMs: typeof options.draftReadyPollIntervalMs === "number" ? options.draftReadyPollIntervalMs : undefined,
+    });
+  };
+}
+
 // ─── Types ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Non-sensitive metadata about OpenCode provider configuration.
+ * Only contains boolean/numeric facts, never key values.
+ */
+export interface ProviderConfigMetadata {
+  /** Whether at least one provider has an apiKey configured */
+  hasConfig: boolean;
+  /** Number of providers with apiKey present (non-empty) */
+  providerCount: number;
+  /** Total number of model definitions across all providers */
+  modelCount: number;
+}
 
 export interface OpenCodeAvailability {
   available: boolean;
   version: string | null;
   error: string | null;
+  /** Non-sensitive metadata about detected provider configuration */
+  providerMetadata?: ProviderConfigMetadata;
 }
 
 export interface OpenCodeRunResult {
@@ -55,14 +265,228 @@ export interface NormalizeRequirementsInput {
   directorProfileId?: string | null;
 }
 
+export interface CandidateLine {
+  id: string;
+  order: number;
+  speaker: string;
+  speakerLabel: string;
+  transcript: string;
+  voice: string;
+}
+
+export interface CandidateLineExtractionOutput {
+  candidateLines: CandidateLine[];
+  speakers: FallbackSpeaker[];
+  warnings: Array<{ code: string; message: string }>;
+  parseStats: ParseStats;
+  qualitySummary: CandidateExtractionQualitySummary;
+}
+
+export type CandidateFilterReason =
+  | "empty"
+  | "syntax_only"
+  | "table_separator"
+  | "metadata_source"
+  | "metadata_title"
+  | "metadata_scrape_time"
+  | "section_marker"
+  | "label_only"
+  | "label_prefix"
+  | "url_only"
+  | "non_speech_description";
+
+export interface CandidateExtractionQualitySummary {
+  inputLineCount: number;
+  candidateLineCount: number;
+  skippedByReason: Record<CandidateFilterReason, number>;
+  examplesByReason: Partial<Record<CandidateFilterReason, string[]>>;
+}
+
+export interface RunnerStatus {
+  status: "succeeded" | "degraded" | "failed" | "cancelled";
+  reasonCode: "opencode_success" | "opencode_timeout" | "opencode_parse_failed" | "opencode_unavailable_or_failed" | "fallback_success";
+  elapsedMs: number;
+  timeoutMs: number;
+  fallbackUsed: boolean;
+}
+
+export interface ParseStats {
+  rawLines: number;
+  tableBlocks: number;
+  tableRowsParsed: number;
+  tableSeparatorRowsSkipped: number;
+  syntaxOnlyRowsSkipped: number;
+  metadataRowsSkipped: number;
+  voiceLinesCreated: number;
+}
+
 export interface NormalizeRequirementsOutput {
   runner: "opencode" | "fallback";
+  attemptedRunner: "opencode" | "none";
   productionList: {
     lines: VoiceLine[];
     speakers: FallbackSpeaker[];
     metadata: Record<string, unknown>;
   };
   warnings: Array<{ code: string; message: string }>;
+  runnerStatus?: RunnerStatus;
+  parseStats?: ParseStats;
+}
+
+// ─── Timeout Configuration ─────────────────────────────────────────────────────
+
+/** Default normalize timeout in ms (120s) - configurable via OPENCODE_NORMALIZE_TIMEOUT_MS */
+const OPENCODE_NORMALIZE_TIMEOUT_MS_DEFAULT = 120_000;
+/** Minimum allowed normalize timeout */
+const OPENCODE_NORMALIZE_TIMEOUT_MS_MIN = 30_000;
+/** Maximum hard ceiling for normalize timeout */
+const OPENCODE_NORMALIZE_TIMEOUT_MS_MAX = 300_000;
+/** Quality-priority bundle normalize ceiling; intentionally higher than 300s. */
+const OPENCODE_NORMALIZE_QUALITY_PRIORITY_TIMEOUT_MS_MAX = 900_000;
+
+/** Maximum stdout size from opencode run (1MB) */
+const OPENCODE_MAX_OUTPUT_BYTES = 1_024 * 1_024;
+
+/**
+ * Parse an environment variable as an integer with range clamping.
+ * Returns the default value if the env var is missing or invalid.
+ */
+function parseEnvInt(envVar: string | undefined, defaultVal: number, minVal: number, maxVal: number): number {
+  if (!envVar) return defaultVal;
+  const parsed = parseInt(envVar, 10);
+  if (Number.isNaN(parsed)) return defaultVal;
+  return Math.min(maxVal, Math.max(minVal, parsed));
+}
+
+function getNormalizeMaxTimeout(): number {
+  return parseEnvInt(
+    process.env.OPENCODE_NORMALIZE_MAX_TIMEOUT_MS,
+    OPENCODE_NORMALIZE_TIMEOUT_MS_MAX,
+    60_000,
+    OPENCODE_NORMALIZE_TIMEOUT_MS_MAX,
+  );
+}
+
+function getQualityPriorityMaxTimeout(): number {
+  return parseEnvInt(
+    process.env.OPENCODE_NORMALIZE_MAX_TIMEOUT_MS,
+    OPENCODE_NORMALIZE_QUALITY_PRIORITY_TIMEOUT_MS_MAX,
+    60_000,
+    OPENCODE_NORMALIZE_QUALITY_PRIORITY_TIMEOUT_MS_MAX,
+  );
+}
+
+function normalizeNonNegativeInteger(value: number | undefined): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.floor(value ?? 0));
+}
+
+/**
+ * Compute the normalize timeout based on document scale and env config.
+ *
+ * Formula:
+ *   base = OPENCODE_NORMALIZE_TIMEOUT_MS (default 120s, configurable via env)
+ *   scaleByChars = ceil(charCount / 4000) * 30s
+ *   scaleByDocs = max(0, docCount - 1) * 10s
+ *   computed = base + scaleByChars + scaleByDocs
+ *   timeoutMs = min(computed, OPENCODE_NORMALIZE_TIMEOUT_MS_MAX)
+ */
+export function computeNormalizeTimeout(opts: { docCount: number; charCount: number }): number {
+  const base = parseEnvInt(
+    process.env.OPENCODE_NORMALIZE_TIMEOUT_MS,
+    OPENCODE_NORMALIZE_TIMEOUT_MS_DEFAULT,
+    OPENCODE_NORMALIZE_TIMEOUT_MS_MIN,
+    OPENCODE_NORMALIZE_TIMEOUT_MS_MAX,
+  );
+  const maxTimeout = getNormalizeMaxTimeout();
+  const scaleByChars = Math.ceil(opts.charCount / 4000) * 30_000;
+  const scaleByDocs = Math.max(0, opts.docCount - 1) * 10_000;
+  const computed = base + scaleByChars + scaleByDocs;
+  return Math.min(computed, maxTimeout);
+}
+
+export interface BundleNormalizeTimeoutInput {
+  docCount: number;
+  charCount: number;
+  currentLineCount?: number;
+  estimatedLineCount?: number;
+  qualityPriority?: boolean;
+}
+
+/**
+ * Compute the bundle normalize timeout from both input size and expected output
+ * complexity. Bundle mode writes a full prompt-structured v2 JSON draft; for an
+ * existing large production list, output size can dominate prompt input size.
+ */
+export function computeBundleNormalizeTimeout(opts: BundleNormalizeTimeoutInput): number {
+  const normalizedDocCount = normalizeNonNegativeInteger(opts.docCount);
+  const normalizedCharCount = normalizeNonNegativeInteger(opts.charCount);
+  const baseTimeout = computeNormalizeTimeout({ docCount: normalizedDocCount, charCount: normalizedCharCount });
+  const outputLineCount = Math.max(
+    normalizeNonNegativeInteger(opts.currentLineCount),
+    normalizeNonNegativeInteger(opts.estimatedLineCount),
+  );
+  const effectiveMaxTimeout = opts.qualityPriority ? getQualityPriorityMaxTimeout() : getNormalizeMaxTimeout();
+  const outputComplexityFloor = outputLineCount >= 100
+    ? effectiveMaxTimeout
+    : outputLineCount > 0
+      ? OPENCODE_NORMALIZE_TIMEOUT_MS_DEFAULT + Math.ceil(outputLineCount / 50) * 30_000
+      : 0;
+  return Math.min(Math.max(baseTimeout, outputComplexityFloor), effectiveMaxTimeout);
+}
+
+/** Legacy constant kept for spawn runner internal default -- use computeNormalizeTimeout() for normalize */
+const OPENCODE_RUN_TIMEOUT_MS = 30_000;
+
+// ─── Config File Detection (Strategy B - local, no subprocess) ──────────────────
+
+/**
+ * Safely check if opencode.json has providers with apiKey configured.
+ * Only reads existence/non-empty status of apiKey fields, never the values.
+ * Returns non-sensitive metadata only.
+ */
+export function detectProviderConfig(): ProviderConfigMetadata {
+  const configPaths = [
+    join(homedir(), ".config/opencode/opencode.json"),
+    join(process.env.XDG_CONFIG_HOME || "", "opencode/opencode.json"),
+  ];
+
+  for (const configPath of configPaths) {
+    if (!configPath || !existsSync(configPath)) continue;
+    try {
+      const data = JSON.parse(readFileSync(configPath, "utf8"));
+      const providers = data?.provider;
+      if (!providers || typeof providers !== "object") continue;
+
+      let providerCount = 0;
+      let modelCount = 0;
+
+      for (const [, cfg] of Object.entries(providers as Record<string, unknown>)) {
+        const opts = (cfg as Record<string, unknown>)?.options;
+        if (opts && typeof opts === "object" && "apiKey" in opts) {
+          const key = (opts as Record<string, unknown>).apiKey;
+          if (typeof key === "string" && key.length > 0) {
+            providerCount++;
+          }
+        }
+        // Count models defined under each provider
+        const models = (cfg as Record<string, unknown>)?.models;
+        if (Array.isArray(models)) {
+          modelCount += models.length;
+        }
+      }
+
+      return {
+        hasConfig: providerCount > 0,
+        providerCount,
+        modelCount,
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return { hasConfig: false, providerCount: 0, modelCount: 0 };
 }
 
 // ─── CLI Detection ─────────────────────────────────────────────────────────────
@@ -72,7 +496,17 @@ let lastCheckTime = 0;
 const CHECK_INTERVAL_MS = 60_000; // re-check every 60s
 
 /**
- * Check if OpenCode CLI is available.
+ * Check if OpenCode CLI is available AND has AI provider credentials configured.
+ *
+ * Three-stage detection (Strategy C - combined):
+ * 1. Binary exists: `opencode --version` succeeds
+ * 2a. Credentials via auth store: `opencode providers list` shows >= 1 credential
+ * 2b. Credentials via config file: opencode.json has provider(s) with apiKey
+ *
+ * If the binary exists but no credentials are configured through either source,
+ * opencode cannot run AI tasks. Report available=false with a clear reason
+ * so the UI shows fallback mode instead of misleading "opencode" mode.
+ *
  * Results are cached for 60 seconds.
  */
 export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability> {
@@ -82,13 +516,52 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
   }
 
   try {
-    const { stdout } = await execFileAsync("opencode", ["--version"], {
+    const safeChildEnv = buildSafeChildEnv();
+
+    // Stage 1: binary exists and responds to --version
+    const { stdout } = await _execRunner("opencode", ["--version"], {
       timeout: 5000,
       windowsHide: true,
+      env: safeChildEnv,
     });
 
     const version = stdout.trim();
-    cachedAvailability = { available: true, version, error: null };
+
+    // Stage 2a: check if AI provider credentials exist via auth store
+    let hasAuthCredentials = false;
+    try {
+      const { stdout: providersOutput } = await _execRunner(
+        "opencode",
+        ["providers", "list"],
+        { timeout: 5000, windowsHide: true, env: safeChildEnv },
+      );
+
+      // Strip ANSI escape codes before parsing
+      const cleanOutput = providersOutput.replace(/\x1b\[[0-9;]*m/g, "");
+      hasAuthCredentials = !/\b0\s+credentials\b/i.test(cleanOutput);
+    } catch {
+      // providers list command failed -- try config file instead
+    }
+
+    // Stage 2b: check opencode.json for inline provider credentials
+    const configMeta = detectProviderConfig();
+
+    if (hasAuthCredentials || configMeta.hasConfig) {
+      cachedAvailability = {
+        available: true,
+        version,
+        error: null,
+        providerMetadata: configMeta,
+      };
+    } else {
+      cachedAvailability = {
+        available: false,
+        version,
+        error:
+          "OpenCode CLI is installed but no AI provider credentials are configured. Run 'opencode providers login' or configure provider apiKey in opencode.json.",
+        providerMetadata: configMeta,
+      };
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     // Sanitize - don't leak paths or tokens
@@ -115,46 +588,543 @@ export function invalidateAvailabilityCache(): void {
   lastCheckTime = 0;
 }
 
-// ─── Deterministic Fallback Normalizer ─────────────────────────────────────────
+// ─── Fallback Markdown Parser ──────────────────────────────────────────────────
+
+/**
+ * Regex to detect Markdown table separator rows.
+ * Matches lines like:
+ *   |---|---|
+ *   | :--- | ---: |
+ *   |---|---|---|
+ *   | :---: | --- | :--- |
+ *   | :---: |       (single-column separator with alignment)
+ *   ---|---|          (without leading/trailing pipe)
+ */
+const TABLE_SEPARATOR_REGEX = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+/**
+ * Single-column table separator with alignment: | :---: |
+ * The main regex requires at least one pipe separator between columns,
+ * so single-column separators need a separate pattern.
+ */
+const TABLE_SEPARATOR_SINGLE_COL_REGEX = /^\s*\|\s*:?-{3,}:?\s*\|\s*$/;
+
+/**
+ * Regex to detect lines that consist ONLY of Markdown syntax characters.
+ * Matches lines composed solely of: | - : _ * # > + = and whitespace.
+ */
+const SYNTAX_ONLY_REGEX = /^[\s|\-:_*#>=+]+$/;
+
+/**
+ * Regex to detect horizontal rules: ---, ***, ___ (3+ chars, optionally with spaces).
+ * Uses a simpler pattern without backreferences in character class.
+ */
+const HORIZONTAL_RULE_REGEX = /^\s*(?:---|\*\*\*|___|[- _]{3,})\s*$/;
+
+/**
+ * Check if a line is a Markdown table separator row.
+ * Exported for testing.
+ */
+export function isTableSeparator(line: string): boolean {
+  return TABLE_SEPARATOR_REGEX.test(line) || TABLE_SEPARATOR_SINGLE_COL_REGEX.test(line);
+}
+
+/**
+ * Check if a line consists only of Markdown syntax characters
+ * (pipes, dashes, colons, underscores, asterisks, hashes, etc.)
+ * or CJK/fullwidth punctuation, with no semantic content
+ * (no letters, numbers, or CJK ideographs).
+ * Exported for testing.
+ */
+export function isSyntaxOnlyLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return true;
+  if (isTableSeparator(trimmed)) return true;
+  if (HORIZONTAL_RULE_REGEX.test(trimmed)) return true;
+  if (SYNTAX_ONLY_REGEX.test(trimmed)) return true;
+  // Reject lines that contain only CJK/fullwidth punctuation with no
+  // letters, digits, or CJK ideographs (e.g. "：：：", "！！！", "。。。").
+  if (!hasSemanticContent(trimmed)) return true;
+  return false;
+}
+
+/**
+ * Strip Markdown decorators (bold, italic, links, inline code) from a line,
+ * returning the plain text content for semantic analysis.
+ */
+function stripMarkdownDecorators(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, "$1")   // bold
+    .replace(/\*(.+?)\*/g, "$1")         // italic
+    .replace(/__(.+?)__/g, "$1")         // bold alt
+    .replace(/_(.+?)_/g, "$1")           // italic alt
+    .replace(/`(.+?)`/g, "$1")           // inline code
+    .replace(/\[(.+?)\]\(.+?\)/g, "$1")  // links -> text
+    .replace(/~~(.+?)~~/g, "$1")         // strikethrough
+    .trim();
+}
+
+/**
+ * Check if a line has semantic content: at least one Unicode letter,
+ * number, or CJK ideograph after stripping Markdown decorators.
+ * Fullwidth/CJK punctuation alone does NOT count as semantic.
+ */
+function hasSemanticContent(line: string): boolean {
+  const stripped = stripMarkdownDecorators(line);
+  // Only Unicode letters, digits, and CJK ideographs count as semantic.
+  // Excludes CJK punctuation (\u3000-\u303f) and fullwidth symbols (\uff00-\uffef)
+  // so that pure punctuation lines like "：：：" or "！！！" are correctly rejected.
+  return /[A-Za-z0-9\u4e00-\u9fff\u3400-\u4dbf]/.test(stripped);
+}
+
+function emptyCandidateReasonCounts(): Record<CandidateFilterReason, number> {
+  return {
+    empty: 0,
+    syntax_only: 0,
+    table_separator: 0,
+    metadata_source: 0,
+    metadata_title: 0,
+    metadata_scrape_time: 0,
+    section_marker: 0,
+    label_only: 0,
+    label_prefix: 0,
+    url_only: 0,
+    non_speech_description: 0,
+  };
+}
+
+function recordCandidateSkip(
+  counts: Record<CandidateFilterReason, number>,
+  examples: Partial<Record<CandidateFilterReason, string[]>>,
+  reason: CandidateFilterReason,
+  line: string,
+): void {
+  counts[reason]++;
+  const bucket = examples[reason] ?? [];
+  if (bucket.length < 3) {
+    bucket.push(line.slice(0, 160));
+    examples[reason] = bucket;
+  }
+}
+
+function classifyNonSpeechCandidateLine(line: string): CandidateFilterReason | null {
+  const normalized = stripMarkdownDecorators(line).trim();
+  if (!normalized) return "empty";
+  if (/^https?:\/\/\S+$/i.test(normalized)) return "url_only";
+  if (/^(?:来源|出处|数据来源|source|url|link|链接)\s*[：:].*$/i.test(normalized)) return "metadata_source";
+  if (/^(?:标题|题目|title)\s*[：:].*$/i.test(normalized)) return "metadata_title";
+  if (/^(?:抓取时间|采集时间|爬取时间|发布时间|更新时间|创建时间|scrape\s*time|crawl\s*time|published\s*at|updated\s*at)\s*[：:].*$/i.test(normalized)) {
+    return "metadata_scrape_time";
+  }
+  if (/^(?:第\s*[一二三四五六七八九十百千万\d]+\s*[章节幕集段]|章节|小节|模块|场景|section|chapter|part)\s*([：:].*)?$/i.test(normalized)) {
+    return "section_marker";
+  }
+  if (/^#{1,6}\s+/.test(line.trim())) return "section_marker";
+  if (/^(?:台词|对白|文本|内容|声线|音色|角色|说话人|speaker|voice|voice\s*name|character|role)\s*[：:]\s*$/i.test(normalized)) {
+    return "label_only";
+  }
+  if (/^(?:声线|音色|角色|说话人|speaker|voice|voice\s*name|character|role)\s*[：:].+$/i.test(normalized)) {
+    return "label_only";
+  }
+  if (/^(?:以下是|下面是|本段内容|本文内容|整理后|整理如下|章节说明|备注|说明)\b.*(?:台词|对白|内容|整理|来源|说明)/i.test(normalized)) {
+    return "non_speech_description";
+  }
+  return null;
+}
+
+function stripTranscriptFieldLabel(line: string): { text: string; stripped: boolean } {
+  const stripped = line.replace(/^(?:台词|对白|文本|内容|transcript|line|text)\s*[：:]\s*/i, "").trim();
+  return { text: stripped, stripped: stripped !== line.trim() };
+}
+
+// ─── Table Column Mapping for Fallback Parser ──────────────────────────────────
+
+/**
+ * Column alias sets for table header -> field mapping.
+ * Based on design doc section 8.3 "Table Column Mapping".
+ */
+const TRANSCRIPT_COLUMN_ALIASES = new Set([
+  "台词", "文本", "语音文本", "对白", "内容",
+  "transcript", "line", "text", "voice text",
+]);
+
+const SPEAKER_COLUMN_ALIASES = new Set([
+  "角色", "说话人", "speaker", "speakerlabel", "character", "role",
+]);
+
+const VOICE_COLUMN_ALIASES = new Set([
+  "音色", "voice", "voicename",
+]);
+
+const NOTES_COLUMN_ALIASES = new Set([
+  "备注", "说明", "notes", "description",
+]);
+
+const MODULE_COLUMN_ALIASES = new Set([
+  "模块", "章节", "组号", "场景", "标题",
+  "module", "scene", "title",
+]);
+
+interface ColumnMapping {
+  transcript: number | null;
+  speaker: number | null;
+  voice: number | null;
+  notes: number | null;
+  module: number | null;
+}
+
+/**
+ * Map table header names to column indices.
+ * Each column type maps to the first matching header.
+ */
+function mapTableColumns(headers: string[]): ColumnMapping {
+  const mapping: ColumnMapping = {
+    transcript: null,
+    speaker: null,
+    voice: null,
+    notes: null,
+    module: null,
+  };
+  for (let i = 0; i < headers.length; i++) {
+    const header = headers[i].toLowerCase().trim();
+    if (TRANSCRIPT_COLUMN_ALIASES.has(header) && mapping.transcript === null) mapping.transcript = i;
+    else if (SPEAKER_COLUMN_ALIASES.has(header) && mapping.speaker === null) mapping.speaker = i;
+    else if (VOICE_COLUMN_ALIASES.has(header) && mapping.voice === null) mapping.voice = i;
+    else if (NOTES_COLUMN_ALIASES.has(header) && mapping.notes === null) mapping.notes = i;
+    else if (MODULE_COLUMN_ALIASES.has(header) && mapping.module === null) mapping.module = i;
+  }
+  return mapping;
+}
+
+/**
+ * Split a Markdown table row into cells, trimming whitespace.
+ * Handles leading/trailing pipe characters.
+ */
+function splitTableCells(line: string): string[] {
+  const parts = line.split("|");
+  // Remove leading empty element from leading |
+  if (parts.length > 0 && parts[0].trim() === "") parts.shift();
+  // Remove trailing empty element from trailing |
+  if (parts.length > 0 && parts[parts.length - 1].trim() === "") parts.pop();
+  return parts.map((c) => c.trim());
+}
+
+/**
+ * Check if a line looks like a table row (contains at least one |).
+ */
+function isTableRowLike(line: string): boolean {
+  return line.includes("|");
+}
+
+/**
+ * Split text on <br> tags (case-insensitive, with or without trailing /).
+ */
+function splitBrLines(text: string): string[] {
+  return text.split(/<br\s*\/?>/i);
+}
 
 /**
  * Deterministic, rule-based normalization from requirement documents to a
  * production list. This is NOT an AI agent - it's a local, verifiable,
  * rule-based transformation.
  *
+ * Enhanced to properly handle Markdown tables and skip syntax-only lines.
+ *
  * Rules:
  * 1. Only use "enabled" documents
- * 2. Split content by lines
- * 3. Assign speaker "Narrator" by default
- * 4. Detect multi-speaker markers like "A:" "B:" or "Speaker1:" "Speaker2:"
- * 5. Skip empty lines and comment lines (starting with #)
+ * 2. Skip Markdown table separator rows (|---|---| etc.)
+ * 3. Skip lines that are purely syntax (no semantic content)
+ * 4. Skip empty lines and comment lines (starting with #)
+ * 5. Detect multi-speaker markers like "A:" "B:" or "Speaker1:" "Speaker2:"
  * 6. Assign sequential orders
  */
 export function fallbackNormalize(input: NormalizeRequirementsInput): NormalizeRequirementsOutput {
+  const extracted = extractCandidateLines(input);
+  const voiceLines: VoiceLine[] = extracted.candidateLines.map((candidate) => ({
+    id: candidate.id,
+    order: candidate.order,
+    speaker: candidate.speaker,
+    text: candidate.transcript,
+    voice: candidate.voice,
+    style: "",
+    notes: "",
+    status: "pending",
+    model: "google/gemini-3.1-flash-tts-preview",
+    responseFormat: "wav",
+    generationStatus: "draft",
+  }));
+
+  return {
+    runner: "fallback",
+    attemptedRunner: "none",
+    productionList: {
+      lines: voiceLines,
+      speakers: extracted.speakers,
+      metadata: {
+        sourceDocuments: input.documents.filter((d) => d.enabled).map((d) => d.fileName),
+        normalizedAt: new Date().toISOString(),
+        method: "fallback-rule-based",
+      },
+    },
+    warnings: extracted.warnings,
+    parseStats: extracted.parseStats,
+  };
+}
+
+/**
+ * Extract deterministic candidate voice lines from enabled requirement documents.
+ *
+ * This parser is intentionally shared with the legacy fallback normalizer, but
+ * callers can use the returned candidates only as OpenCode input context. A
+ * candidate extraction result is never a production-list commit by itself.
+ */
+export function extractCandidateLines(input: NormalizeRequirementsInput): CandidateLineExtractionOutput {
   const warnings: Array<{ code: string; message: string }> = [];
   const enabledDocs = input.documents.filter((d) => d.enabled);
 
   if (enabledDocs.length === 0) {
     warnings.push({ code: "NO_ENABLED_DOCS", message: "No enabled documents found for normalization" });
     return {
-      runner: "fallback",
-      productionList: { lines: [], speakers: [], metadata: {} },
+      candidateLines: [],
+      speakers: [],
       warnings,
-    };
+        parseStats: {
+          rawLines: 0,
+          tableBlocks: 0,
+          tableRowsParsed: 0,
+          tableSeparatorRowsSkipped: 0,
+          syntaxOnlyRowsSkipped: 0,
+          metadataRowsSkipped: 0,
+          voiceLinesCreated: 0,
+        },
+        qualitySummary: {
+          inputLineCount: 0,
+          candidateLineCount: 0,
+          skippedByReason: emptyCandidateReasonCounts(),
+          examplesByReason: {},
+        },
+      };
   }
 
   const speakerMap = new Map<string, FallbackSpeaker>();
-  const lines: VoiceLine[] = [];
+  const candidateLines: CandidateLine[] = [];
   let order = 0;
+  let rawLines = 0;
+  let totalTableBlocks = 0;
+  let totalTableRowsParsed = 0;
+  let tableSeparatorRowsSkipped = 0;
+  let syntaxOnlyRowsSkipped = 0;
+  let metadataRowsSkipped = 0;
+  const skippedByReason = emptyCandidateReasonCounts();
+  const examplesByReason: Partial<Record<CandidateFilterReason, string[]>> = {};
 
   for (const doc of enabledDocs) {
-    const rawLines = doc.content.split(/\r?\n/);
+    const docRawLines = doc.content.split(/\r?\n/);
 
-    for (const rawLine of rawLines) {
+    // Phase 1: Identify table blocks (header + separator + body).
+    // A table block must have consecutive: header row, separator row, body row(s).
+    const tableBlockRanges: Array<{
+      headerIdx: number;
+      separatorIdx: number;
+      bodyStartIdx: number;
+      bodyEndIdx: number;
+      columnMapping: ColumnMapping;
+    }> = [];
+    const tableBlockLineMap = new Map<number, number>(); // lineIdx -> blockIdx
+
+    {
+      let i = 0;
+      while (i < docRawLines.length) {
+        const line = docRawLines[i].trim();
+
+        // Potential table header: has pipes, has semantic content, is NOT a separator
+        if (line && isTableRowLike(line) && !isTableSeparator(line) && hasSemanticContent(line)) {
+          // Check if the NEXT line (must be consecutive) is a separator
+          const nextIdx = i + 1;
+          if (nextIdx < docRawLines.length && isTableSeparator(docRawLines[nextIdx].trim())) {
+            // Valid table block found
+            const headers = splitTableCells(line);
+            const columnMapping = mapTableColumns(headers);
+
+            // Find body rows: consecutive non-empty table-like lines after separator
+            let bodyEnd = nextIdx + 1;
+            while (bodyEnd < docRawLines.length) {
+              const bodyLine = docRawLines[bodyEnd].trim();
+              if (!bodyLine) break; // Empty line ends table
+              if (!isTableRowLike(bodyLine)) break; // Non-table line
+              if (isTableSeparator(bodyLine)) break; // Another separator
+              bodyEnd++;
+            }
+
+            const blockIdx = tableBlockRanges.length;
+            tableBlockRanges.push({
+              headerIdx: i,
+              separatorIdx: nextIdx,
+              bodyStartIdx: nextIdx + 1,
+              bodyEndIdx: bodyEnd,
+              columnMapping,
+            });
+
+            // Map all lines in this block range
+            for (let j = i; j < bodyEnd; j++) {
+              tableBlockLineMap.set(j, blockIdx);
+            }
+
+            i = bodyEnd;
+            continue;
+          }
+        }
+        i++;
+      }
+    }
+
+    totalTableBlocks += tableBlockRanges.length;
+
+    // Phase 2: Process lines with table block awareness
+    for (let lineIdx = 0; lineIdx < docRawLines.length; lineIdx++) {
+      const rawLine = docRawLines[lineIdx];
+      rawLines++;
       const trimmed = rawLine.trim();
 
-      // Skip empty and comment lines
-      if (!trimmed || trimmed.startsWith("#")) continue;
+      // Skip empty lines
+      if (!trimmed) {
+        recordCandidateSkip(skippedByReason, examplesByReason, "empty", rawLine);
+        continue;
+      }
+
+      // Skip comment lines (starting with #)
+      if (trimmed.startsWith("#")) continue;
+
+      // Check if this line is part of an identified table block
+      const blockIdx = tableBlockLineMap.get(lineIdx);
+      if (blockIdx !== undefined) {
+        const block = tableBlockRanges[blockIdx];
+
+        if (lineIdx === block.headerIdx) {
+          // Skip table header row -- it is structural, not a voice line
+          syntaxOnlyRowsSkipped++;
+          continue;
+        }
+
+        if (lineIdx === block.separatorIdx) {
+          tableSeparatorRowsSkipped++;
+          continue;
+        }
+
+        // Body row: extract transcript via column mapping
+        if (block.columnMapping.transcript === null) {
+          // No recognized transcript column -- skip entire table body
+          if (lineIdx === block.bodyStartIdx) {
+            warnings.push({
+              code: "TABLE_NO_TRANSCRIPT_COLUMN",
+              message: "Table has no recognized transcript column (expected: 台词/文本/对白/transcript/line/text). Table body skipped.",
+            });
+          }
+          syntaxOnlyRowsSkipped++;
+          recordCandidateSkip(skippedByReason, examplesByReason, "syntax_only", trimmed);
+          continue;
+        }
+
+        const cells = splitTableCells(trimmed);
+        const transcriptCell = block.columnMapping.transcript < cells.length
+          ? cells[block.columnMapping.transcript].trim()
+          : "";
+
+        // Skip body rows with empty or syntax-only transcript cell
+        if (!transcriptCell || isSyntaxOnlyLine(transcriptCell) || !hasSemanticContent(transcriptCell)) {
+          syntaxOnlyRowsSkipped++;
+          recordCandidateSkip(skippedByReason, examplesByReason, !transcriptCell ? "empty" : "syntax_only", transcriptCell || trimmed);
+          continue;
+        }
+
+        const tableCandidateReason = classifyNonSpeechCandidateLine(transcriptCell);
+        if (tableCandidateReason) {
+          metadataRowsSkipped++;
+          recordCandidateSkip(skippedByReason, examplesByReason, tableCandidateReason, transcriptCell);
+          continue;
+        }
+
+        const cleanedTranscriptCell = stripTranscriptFieldLabel(transcriptCell).text;
+        if (!cleanedTranscriptCell || classifyNonSpeechCandidateLine(cleanedTranscriptCell) || !hasSemanticContent(cleanedTranscriptCell)) {
+          metadataRowsSkipped++;
+          recordCandidateSkip(skippedByReason, examplesByReason, "label_prefix", transcriptCell);
+          continue;
+        }
+
+        // Extract speaker from column mapping if available
+        let speakerLabel = "Narrator";
+        if (block.columnMapping.speaker !== null && block.columnMapping.speaker < cells.length) {
+          const speakerCell = cells[block.columnMapping.speaker].trim();
+          if (speakerCell && hasSemanticContent(speakerCell)) {
+            speakerLabel = speakerCell;
+          }
+        }
+
+        // Handle <br> splits for multi-line transcripts
+        const subLines = splitBrLines(cleanedTranscriptCell);
+        for (const subText of subLines) {
+          const cleanedSub = subText.trim();
+          if (!cleanedSub || !hasSemanticContent(cleanedSub)) continue;
+
+          // Register speaker if new (max 2)
+          if (!speakerMap.has(speakerLabel)) {
+            if (speakerMap.size >= 2) {
+              warnings.push({
+                code: "SPEAKER_MAPPED",
+                message: `Speaker "${speakerLabel}" mapped to existing speaker (max 2).`,
+              });
+              const existing = Array.from(speakerMap.keys());
+              speakerLabel = existing[existing.length - 1];
+            } else {
+              speakerMap.set(speakerLabel, {
+                id: speakerLabel.toLowerCase().replace(/\s+/g, "-"),
+                label: speakerLabel,
+                voice: "Zephyr",
+                style: "",
+              });
+            }
+          }
+
+          const speaker = speakerMap.has(speakerLabel)
+            ? speakerMap.get(speakerLabel)!
+            : Array.from(speakerMap.values())[0] ?? { id: "narrator", label: "Narrator", voice: "Zephyr", style: "" };
+          candidateLines.push({
+            id: crypto.randomUUID(),
+            order,
+            speaker: speaker.id,
+            speakerLabel: speaker.label,
+            transcript: cleanedSub,
+            voice: speaker.voice,
+          });
+
+          order++;
+        }
+
+        totalTableRowsParsed++;
+        continue;
+      }
+
+      // Non-table line: apply existing filtering logic
+
+      // Skip standalone Markdown table separator rows
+      if (isTableSeparator(trimmed)) {
+        tableSeparatorRowsSkipped++;
+        recordCandidateSkip(skippedByReason, examplesByReason, "table_separator", trimmed);
+        continue;
+      }
+
+      // Skip lines that are purely syntax (no semantic content)
+      if (isSyntaxOnlyLine(trimmed) || !hasSemanticContent(trimmed)) {
+        syntaxOnlyRowsSkipped++;
+        recordCandidateSkip(skippedByReason, examplesByReason, "syntax_only", trimmed);
+        continue;
+      }
+
+      const candidateReason = classifyNonSpeechCandidateLine(trimmed);
+      if (candidateReason) {
+        metadataRowsSkipped++;
+        recordCandidateSkip(skippedByReason, examplesByReason, candidateReason, trimmed);
+        continue;
+      }
 
       // Detect speaker prefix: "A: text", "B: text", "Speaker1: text"
       const speakerMatch = trimmed.match(/^([A-Za-z][A-Za-z0-9_]*)\s*:\s*(.+)$/);
@@ -167,15 +1137,21 @@ export function fallbackNormalize(input: NormalizeRequirementsInput): NormalizeR
         text = speakerMatch[2].trim();
       } else {
         speakerLabel = "Narrator";
-        text = trimmed;
+        text = stripTranscriptFieldLabel(trimmed).text;
       }
 
       if (!text) continue;
 
-      // Register speaker if new
+      const textReason = classifyNonSpeechCandidateLine(text);
+      if (textReason) {
+        metadataRowsSkipped++;
+        recordCandidateSkip(skippedByReason, examplesByReason, textReason, trimmed);
+        continue;
+      }
+
+      // Register speaker if new (max 2)
       if (!speakerMap.has(speakerLabel)) {
         if (speakerMap.size >= 2) {
-          // Already have 2 speakers, map remaining to the second
           warnings.push({
             code: "SPEAKER_MAPPED",
             message: `Speaker "${speakerLabel}" mapped to existing speaker (max 2).`,
@@ -192,39 +1168,526 @@ export function fallbackNormalize(input: NormalizeRequirementsInput): NormalizeR
         }
       }
 
-      lines.push({
+      const speaker = speakerMap.has(speakerLabel)
+        ? speakerMap.get(speakerLabel)!
+        : Array.from(speakerMap.values())[0] ?? { id: "narrator", label: "Narrator", voice: "Zephyr", style: "" };
+      candidateLines.push({
         id: crypto.randomUUID(),
         order,
-        speaker: speakerMap.has(speakerLabel)
-          ? speakerMap.get(speakerLabel)!.id
-          : Array.from(speakerMap.values())[0]?.id ?? "narrator",
-        text,
-        voice: speakerMap.get(speakerLabel)?.voice ?? "Zephyr",
-        style: "",
-        notes: "",
-        status: "pending",
-        model: "google/gemini-3.1-flash-tts-preview",
-        responseFormat: "wav",
-        generationStatus: "draft",
+        speaker: speaker.id,
+        speakerLabel: speaker.label,
+        transcript: text,
+        voice: speaker.voice,
       });
 
       order++;
     }
   }
 
-  return {
-    runner: "fallback",
-    productionList: {
-      lines,
-      speakers: Array.from(speakerMap.values()),
-      metadata: {
-        sourceDocuments: enabledDocs.map((d) => d.fileName),
-        normalizedAt: new Date().toISOString(),
-        method: "fallback-rule-based",
-      },
-    },
-    warnings,
+  const parseStats: ParseStats = {
+    rawLines,
+    tableBlocks: totalTableBlocks,
+    tableRowsParsed: totalTableRowsParsed,
+    tableSeparatorRowsSkipped,
+    syntaxOnlyRowsSkipped,
+    metadataRowsSkipped,
+    voiceLinesCreated: candidateLines.length,
   };
+
+  return {
+    candidateLines,
+    speakers: Array.from(speakerMap.values()),
+    warnings,
+    parseStats,
+    qualitySummary: {
+      inputLineCount: rawLines,
+      candidateLineCount: candidateLines.length,
+      skippedByReason,
+      examplesByReason,
+    },
+  };
+}
+
+// ─── Real OpenCode Runner ──────────────────────────────────────────────────────
+
+/**
+ * Execute a real `opencode run` call to normalize requirements.
+ *
+ * Safety controls:
+ * - Controlled prompt (no user-injected instructions)
+ * - Adaptive normalize timeout (default base 120s, max 300s)
+ * - Output size limit (1MB)
+ * - JSON schema validation on output
+ * - Full error handling with fallback
+ *
+ * The prompt instructs opencode to produce a JSON production list from
+ * requirement documents. The output is validated against the expected schema
+ * before being accepted.
+ */
+export async function runOpenCodeNormalize(
+  input: NormalizeRequirementsInput,
+): Promise<NormalizeRequirementsOutput> {
+  const warnings: Array<{ code: string; message: string }> = [];
+  const enabledDocs = input.documents.filter((d) => d.enabled);
+
+  if (enabledDocs.length === 0) {
+    warnings.push({ code: "NO_ENABLED_DOCS", message: "No enabled documents found for normalization" });
+    return {
+      runner: "fallback",
+      attemptedRunner: "none",
+      productionList: { lines: [], speakers: [], metadata: {} },
+      warnings,
+      parseStats: {
+        rawLines: 0,
+        tableBlocks: 0,
+          tableRowsParsed: 0,
+          tableSeparatorRowsSkipped: 0,
+          syntaxOnlyRowsSkipped: 0,
+          metadataRowsSkipped: 0,
+          voiceLinesCreated: 0,
+        },
+    };
+  }
+
+  // Compute adaptive timeout based on document scale
+  const docCount = enabledDocs.length;
+  const charCount = enabledDocs.reduce((sum, d) => sum + d.content.length, 0);
+  const timeoutMs = computeNormalizeTimeout({ docCount, charCount });
+
+  // Build a controlled prompt that asks for production list JSON
+  const docSummaries = enabledDocs.map((d) =>
+    `[Document: ${d.fileName}]\n${d.content.slice(0, 2000)}`
+  ).join("\n\n");
+
+  const prompt = [
+    "You are a voice production assistant. Given the following requirement documents,",
+    "generate a Prompt-Structured Production List v2 as JSON with this exact structure:",
+    '{"schemaVersion":"tts.production-list.v2","promptProfiles":[{"id":"profile_narrator_default","name":"Narrator Default","audioProfile":"<voice identity and sound>","scene":"<setting>","directorNotes":"<delivery guidance>","sampleContext":"<brief context>","speakers":[{"id":"narrator","label":"Narrator","voice":"Zephyr","style":""}],"reusePolicy":"many-lines"}],"lines":[{"id":"<uuid>","order":0,"speaker":"narrator","speakerLabel":"Narrator","transcript":"<line text>","text":"<line text>","promptProfileId":"profile_narrator_default","directorProfileId":"profile_narrator_default","voice":"Zephyr","style":"","notes":"","status":"pending","model":"google/gemini-3.1-flash-tts-preview","responseFormat":"wav","generationStatus":"draft"}],"speakers":[{"id":"narrator","label":"Narrator","voice":"Zephyr","style":""}]}',
+    "",
+    "Rules:",
+    "- Split content by logical sentences or dialogue turns",
+    "- Detect speaker prefixes like \"A:\", \"B:\", \"Speaker1:\" and map to speaker IDs",
+    "- Maximum 2 speakers; map additional speakers to the second speaker",
+    "- Include non-empty promptProfiles with audioProfile, scene, directorNotes, sampleContext, and speakers",
+    "- Every line must include transcript and promptProfileId bound to an existing profile",
+    '- Default voice: "Zephyr", default model: "google/gemini-3.1-flash-tts-preview"',
+    "- Each line gets a unique UUID, sequential order starting from 0",
+    "- Skip empty lines and comment lines (starting with #)",
+    "- Output ONLY valid JSON, no markdown fences, no explanation",
+    "",
+    "Requirement documents:",
+    docSummaries,
+  ].join("\n");
+
+  const startTime = Date.now();
+
+  try {
+    // Use spawn runner (not execFile) to properly close stdin.
+    // execFile inherits parent stdin causing opencode run to enter
+    // interactive mode and hang indefinitely.
+    //
+    // Note: do NOT pass --quiet (not a valid opencode flag, causes exit 1).
+    // opencode run --format json outputs NDJSON events (step_start, text, step_finish).
+    // The actual content is in the "text" event's part.text field.
+    const { stdout, stderr } = await _spawnRunner(
+      "opencode",
+      ["run", "--format", "json", prompt],
+      {
+        timeout: timeoutMs,
+        windowsHide: true,
+        maxBuffer: OPENCODE_MAX_OUTPUT_BYTES,
+        env: buildSafeChildEnv(),
+      },
+    );
+
+    const elapsedMs = Date.now() - startTime;
+
+    if (!stdout || stdout.trim().length === 0) {
+      throw new Error(`opencode run returned empty output (duration: ${elapsedMs}ms)`);
+    }
+
+    // Sanitize stderr for logging (should never contain keys, but belt-and-suspenders)
+    const safeStderr = sanitizeError(stderr || "");
+
+    // Parse the output -- opencode run --format json outputs NDJSON events:
+    // {"type":"step_start",...}
+    // {"type":"text","part":{"text":"actual content"}}
+    // {"type":"step_finish",...}
+    // We extract the text content from all "text" events and concatenate.
+    let outputStr: string;
+
+    try {
+      // First, try parsing as NDJSON (opencode run --format json)
+      const ndjsonLines = stdout.trim().split("\n");
+      const textParts: string[] = [];
+      let hasNdjsonEvents = false;
+
+      for (const line of ndjsonLines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine) continue;
+        try {
+          const event = JSON.parse(trimmedLine);
+          if (typeof event === "object" && event !== null && "type" in event) {
+            hasNdjsonEvents = true;
+            if (event.type === "text" && event.part && typeof event.part.text === "string") {
+              textParts.push(event.part.text);
+            }
+          }
+        } catch {
+          // Not a valid JSON line -- skip
+        }
+      }
+
+      if (hasNdjsonEvents && textParts.length > 0) {
+        // Successfully extracted text from NDJSON events
+        outputStr = textParts.join("");
+      } else if (hasNdjsonEvents && textParts.length === 0) {
+        throw new Error(`opencode run returned NDJSON events but no text content (stderr: ${safeStderr.slice(0, 200)})`);
+      } else {
+        // Fallback: try parsing as a single JSON object (legacy/alternative format)
+        const parsed = JSON.parse(stdout.trim());
+
+        if (typeof parsed === "object" && parsed !== null && "content" in parsed && typeof (parsed as Record<string, unknown>).content === "string") {
+          outputStr = (parsed as Record<string, unknown>).content as string;
+        } else if (typeof parsed === "string") {
+          outputStr = parsed;
+        } else {
+          outputStr = JSON.stringify(parsed);
+        }
+      }
+    } catch (parseErr) {
+      // If the error is our own NDJSON error, re-throw it
+      if (parseErr instanceof Error && parseErr.message.includes("NDJSON")) {
+        throw parseErr;
+      }
+      // If not valid JSON at all, throw
+      throw new Error(`opencode run output is not valid JSON (length: ${stdout.length}, stderr: ${safeStderr.slice(0, 200)})`);
+    }
+
+    // Strip markdown code fences if present
+    const cleanedOutput = outputStr
+      .replace(/^```(?:json)?\s*\n?/m, "")
+      .replace(/\n?```\s*$/m, "")
+      .trim();
+
+    let productionData: { lines?: unknown[]; speakers?: unknown[] };
+    try {
+      productionData = JSON.parse(cleanedOutput);
+    } catch {
+      throw new Error(`opencode run production list is not valid JSON after cleanup (raw length: ${outputStr.length})`);
+    }
+
+    // Validate schema: must have lines and speakers arrays
+    if (!Array.isArray(productionData.lines)) {
+      throw new Error("opencode run output missing 'lines' array");
+    }
+    if (!Array.isArray(productionData.speakers)) {
+      throw new Error("opencode run output missing 'speakers' array");
+    }
+
+    // Build speakers map
+    const speakerMap = new Map<string, FallbackSpeaker>();
+    for (const sp of productionData.speakers) {
+      const s = sp as Record<string, unknown>;
+      const id = typeof s.id === "string" ? s.id : `speaker-${speakerMap.size}`;
+      speakerMap.set(id, {
+        id,
+        label: typeof s.label === "string" ? s.label : id,
+        name: typeof s.name === "string" ? s.name : undefined,
+        voice: typeof s.voice === "string" ? s.voice : "Zephyr",
+        style: typeof s.style === "string" ? s.style : "",
+      });
+    }
+
+    // Ensure at least one speaker exists
+    if (speakerMap.size === 0) {
+      speakerMap.set("narrator", { id: "narrator", label: "Narrator", voice: "Zephyr", style: "" });
+    }
+
+    // Map speakers to max 2
+    const speakerEntries = Array.from(speakerMap.entries());
+    if (speakerEntries.length > 2) {
+      const kept = speakerEntries.slice(0, 2);
+      const mappedIds = new Set(kept.map(([id]) => id));
+      speakerMap.clear();
+      for (const [id, sp] of kept) {
+        speakerMap.set(id, sp);
+      }
+      warnings.push({
+        code: "SPEAKER_TRUNCATED",
+        message: `opencode returned ${speakerEntries.length} speakers, truncated to 2.`,
+      });
+
+      // Remap lines referencing removed speakers to the second speaker
+      for (const line of productionData.lines) {
+        const l = line as Record<string, unknown>;
+        if (typeof l.speaker === "string" && !mappedIds.has(l.speaker)) {
+          l.speaker = kept[1]?.[0] ?? kept[0]?.[0] ?? "narrator";
+        }
+      }
+    }
+
+    // Build validated lines
+    const lines: VoiceLine[] = [];
+    const speakers = Array.from(speakerMap.values());
+
+    for (let i = 0; i < productionData.lines.length; i++) {
+      const l = productionData.lines[i] as Record<string, unknown>;
+
+      // Ensure each line has a valid speaker reference
+      let speaker = typeof l.speaker === "string" ? l.speaker : "narrator";
+      if (!speakerMap.has(speaker)) {
+        speaker = speakers[0]?.id ?? "narrator";
+      }
+
+      lines.push({
+        id: typeof l.id === "string" && l.id.length > 0 ? l.id : crypto.randomUUID(),
+        order: typeof l.order === "number" ? l.order : i,
+        speaker,
+        text: typeof l.text === "string" && l.text.length > 0 ? l.text : `(Line ${i + 1})`,
+        voice: speakerMap.get(speaker)?.voice ?? "Zephyr",
+        style: typeof l.style === "string" ? l.style : "",
+        notes: typeof l.notes === "string" ? l.notes : "",
+        status: "pending",
+        model: "google/gemini-3.1-flash-tts-preview",
+        responseFormat: "wav",
+        generationStatus: "draft",
+      });
+    }
+
+    // Ensure orders are sequential
+    lines.sort((a, b) => a.order - b.order);
+    for (let i = 0; i < lines.length; i++) {
+      lines[i].order = i;
+    }
+
+    return {
+      runner: "opencode",
+      attemptedRunner: "opencode",
+      productionList: {
+        lines,
+        speakers,
+        metadata: {
+          sourceDocuments: enabledDocs.map((d) => d.fileName),
+          normalizedAt: new Date().toISOString(),
+          method: "opencode-run",
+          durationMs: elapsedMs,
+        },
+      },
+      warnings,
+      runnerStatus: {
+        status: "succeeded",
+        reasonCode: "opencode_success",
+        elapsedMs,
+        timeoutMs,
+        fallbackUsed: false,
+      },
+    };
+  } catch (err) {
+    // Any error in the real opencode path triggers fallback with reason
+    const safeMessage = sanitizeError(err);
+    throw new Error(`OPENCODE_RUN_FAILED: ${safeMessage}`);
+  }
+}
+
+// ─── Bundle-Driven OpenCode Runner ──────────────────────────────────────────────
+
+/**
+ * Input for the bundle-driven OpenCode normalize runner.
+ * Replaces document content with artifact paths and schema reference.
+ */
+export interface BundleNormalizeInput {
+  /** Absolute path to normalize-request.json */
+  normalizeRequestPath: string;
+  /** Absolute path to production-list.schema.json */
+  schemaPath: string;
+  /** Absolute path where Agent should write the draft */
+  draftPath: string;
+  /** Optional user instruction supplementing the bundle */
+  instructionPath?: string;
+  /** Optional caller-computed timeout; should match route metadata. */
+  timeoutMs?: number;
+}
+
+/**
+ * Execute a bundle-driven `opencode run` call.
+ *
+ * Unlike the legacy `runOpenCodeNormalize()` which embeds document content
+ * in the prompt, this runner:
+ * 1. Passes only the bundle/schema/draft paths to the Agent
+ * 2. The Agent reads the full files at those paths
+ * 3. The Agent writes the draft to the specified draft path
+ * 4. The backend reads the draft file (not stdout) for the production list
+ *
+ * This resolves the 2000-char truncation problem and enables schema-driven
+ * validation.
+ */
+export async function runBundleOpenCodeNormalize(
+  input: BundleNormalizeInput,
+): Promise<NormalizeRequirementsOutput> {
+  const warnings: Array<{ code: string; message: string }> = [];
+  const startTime = Date.now();
+
+  // Build prompt that references paths, not content. The compact main path lets
+  // OpenCode bind deterministic candidate lines to reusable prompt profiles
+  // instead of reparsing Markdown and emitting repeated defaults for every line.
+  const prompt = [
+    "You are a voice production assistant.",
+    "",
+    "Your task: Read the normalize request file and write a compact Prompt-Structured v2 draft.",
+    "",
+    "Steps:",
+    `1. Read the normalize request at: ${input.normalizeRequestPath}`,
+    `2. Read the schema at: ${input.schemaPath}`,
+    ...(input.instructionPath ? [`3. Read instructions at: ${input.instructionPath}`] : []),
+    "4. If normalizeRequest.candidateLines is present, read that JSON file first and use candidateLines as the authoritative line set.",
+    "5. When candidateLines are present, do NOT reparse Markdown documents and do NOT reread the current production list.",
+    "6. Copy each candidate line's id, order, speaker, speakerLabel, transcript, and voice exactly; only add promptProfileId.",
+    "7. Create a small set of reusable promptProfiles and bind every copied line to the best profile.",
+    "8. If candidateLines are absent, read enabled inputDocuments and extract lines from the document JSON wrapper content fields.",
+    "9. Generate a compact Prompt-Structured Production List v2 JSON with schemaVersion, promptProfiles, and lines.",
+    `10. Write the result to: ${input.draftPath}`,
+    "",
+    "Rules:",
+    "- Output ONLY valid minified JSON to the draft path",
+    "- Do NOT include markdown fences or explanations in the draft file",
+    "- Do NOT pretty-print the JSON; write a single compact JSON object",
+    "- schemaVersion MUST be \"tts.production-list.v2\"",
+    "- promptProfiles MUST be non-empty; every profile requires audioProfile, scene, directorNotes, sampleContext, and 1-2 speakers",
+    "- Do NOT output placeholder profile fields such as TODO, TBD, N/A, 待补充, 暂无, 空, or 无",
+    "- Reuse the same prompt profile for multiple lines when role, scene, and delivery style match",
+    "- Every line MUST include only required compact fields: id, order, speaker, transcript, promptProfileId, voice, plus optional speakerLabel",
+    "- Do NOT repeat optional defaults on lines: omit text, model, responseFormat, status, generationStatus, style, notes, directorProfileId, and directorOverrideJson unless truly needed",
+    "- If line.text is present it MUST match line.transcript after trimming, but prefer omitting text",
+    "- line.speaker MUST be one of the speakers defined by its bound prompt profile",
+    "- Top-level speakers may be omitted; the server derives final speakers from promptProfiles",
+    "- Maximum 2 speakers",
+    '- Default voice: "Zephyr", default model: "google/gemini-3.1-flash-tts-preview"',
+    "- Each line must have a unique UUID, sequential order starting from 0",
+    "- Skip empty lines and comment lines",
+    "- Detect speaker prefixes like 'A:', 'B:' and map to speaker IDs",
+    "- Never include API keys, tokens, or secrets in output",
+    "- Text must contain semantic content (letters, digits, or CJK characters)",
+    "- Pure punctuation-only text is invalid and must be skipped",
+  ].join("\n");
+
+  const timeoutMs = input.timeoutMs ?? computeBundleNormalizeTimeout({ docCount: 0, charCount: 0 });
+
+  try {
+    // CRITICAL: prompt MUST come before --file args.
+    // OpenCode CLI uses yargs where --file is [array] type; positional args
+    // after --file get absorbed into the file array instead of being treated
+    // as the message/prompt. See B-MAJOR-01 fix for details.
+    const { stdout, stderr } = await _spawnRunner(
+      "opencode",
+      [
+        "run",
+        "--format", "json",
+        "--dir", process.cwd(),
+        prompt,
+        ...(input.normalizeRequestPath ? ["--file", input.normalizeRequestPath] : []),
+        ...(input.schemaPath ? ["--file", input.schemaPath] : []),
+      ],
+      {
+        timeout: timeoutMs,
+        windowsHide: true,
+        maxBuffer: OPENCODE_MAX_OUTPUT_BYTES,
+        env: buildSafeChildEnv(),
+        draftPath: input.draftPath,
+        draftReadyPollIntervalMs: 1000,
+      },
+    );
+
+    const elapsedMs = Date.now() - startTime;
+    const safeStderr = sanitizeError(stderr || "");
+    const draftReadyEarlyCompletion = safeStderr.includes("OPENCODE_DRAFT_READY");
+    if (draftReadyEarlyCompletion) {
+      warnings.push({
+        code: "OPENCODE_DRAFT_READY",
+        message: "OpenCode process was terminated after a parseable draft JSON file was detected.",
+      });
+    }
+
+    // In bundle mode, the Agent writes to the draft file.
+    // stdout is used only for summary/diagnostics, not for the production list.
+    // We parse stdout for a summary, but the real data comes from the draft file.
+
+    // Parse stdout for any text content the Agent might have returned
+    // (some agents may output to both stdout and file)
+    let stdoutSummary = "";
+    try {
+      const ndjsonLines = stdout.trim().split("\n");
+      const textParts: string[] = [];
+      for (const line of ndjsonLines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine) continue;
+        try {
+          const event = JSON.parse(trimmedLine);
+          if (event.type === "text" && event.part?.text) {
+            textParts.push(event.part.text);
+          }
+        } catch {
+          // not a JSON line, skip
+        }
+      }
+      stdoutSummary = textParts.join("").slice(0, 200);
+    } catch {
+      // stdout parsing failed, not critical in bundle mode
+    }
+
+    // M4: Sanitize stdoutSummary before it enters metadata/DB/artifact
+    const safeStdoutSummary = sanitizeString(stdoutSummary || "(Agent wrote to draft file)");
+
+    return {
+      runner: "opencode",
+      attemptedRunner: "opencode",
+      productionList: {
+        lines: [], // Will be populated from draft file by the caller
+        speakers: [],
+        metadata: {
+          method: "opencode-bundle-run",
+          durationMs: elapsedMs,
+          stdoutSummary: safeStdoutSummary,
+          draftReadyEarlyCompletion,
+        },
+      },
+      warnings,
+      runnerStatus: {
+        status: "succeeded",
+        reasonCode: "opencode_success",
+        elapsedMs,
+        timeoutMs,
+        fallbackUsed: false,
+      },
+      _bundleMeta: {
+        draftPath: input.draftPath,
+        requestPath: input.normalizeRequestPath,
+        schemaPath: input.schemaPath,
+        stdoutSummary: safeStdoutSummary,
+      },
+    };
+  } catch (err) {
+    const safeMessage = sanitizeError(err);
+    throw new Error(`OPENCODE_BUNDLE_RUN_FAILED: ${safeMessage}`);
+  }
+}
+
+/**
+ * Internal metadata for bundle-driven runs.
+ * Used by agent-buttons.ts to know where to read the draft.
+ */
+export interface BundleRunMeta {
+  draftPath: string;
+  requestPath: string;
+  schemaPath: string;
+  stdoutSummary: string;
+}
+
+// Augment NormalizeRequirementsOutput to carry bundle metadata
+declare module "./opencode-runner.js" {
+  interface NormalizeRequirementsOutput {
+    _bundleMeta?: BundleRunMeta;
+  }
 }
 
 // ─── Fallback Button Transformations ───────────────────────────────────────────
@@ -286,14 +1749,102 @@ export function applyFallbackTransform(
 // ─── Sanitize Error ────────────────────────────────────────────────────────────
 
 /**
+ * Sanitize a string to remove potential secrets/credentials.
+ * Handles Bearer tokens, API keys, sk- prefixes, and other common credential patterns.
+ * Also truncates to a safe length.
+ */
+export function sanitizeString(input: string): string {
+  if (typeof input !== "string") return "";
+  return input
+    .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(/\bsk-[A-Za-z0-9_\-]{8,}\b/g, "sk-[REDACTED]")
+    .replace(/\bapi[_-]?key\s*[:=]\s*.+/gi, "api_key=[REDACTED]")
+    .replace(/\btoken\s*[:=]\s*.+/gi, "token=[REDACTED]")
+    .replace(/\bauthorization\s*[:=]\s*.+/gi, "authorization=[REDACTED]")
+    .replace(/\bpassword\s*[:=]\s*.+/gi, "password=[REDACTED]")
+    .slice(0, 500);
+}
+
+/**
  * Sanitize error messages to prevent token/key leaks.
  */
 export function sanitizeError(err: unknown): string {
-  const message = err instanceof Error ? err.message : "Unknown error";
-  return message
-    .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
-    .replace(/\bsk-[A-Za-z0-9_\-]{8,}\b/g, "sk-[REDACTED]")
-    .replace(/\bapi[_-]?key\s*=\s*\S+/gi, "api_key=[REDACTED]")
-    .replace(/\btoken\s*=\s*\S+/gi, "token=[REDACTED]")
-    .slice(0, 500);
+  const message = typeof err === "string" ? err : err instanceof Error ? err.message : "Unknown error";
+  return sanitizeString(message);
+}
+
+// ─── Child Process Environment Sanitization (FQ-M1) ────────────────────────────
+
+/**
+ * Patterns that indicate a sensitive environment variable that must NOT
+ * be passed to the OpenCode child process. Matches against the variable
+ * NAME (case-insensitive), never the value.
+ *
+ * Covers: API keys, tokens, secrets, passwords, authorization headers,
+ * credentials, cookies, sessions, OpenRouter keys, and common TTS/cloud
+ * provider secrets.
+ */
+const SENSITIVE_ENV_PATTERNS: RegExp[] = [
+  /key$/i,            // *_KEY, *_KEYS (e.g., OPENROUTER_API_KEY, AWS_ACCESS_KEY)
+  /token/i,           // *_TOKEN, *_TOKENS
+  /secret/i,          // *_SECRET, *_SECRETS
+  /password/i,        // *_PASSWORD, *_PASSWD
+  /passwd$/i,         // *_PASSWD
+  /authorization/i,   // AUTHORIZATION
+  /credential/i,      // *_CREDENTIAL, *_CREDENTIALS
+  /cookie/i,          // *_COOKIE, *_COOKIES
+  /session/i,         // *_SESSION, *_SESSION_ID, *_SESSION_SECRET
+  /openrouter/i,      // OPENROUTER_* (covers API key and any future vars)
+  /private/i,         // *_PRIVATE_KEY, *_PRIVATE
+  /auth$/i,           // *_AUTH (but not AUTHOR, AUTHORING, etc. -- exact suffix)
+];
+
+/**
+ * Explicitly allowed environment variable names that would otherwise be
+ * caught by the sensitive patterns above but are known to be safe.
+ */
+const ALLOWLIST_EXACT_NAMES = new Set([
+  // Safe vars that might match a pattern but are harmless
+  "XDG_SESSION_DESKTOP",   // desktop session name (e.g., "gnome")
+  "GPG_TTY",               // GPG terminal device
+]);
+
+/**
+ * Build a minimal, sanitized environment for the OpenCode child process.
+ *
+ * Strategy: allowlist of essential system vars + explicit pass-through of
+ * known-safe OpenCode configuration vars, with a blocklist that removes
+ * anything matching sensitive patterns (key/token/secret/password/etc.).
+ *
+ * This ensures the OpenCode Agent subprocess never sees backend TTS provider
+ * keys, OpenRouter API keys, or any other sensitive credentials from the
+ * parent server process. OpenCode uses its own configuration at
+ * ~/.config/opencode/opencode.json for its credentials.
+ *
+ * See FQ-M1 fix for the security rationale.
+ */
+export function buildSafeChildEnv(sourceEnv: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+  const safeEnv: Record<string, string | undefined> = {};
+
+  for (const [name, value] of Object.entries(sourceEnv)) {
+    // Skip undefined values
+    if (value === undefined) continue;
+
+    // Check explicit allowlist first
+    if (ALLOWLIST_EXACT_NAMES.has(name)) {
+      safeEnv[name] = value;
+      continue;
+    }
+
+    // Check if name matches any sensitive pattern
+    const isSensitive = SENSITIVE_ENV_PATTERNS.some((pattern) => pattern.test(name));
+    if (isSensitive) {
+      continue; // Drop sensitive variable
+    }
+
+    // Pass through all non-sensitive variables
+    safeEnv[name] = value;
+  }
+
+  return safeEnv;
 }

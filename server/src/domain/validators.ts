@@ -12,7 +12,11 @@ import { z } from "zod";
 export const VoiceLineSchema = z.object({
   id: z.string().min(1),
   order: z.number().int().min(0),
+  moduleName: z.string().optional().nullable(),
+  title: z.string().optional().nullable(),
   speaker: z.string().min(1),
+  speakerLabel: z.string().optional().nullable(),
+  transcript: z.string().optional(),
   text: z.string().min(1),
   voice: z.string().min(1),
   style: z.string().optional().default(""),
@@ -20,6 +24,8 @@ export const VoiceLineSchema = z.object({
   status: z.enum(["pending", "approved", "generating", "generated", "failed"]).optional().default("pending"),
   model: z.string().min(1).optional().default("google/gemini-3.1-flash-tts-preview"),
   responseFormat: z.enum(["wav", "pcm", "mp3"]).optional().default("wav"),
+  promptProfileId: z.string().optional().nullable(),
+  promptOverride: z.record(z.unknown()).optional().nullable(),
   directorProfileId: z.string().optional().nullable(),
   directorOverrideJson: z.string().optional().nullable(),
   // Generation tracking fields
@@ -48,10 +54,13 @@ export type Speaker = z.infer<typeof SpeakerSchema>;
 // ─── Production List ───────────────────────────────────────────────────────────
 
 export const ProductionListSchema = z.object({
+  schemaVersion: z.string().optional(),
   taskId: z.string().min(1),
   version: z.number().int().min(1),
   lines: z.array(VoiceLineSchema).min(0),
   speakers: z.array(SpeakerSchema).max(2, "Maximum 2 speakers allowed"),
+  promptProfiles: z.array(z.record(z.unknown())).optional().default([]),
+  directorProfiles: z.array(z.record(z.unknown())).optional().default([]),
   directorProfileId: z.string().optional().nullable(),
   metadata: z.record(z.unknown()).optional().default({}),
 });
@@ -117,21 +126,61 @@ export const UpdateTaskSchema = z.object({
   status: z.enum(["draft", "ready", "running", "in_progress", "blocked", "completed", "failed", "archived"]).optional(),
 });
 
+// ─── Document Upload Safety Constants ──────────────────────────────────────────
+
+/** Maximum document content size in bytes (512 KB) */
+export const MAX_DOCUMENT_BYTES = 512 * 1024;
+
+/** Allowed file extensions for uploaded/pasted requirement documents */
+export const ALLOWED_DOCUMENT_EXTENSIONS = [".md", ".txt", ".markdown", ".text", ".mdx"];
+
+/**
+ * Check if a file name has an allowed extension for requirement documents.
+ * Files without an extension are accepted (common for pasted content).
+ */
+export function hasAllowedDocumentExtension(fileName: string): boolean {
+  const lastDot = fileName.lastIndexOf(".");
+  if (lastDot === -1) return true; // No extension is OK for paste-style input
+  const ext = fileName.toLowerCase().substring(lastDot);
+  return ALLOWED_DOCUMENT_EXTENSIONS.includes(ext);
+}
+
+/**
+ * Check that a file name does not contain path traversal or separator characters.
+ */
+export function hasNoPathTraversal(fileName: string): boolean {
+  return !fileName.includes("/") && !fileName.includes("\\") && !fileName.includes("..");
+}
+
 // ─── Document Schemas ──────────────────────────────────────────────────────────
 
 export const PasteDocumentSchema = z.object({
-  fileName: z.string().min(1).max(255),
-  content: z.string().min(1),
+  fileName: z.string().min(1).max(255)
+    .refine(hasNoPathTraversal, { message: "File name must not contain path separators or traversal sequences" })
+    .refine(hasAllowedDocumentExtension, { message: `File extension not allowed. Allowed: ${ALLOWED_DOCUMENT_EXTENSIONS.join(", ")}` }),
+  content: z.string().min(1)
+    .refine((c) => Buffer.byteLength(c, "utf-8") <= MAX_DOCUMENT_BYTES,
+      { message: `Document content exceeds maximum size of ${MAX_DOCUMENT_BYTES} bytes` }),
 });
 
 export const UploadDocumentBodySchema = z.object({
-  fileName: z.string().min(1).max(255),
-  content: z.string().min(1),
+  fileName: z.string().min(1).max(255)
+    .refine(hasNoPathTraversal, { message: "File name must not contain path separators or traversal sequences" })
+    .refine(hasAllowedDocumentExtension, { message: `File extension not allowed. Allowed: ${ALLOWED_DOCUMENT_EXTENSIONS.join(", ")}` }),
+  content: z.string().min(1)
+    .refine((c) => Buffer.byteLength(c, "utf-8") <= MAX_DOCUMENT_BYTES,
+      { message: `Document content exceeds maximum size of ${MAX_DOCUMENT_BYTES} bytes` }),
 });
 
 export const UpdateDocumentSchema = z.object({
-  fileName: z.string().min(1).max(255).optional(),
-  content: z.string().min(1).optional(),
+  fileName: z.string().min(1).max(255)
+    .refine(hasNoPathTraversal, { message: "File name must not contain path separators or traversal sequences" })
+    .refine(hasAllowedDocumentExtension, { message: `File extension not allowed. Allowed: ${ALLOWED_DOCUMENT_EXTENSIONS.join(", ")}` })
+    .optional(),
+  content: z.string().min(1)
+    .refine((c) => Buffer.byteLength(c, "utf-8") <= MAX_DOCUMENT_BYTES,
+      { message: `Document content exceeds maximum size of ${MAX_DOCUMENT_BYTES} bytes` })
+    .optional(),
   enabled: z.boolean().optional(),
   expectedVersion: z.number().int().min(1),
 });
@@ -162,6 +211,8 @@ export const ProductionListPutSchema = z.object({
   expectedVersion: z.number().int().min(0),
   lines: z.array(VoiceLineSchema),
   speakers: z.array(SpeakerSchema).max(2),
+  promptProfiles: z.array(z.record(z.unknown())).optional().default([]),
+  directorProfiles: z.array(z.record(z.unknown())).optional().default([]),
   directorProfileId: z.string().optional().nullable(),
   metadata: z.record(z.unknown()).optional().default({}),
 });
@@ -176,9 +227,19 @@ export const ProductionListPatchSchema = z.object({
 // ─── Agent Button ──────────────────────────────────────────────────────────────
 
 export const ExecuteButtonSchema = z.object({
-  targetLineId: z.string().min(1),
+  targetLineId: z.string().min(1).optional(),
+  automationSessionId: z.string().min(1).optional(),
+  target: z.discriminatedUnion("scope", [
+    z.object({ scope: z.literal("line"), lineId: z.string().min(1) }),
+    z.object({ scope: z.literal("selection"), lineIds: z.array(z.string().min(1)).min(1) }),
+    z.object({ scope: z.literal("list") }),
+    z.object({ scope: z.literal("task") }),
+  ]).optional(),
   expectedVersion: z.number().int().min(1),
   parameters: z.record(z.unknown()).optional().default({}),
+}).refine((value) => Boolean(value.targetLineId || value.target), {
+  message: "Either targetLineId or target is required.",
+  path: ["target"],
 });
 
 // ─── Normalize Requirements ────────────────────────────────────────────────────
@@ -192,6 +253,25 @@ export const NormalizeRequirementsResultSchema = z.object({
   })),
 });
 
+/**
+ * Request body schema for the normalize-requirements endpoint.
+ * All fields are optional -- the endpoint works without a body for backward compatibility.
+ * When provided, instruction and documentIds allow the caller to customize the Agent bundle.
+ */
+export const NormalizeRequestBodySchema = z.object({
+  /** Non-breaking async start mode for progress polling */
+  async: z.boolean().optional(),
+  responseMode: z.enum(["sync", "async"]).optional(),
+  /** Quality-priority mode extends OpenCode timeout budget without relaxing gates */
+  qualityPriority: z.boolean().optional(),
+  /** User-provided instruction supplementing the task context */
+  instruction: z.string().max(2000).optional(),
+  /** Specific document IDs to include (must belong to this task and be enabled) */
+  documentIds: z.array(z.string().uuid()).max(20).optional(),
+  /** Expected current production list version for conflict detection */
+  expectedVersion: z.number().int().min(0).optional(),
+});
+
 // ─── Generation Bridge ──────────────────────────────────────────────────────────
 
 export const GenerateFromListSchema = z.object({
@@ -201,6 +281,17 @@ export const GenerateFromListSchema = z.object({
   lineIds: z.array(z.string().min(1)).optional().default([]),
   /** Whether to skip lines already in succeeded/running state. Default true. */
   skipCompleted: z.boolean().optional().default(true),
+  /**
+   * Request source: "user" (frontend), "agent" (OpenCode plugin), "cli" (CLI tool).
+   * Default "user". Non-user sources require explicit confirm=true to proceed.
+   */
+  source: z.enum(["user", "agent", "cli"]).optional().default("user"),
+  /**
+   * Explicit cost confirmation. Required when source is "agent" or "cli".
+   * When true, the caller confirms they are intentionally triggering a real cost action.
+   * Default false to prevent silent cost triggers from automated sources.
+   */
+  confirm: z.boolean().optional().default(false),
 });
 
 export type GenerateFromListRequest = z.infer<typeof GenerateFromListSchema>;
@@ -240,9 +331,513 @@ export const ChatMessageSchema = z.object({
 export const CreateOpenCodeSessionSchema = z.object({
   sessionType: z.enum(["automation", "chat"]),
   metadata: z.record(z.unknown()).optional().default({}),
+  taskId: z.string().optional(),
 });
 
+// ─── Raw Agent Draft Strict Schema ────────────────────────────────────────────
+//
+// R-M1: These schemas enforce that the raw Agent draft has all required fields
+// BEFORE any normalization/synthesis. They validate the draft as-is from the
+// Agent output, without any default synthesis or fixing.
+// Missing voice, empty speakers, invalid order, etc. must all fail here.
+
+/** Strict raw draft voice line: requires non-empty id, integer order, non-empty speaker/text/voice */
+const RawDraftLineSchema = z.object({
+  id: z.string().min(1, "Line id is required"),
+  order: z.number({ required_error: "Line order is required", invalid_type_error: "Line order must be a number" }).int("Line order must be an integer"),
+  speaker: z.string().min(1, "Line speaker is required"),
+  text: z.string().min(1, "Line text is required"),
+  voice: z.string().min(1, "Line voice is required"),
+});
+
+/** Strict raw draft speaker: requires non-empty id, label, voice */
+const RawDraftSpeakerSchema = z.object({
+  id: z.string().min(1, "Speaker id is required"),
+  label: z.string().min(1, "Speaker label is required"),
+  voice: z.string().min(1, "Speaker voice is required"),
+});
+
+/** Strict raw draft top-level: lines must be array, speakers must be non-empty array */
+export const RawAgentDraftSchema = z.object({
+  lines: z.array(RawDraftLineSchema).min(1, "Draft must have at least one line"),
+  speakers: z.array(RawDraftSpeakerSchema).min(1, "Draft must have at least one speaker"),
+});
+
+export type RawAgentDraft = z.infer<typeof RawAgentDraftSchema>;
+
+// ─── Prompt-Structured Production List v2 Raw Agent Draft ─────────────────────
+
+const NonEmptyTrimmedString = z.string().refine((value) => value.trim().length > 0, {
+  message: "Field must be a non-empty string after trimming",
+});
+
+export const PromptSpeakerSchema = z.object({
+  id: NonEmptyTrimmedString,
+  label: NonEmptyTrimmedString,
+  name: z.string().optional(),
+  voice: NonEmptyTrimmedString,
+  style: z.string().optional(),
+}).passthrough();
+
+export const PromptOverrideSchema = z.object({
+  audioProfile: z.string().optional(),
+  scene: z.string().optional(),
+  directorNotes: z.string().optional(),
+  sampleContext: z.string().optional(),
+  speakers: z.array(PromptSpeakerSchema).min(1).max(2).optional(),
+}).passthrough();
+
+export const PromptProfileSchema = z.object({
+  id: NonEmptyTrimmedString,
+  name: NonEmptyTrimmedString,
+  description: z.string().optional(),
+  audioProfile: NonEmptyTrimmedString,
+  scene: NonEmptyTrimmedString,
+  directorNotes: NonEmptyTrimmedString,
+  sampleContext: NonEmptyTrimmedString,
+  speakers: z.array(PromptSpeakerSchema).min(1, "Profile must have at least one speaker").max(2, "Profile supports at most 2 speakers"),
+  reusePolicy: z.enum(["one-line", "many-lines"]).optional(),
+  sourceDocumentIds: z.array(z.string()).optional(),
+}).passthrough();
+
+export const PromptStructuredLineSchema = z.object({
+  id: NonEmptyTrimmedString,
+  order: z.number({ required_error: "Line order is required", invalid_type_error: "Line order must be a number" }).int().min(0),
+  speaker: NonEmptyTrimmedString,
+  moduleName: z.string().optional().nullable(),
+  title: z.string().optional().nullable(),
+  speakerLabel: z.string().optional(),
+  transcript: NonEmptyTrimmedString,
+  text: z.string().optional(),
+  promptProfileId: NonEmptyTrimmedString,
+  directorProfileId: z.string().optional().nullable(),
+  promptOverride: PromptOverrideSchema.optional().nullable(),
+  directorOverrideJson: z.string().optional().nullable(),
+  voice: NonEmptyTrimmedString,
+  model: z.string().optional(),
+  responseFormat: z.enum(["wav", "pcm", "mp3"]).optional(),
+  notes: z.string().optional(),
+  style: z.string().optional(),
+  generationStatus: z.enum(["draft", "ready", "pending", "running", "succeeded", "failed", "needs_revision"]).optional(),
+}).passthrough();
+
+export const RawPromptStructuredAgentDraftSchema = z.object({
+  schemaVersion: z.string().optional(),
+  taskId: z.string().optional(),
+  sourceRevision: z.record(z.unknown()).optional(),
+  promptProfiles: z.array(PromptProfileSchema).min(1, "Draft must include at least one prompt profile"),
+  directorProfiles: z.array(PromptProfileSchema).optional(),
+  speakers: z.array(PromptSpeakerSchema).optional(),
+  lines: z.array(PromptStructuredLineSchema).min(1, "Draft must include at least one line"),
+  metadata: z.record(z.unknown()).optional(),
+}).passthrough();
+
+export type PromptSpeaker = z.infer<typeof PromptSpeakerSchema>;
+export type PromptOverride = z.infer<typeof PromptOverrideSchema>;
+export type PromptProfile = z.infer<typeof PromptProfileSchema>;
+export type PromptStructuredLine = z.infer<typeof PromptStructuredLineSchema>;
+export type RawPromptStructuredAgentDraft = z.infer<typeof RawPromptStructuredAgentDraftSchema>;
+
+export type QualityIssueSeverity = "warning" | "blocking";
+
+export type QualityIssueCode =
+  | "TRANSCRIPT_METADATA_SOURCE"
+  | "TRANSCRIPT_METADATA_TITLE"
+  | "TRANSCRIPT_METADATA_SCRAPE_TIME"
+  | "TRANSCRIPT_LABEL_ONLY"
+  | "TRANSCRIPT_FIELD_LABEL_PREFIX"
+  | "TRANSCRIPT_URL_ONLY"
+  | "TRANSCRIPT_EMPTY_OR_PUNCTUATION_ONLY"
+  | "TRANSCRIPT_SECTION_MARKER"
+  | "TRANSCRIPT_NON_SPEECH_DESCRIPTION"
+  | "LOW_CANDIDATE_COVERAGE"
+  | "MISSING_PROMPT_PROFILES"
+  | "INVALID_PROMPT_PROFILE_BINDING"
+  | "PROFILE_CONTENT_TOO_WEAK";
+
+export interface QualityIssue {
+  code: QualityIssueCode;
+  severity: QualityIssueSeverity;
+  message: string;
+  lineId?: string;
+  lineIndex?: number;
+  transcriptSample?: string;
+  expected?: string;
+  actual?: string;
+}
+
+export interface BusinessQualityReport {
+  passed: boolean;
+  issueCount: number;
+  blockingIssueCount: number;
+  warningIssueCount: number;
+  candidateLineCount: number;
+  producedLineCount: number;
+  candidateCoverageRatio: number | null;
+  issues: QualityIssue[];
+}
+
+const PROMPT_PLACEHOLDER_VALUES = new Set([
+  "todo",
+  "tbd",
+  "n/a",
+  "na",
+  "none",
+  "null",
+  "待补充",
+  "待定",
+  "空",
+  "暂无",
+  "无",
+]);
+
+function isPlaceholderPromptValue(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return PROMPT_PLACEHOLDER_VALUES.has(normalized);
+}
+
+function hasSemanticTranscript(value: string): boolean {
+  return /[A-Za-z0-9\u4e00-\u9fff\u3400-\u4dbf]/.test(value.trim());
+}
+
+function truncateTranscriptSample(value: string): string {
+  return value.trim().slice(0, 160);
+}
+
+function classifyTranscriptQualityIssue(transcript: string): QualityIssueCode | null {
+  const normalized = transcript.trim();
+  if (!normalized || !hasSemanticTranscript(normalized)) return "TRANSCRIPT_EMPTY_OR_PUNCTUATION_ONLY";
+  if (/^https?:\/\/\S+$/i.test(normalized)) return "TRANSCRIPT_URL_ONLY";
+  if (/^(?:来源|出处|数据来源|source|url|link|链接)\s*[：:].*$/i.test(normalized)) return "TRANSCRIPT_METADATA_SOURCE";
+  if (/^(?:标题|题目|title)\s*[：:].*$/i.test(normalized)) return "TRANSCRIPT_METADATA_TITLE";
+  if (/^(?:抓取时间|采集时间|爬取时间|发布时间|更新时间|创建时间|scrape\s*time|crawl\s*time|published\s*at|updated\s*at)\s*[：:].*$/i.test(normalized)) {
+    return "TRANSCRIPT_METADATA_SCRAPE_TIME";
+  }
+  if (/^(?:第\s*[一二三四五六七八九十百千万\d]+\s*[章节幕集段]|章节|小节|模块|场景|section|chapter|part)\s*([：:].*)?$/i.test(normalized)) {
+    return "TRANSCRIPT_SECTION_MARKER";
+  }
+  if (/^(?:台词|对白|文本|内容|声线|音色|角色|说话人|speaker|voice|voice\s*name|character|role)\s*[：:]\s*$/i.test(normalized)) {
+    return "TRANSCRIPT_LABEL_ONLY";
+  }
+  if (/^(?:台词|对白|文本|内容|transcript|line|text)\s*[：:].+$/i.test(normalized)) {
+    return "TRANSCRIPT_FIELD_LABEL_PREFIX";
+  }
+  if (/^(?:声线|音色|角色|说话人|speaker|voice|voice\s*name|character|role)\s*[：:].+$/i.test(normalized)) {
+    return "TRANSCRIPT_LABEL_ONLY";
+  }
+  if (/^(?:以下是|下面是|本段内容|本文内容|整理后|整理如下|章节说明|备注|说明)\b.*(?:台词|对白|内容|整理|来源|说明)/i.test(normalized)) {
+    return "TRANSCRIPT_NON_SPEECH_DESCRIPTION";
+  }
+  return null;
+}
+
+export function validateBusinessQualityGate(options: {
+  draft: RawPromptStructuredAgentDraft;
+  candidateLineCount: number;
+}): BusinessQualityReport {
+  const issues: QualityIssue[] = [];
+  const candidateLineCount = Math.max(0, Math.floor(options.candidateLineCount));
+  const producedLineCount = options.draft.lines.length;
+  const candidateCoverageRatio = candidateLineCount > 0 ? producedLineCount / candidateLineCount : null;
+
+  if (options.draft.promptProfiles.length === 0) {
+    issues.push({
+      code: "MISSING_PROMPT_PROFILES",
+      severity: "blocking",
+      message: "Draft must include at least one prompt profile before production commit.",
+      expected: "promptProfiles.length >= 1",
+      actual: "0",
+    });
+  }
+
+  const profileIds = new Set(options.draft.promptProfiles.map((profile) => profile.id.trim()));
+  for (const [index, line] of options.draft.lines.entries()) {
+    const transcript = line.transcript.trim();
+    const code = classifyTranscriptQualityIssue(transcript);
+    if (code) {
+      issues.push({
+        code,
+        severity: "blocking",
+        message: `Line "${line.id}" transcript appears to be metadata, a field label, or non-speech content and cannot be committed.`,
+        lineId: line.id,
+        lineIndex: index,
+        transcriptSample: truncateTranscriptSample(transcript),
+      });
+    }
+
+    if (!profileIds.has(line.promptProfileId.trim())) {
+      issues.push({
+        code: "INVALID_PROMPT_PROFILE_BINDING",
+        severity: "blocking",
+        message: `Line "${line.id}" references prompt profile "${line.promptProfileId}" that is not present in promptProfiles.`,
+        lineId: line.id,
+        lineIndex: index,
+        expected: "promptProfileId present in promptProfiles",
+        actual: line.promptProfileId,
+      });
+    }
+  }
+
+  for (const profile of options.draft.promptProfiles) {
+    for (const field of ["audioProfile", "scene", "directorNotes", "sampleContext"] as const) {
+      if (profile[field].trim().length < 6 || isPlaceholderPromptValue(profile[field])) {
+        issues.push({
+          code: "PROFILE_CONTENT_TOO_WEAK",
+          severity: "blocking",
+          message: `Prompt profile "${profile.id}" field "${field}" is too weak for production quality commit.`,
+          expected: "specific non-placeholder content",
+          actual: profile[field],
+        });
+      }
+    }
+  }
+
+  if (candidateLineCount >= 10 && candidateCoverageRatio !== null) {
+    if (candidateCoverageRatio < 0.1) {
+      issues.push({
+        code: "LOW_CANDIDATE_COVERAGE",
+        severity: "blocking",
+        message: `Draft produced ${producedLineCount} line(s) from ${candidateLineCount} candidates; coverage is too low for safe production commit.`,
+        expected: ">= 10% candidate coverage",
+        actual: `${Math.round(candidateCoverageRatio * 100)}%`,
+      });
+    } else if (candidateCoverageRatio < 0.3) {
+      issues.push({
+        code: "LOW_CANDIDATE_COVERAGE",
+        severity: "warning",
+        message: `Draft produced ${producedLineCount} line(s) from ${candidateLineCount} candidates; coverage is lower than expected.`,
+        expected: ">= 30% candidate coverage",
+        actual: `${Math.round(candidateCoverageRatio * 100)}%`,
+      });
+    }
+  }
+
+  const blockingIssueCount = issues.filter((issue) => issue.severity === "blocking").length;
+  const warningIssueCount = issues.filter((issue) => issue.severity === "warning").length;
+  return {
+    passed: blockingIssueCount === 0,
+    issueCount: issues.length,
+    blockingIssueCount,
+    warningIssueCount,
+    candidateLineCount,
+    producedLineCount,
+    candidateCoverageRatio,
+    issues,
+  };
+}
+
 // ─── Validation Functions ──────────────────────────────────────────────────────
+
+/**
+ * Validate a raw Agent draft against the strict schema (Zod parse + domain rules).
+ *
+ * This is the R-M1 gate: the raw draft is validated as-is from Agent output,
+ * without any synthesis of default values. Missing required fields (voice, id,
+ * order, speaker, text) or empty speakers cause immediate failure.
+ *
+ * Returns a ValidationReport with schema parse errors and domain validation issues.
+ */
+export function validateRawAgentDraft(rawDraft: {
+  lines: unknown[];
+  speakers: unknown[];
+}): ValidationReport {
+  const issues: ValidationIssue[] = [];
+
+  // Step 1: Strict Zod schema parse
+  const schemaResult = RawAgentDraftSchema.safeParse(rawDraft);
+  if (!schemaResult.success) {
+    for (const issue of schemaResult.error.issues) {
+      const fieldPath = issue.path.join(".");
+      issues.push({
+        severity: "error",
+        code: "RAW_DRAFT_SCHEMA_PARSE_FAILED",
+        message: `Schema validation failed at ${fieldPath || "root"}: ${issue.message}`,
+        field: fieldPath || undefined,
+      });
+    }
+    // Schema parse failed -- return immediately, no business validation needed
+    return {
+      valid: false,
+      issues,
+      stats: { totalLines: 0, speakers: [], maxOrder: -1 },
+    };
+  }
+
+  // Step 2: Schema parse passed. Run business validation on the parsed data.
+  // The parsed data is now guaranteed to have all required fields with correct types.
+  // Cast through unknown to VoiceLine[] / Speaker[] since Zod parse guarantees
+  // the required fields exist but doesn't add optional defaults that the types expect.
+  return validateProductionList({
+    lines: schemaResult.data.lines as unknown as VoiceLine[],
+    speakers: schemaResult.data.speakers as unknown as Speaker[],
+  });
+}
+
+/**
+ * Validate the Agent normalize main-path draft as Prompt-Structured Production List v2.
+ *
+ * This gate is intentionally stricter than legacy ProductionList validation:
+ * every Agent-produced line must bind to an explicit prompt profile containing
+ * audioProfile, scene, directorNotes, sampleContext, speakers, and a line-level
+ * transcript. Invalid parseable drafts return a failed report and must not be
+ * normalized, fixed, or committed by callers.
+ */
+export function validateRawPromptStructuredAgentDraft(rawDraft: unknown): ValidationReport {
+  const issues: ValidationIssue[] = [];
+  const schemaResult = RawPromptStructuredAgentDraftSchema.safeParse(rawDraft);
+
+  if (!schemaResult.success) {
+    for (const issue of schemaResult.error.issues) {
+      const fieldPath = issue.path.join(".");
+      let code = "RAW_PROMPT_STRUCTURED_SCHEMA_PARSE_FAILED";
+      if (fieldPath === "promptProfiles" || fieldPath.startsWith("promptProfiles.")) {
+        code = "MISSING_PROMPT_PROFILES";
+      }
+      if (/audioProfile|scene|directorNotes|sampleContext/.test(fieldPath)) {
+        code = "INCOMPLETE_PROMPT_PROFILE";
+      }
+      if (fieldPath.includes("promptProfileId")) {
+        code = "MISSING_PROMPT_PROFILE_BINDING";
+      }
+      if (fieldPath.includes("transcript")) {
+        code = "EMPTY_TRANSCRIPT";
+      }
+      issues.push({
+        severity: "error",
+        code,
+        message: `Prompt-structured draft validation failed at ${fieldPath || "root"}: ${issue.message}`,
+        field: fieldPath || undefined,
+      });
+    }
+    return {
+      valid: false,
+      issues,
+      stats: { totalLines: 0, speakers: [], maxOrder: -1 },
+    };
+  }
+
+  const draft = schemaResult.data;
+  const profileIds = new Set<string>();
+  const profileById = new Map<string, PromptProfile>();
+  const aggregateSpeakerIds = new Set<string>();
+
+  for (const profile of draft.promptProfiles) {
+    const profileId = profile.id.trim();
+    if (profileIds.has(profileId)) {
+      issues.push({
+        severity: "error",
+        code: "DUPLICATE_PROMPT_PROFILE_ID",
+        message: `Duplicate prompt profile id "${profileId}"`,
+        field: `promptProfiles[${profileId}].id`,
+      });
+    }
+    profileIds.add(profileId);
+    profileById.set(profileId, profile);
+
+    for (const field of ["audioProfile", "scene", "directorNotes", "sampleContext"] as const) {
+      if (isPlaceholderPromptValue(profile[field])) {
+        issues.push({
+          severity: "error",
+          code: "PLACEHOLDER_PROMPT_FIELD",
+          message: `Prompt profile "${profileId}" field "${field}" uses a placeholder value`,
+          field: `promptProfiles[${profileId}].${field}`,
+        });
+      }
+    }
+
+    if (profile.speakers.length < 1 || profile.speakers.length > 2) {
+      issues.push({
+        severity: "error",
+        code: "INVALID_PROMPT_SPEAKER_COUNT",
+        message: `Prompt profile "${profileId}" must define 1 to 2 speakers`,
+        field: `promptProfiles[${profileId}].speakers`,
+      });
+    }
+
+    for (const speaker of profile.speakers) {
+      aggregateSpeakerIds.add(speaker.id.trim());
+    }
+  }
+
+  if (aggregateSpeakerIds.size > 2) {
+    issues.push({
+      severity: "error",
+      code: "SPEAKER_LIMIT_EXCEEDED",
+      message: `Maximum 2 speakers allowed across the v2 dataset, found ${aggregateSpeakerIds.size}`,
+      field: "promptProfiles.speakers",
+    });
+  }
+
+  const orders = draft.lines.map((line) => line.order);
+  if (new Set(orders).size !== orders.length) {
+    issues.push({
+      severity: "error",
+      code: "DUPLICATE_LINE_ORDER",
+      message: "Line orders must be unique",
+      field: "lines.order",
+    });
+  }
+
+  for (const line of draft.lines) {
+    const transcript = line.transcript.trim();
+    if (!hasSemanticTranscript(transcript)) {
+      issues.push({
+        severity: "error",
+        code: "MARKDOWN_SYNTAX_ONLY_TRANSCRIPT",
+        message: `Line "${line.id}" has transcript without semantic content`,
+        field: `lines[${line.id}].transcript`,
+        lineId: line.id,
+      });
+    }
+
+    if (typeof line.text === "string" && line.text.trim() !== transcript) {
+      issues.push({
+        severity: "error",
+        code: "LINE_TEXT_TRANSCRIPT_MISMATCH",
+        message: `Line "${line.id}" has text that differs from transcript`,
+        field: `lines[${line.id}].text`,
+        lineId: line.id,
+      });
+    }
+
+    const profile = profileById.get(line.promptProfileId.trim());
+    if (!profile) {
+      issues.push({
+        severity: "error",
+        code: "UNKNOWN_PROMPT_PROFILE_REFERENCE",
+        message: `Line "${line.id}" references unknown prompt profile "${line.promptProfileId}"`,
+        field: `lines[${line.id}].promptProfileId`,
+        lineId: line.id,
+      });
+      continue;
+    }
+
+    const speakerIds = new Set(profile.speakers.map((speaker) => speaker.id.trim()));
+    if (!speakerIds.has(line.speaker.trim())) {
+      issues.push({
+        severity: "error",
+        code: "INVALID_LINE_SPEAKER_FOR_PROFILE",
+        message: `Line "${line.id}" speaker "${line.speaker}" is not defined by prompt profile "${profile.id}"`,
+        field: `lines[${line.id}].speaker`,
+        lineId: line.id,
+      });
+    }
+  }
+
+  const speakerLabels = Array.from(new Set(
+    draft.promptProfiles.flatMap((profile) => profile.speakers.map((speaker) => speaker.label)),
+  ));
+
+  return {
+    valid: issues.filter((issue) => issue.severity === "error").length === 0,
+    issues,
+    stats: {
+      totalLines: draft.lines.length,
+      speakers: speakerLabels,
+      maxOrder: draft.lines.length > 0 ? Math.max(...draft.lines.map((line) => line.order)) : -1,
+    },
+  };
+}
 
 /**
  * Validate a production list and return a detailed report.
@@ -252,6 +847,18 @@ export function validateProductionList(list: {
   speakers: Speaker[];
 }): ValidationReport {
   const issues: ValidationIssue[] = [];
+
+  // R-M1-B: If lines exist but speakers is empty, that's an error.
+  // The raw gate should not allow drafts with lines but no speakers
+  // to pass through (normalization would create a default narrator).
+  if (list.lines.length > 0 && list.speakers.length === 0) {
+    issues.push({
+      severity: "error",
+      code: "MISSING_SPEAKERS",
+      message: "Draft has lines but no speakers defined. At least one speaker is required.",
+      field: "speakers",
+    });
+  }
 
   // Check speaker count
   if (list.speakers.length > 2) {
@@ -280,7 +887,10 @@ export function validateProductionList(list: {
 
   // Check each line references a valid speaker
   for (const line of list.lines) {
-    if (!speakerIds.has(line.speaker) && list.speakers.length > 0) {
+    // R-M1-B: Always check speaker reference regardless of speakers.length.
+    // Previously skipped when speakers was empty (which the MISSING_SPEAKERS
+    // check above now catches), but for robustness, check unconditionally.
+    if (!speakerIds.has(line.speaker)) {
       issues.push({
         severity: "error",
         code: "INVALID_SPEAKER_REFERENCE",
@@ -296,6 +906,22 @@ export function validateProductionList(list: {
         severity: "error",
         code: "EMPTY_TRANSCRIPT",
         message: `Line "${line.id}" has empty transcript text`,
+        field: `lines[${line.id}].text`,
+        lineId: line.id,
+      });
+    }
+
+    // Check for Markdown syntax-only transcript (no semantic content).
+    // Catches cases where parser may let through syntax-only lines like
+    // table separators (|---|---|), horizontal rules (---), pure symbols,
+    // or pure CJK/fullwidth punctuation (：：：, ！！！, 。。。).
+    // Only Unicode letters, digits, and CJK ideographs count as semantic.
+    const hasSemanticChar = /[A-Za-z0-9\u4e00-\u9fff\u3400-\u4dbf]/.test(line.text.trim());
+    if (line.text.trim() && !hasSemanticChar) {
+      issues.push({
+        severity: "error",
+        code: "MARKDOWN_SYNTAX_ONLY_TRANSCRIPT",
+        message: `Line "${line.id}" has Markdown syntax-only transcript: "${line.text.slice(0, 50)}"`,
         field: `lines[${line.id}].text`,
         lineId: line.id,
       });

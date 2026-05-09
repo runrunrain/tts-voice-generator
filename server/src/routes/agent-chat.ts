@@ -51,12 +51,23 @@ function auditLog(entityType: string, entityId: string, operation: string, actor
 app.get("/api/opencode/sessions", (c) => {
   const requestId = uuidv4();
   const sessionType = c.req.query("sessionType");
+  const taskId = c.req.query("taskId");
   const db = getDb();
 
   let sessions;
-  if (sessionType) {
+  if (sessionType && taskId) {
+    sessions = db.select().from(opencodeSession)
+      .where(and(eq(opencodeSession.sessionType, sessionType), eq(opencodeSession.taskId, taskId)))
+      .orderBy(desc(opencodeSession.createdAt))
+      .all();
+  } else if (sessionType) {
     sessions = db.select().from(opencodeSession)
       .where(eq(opencodeSession.sessionType, sessionType))
+      .orderBy(desc(opencodeSession.createdAt))
+      .all();
+  } else if (taskId) {
+    sessions = db.select().from(opencodeSession)
+      .where(eq(opencodeSession.taskId, taskId))
       .orderBy(desc(opencodeSession.createdAt))
       .all();
   } else {
@@ -97,7 +108,7 @@ app.post("/api/opencode/sessions", async (c) => {
     return apiError(c, requestId, 400, "VALIDATION_ERROR", "Request validation failed.", "validation", false, { issues: parsed.error.flatten() });
   }
 
-  const { sessionType, metadata } = parsed.data;
+  const { sessionType, metadata, taskId } = parsed.data;
   const id = uuidv4();
   const now = new Date();
   const db = getDb();
@@ -107,11 +118,11 @@ app.post("/api/opencode/sessions", async (c) => {
     sessionType,
     status: "active",
     metadataJson: JSON.stringify(metadata),
-    taskId: null,
+    taskId: taskId ?? null,
     createdAt: now,
   }).run();
 
-  auditLog("opencode_session", id, "create", "user", { sessionType }, requestId);
+  auditLog("opencode_session", id, "create", "user", { sessionType, taskId: taskId ?? null }, requestId);
 
   return c.json({
     ok: true,
@@ -121,7 +132,7 @@ app.post("/api/opencode/sessions", async (c) => {
       sessionType,
       status: "active",
       metadata,
-      taskId: null,
+      taskId: taskId ?? null,
       createdAt: now.toISOString(),
       completedAt: null,
     },

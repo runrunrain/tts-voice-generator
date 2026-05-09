@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertCircle, CheckCircle2, Loader2, Plus, Save, Users } from "lucide-react";
+import { AlertCircle, CheckCircle2, Copy, Loader2, Plus, RefreshCw, Save, Search, Users } from "lucide-react";
 import { taskApi } from "../../services/httpAdapter";
 import { useAppState } from "../../state/AppContext";
-import type { DirectorProfile, DirectorSpeakerProfile } from "../../types";
+import type { DirectorProfile, DirectorSpeakerProfile, VoiceLine } from "../../types";
 
 type Phase = "idle" | "loading" | "saving" | "success" | "error";
 
@@ -15,6 +15,7 @@ function emptySpeaker(id: string, label: string): DirectorSpeakerProfile {
 function emptyProfile(taskId: string): Partial<DirectorProfile> {
   return {
     taskId,
+    source: "global",
     name: "新导演配置",
     audioProfile: "",
     scene: "",
@@ -24,42 +25,78 @@ function emptyProfile(taskId: string): Partial<DirectorProfile> {
   };
 }
 
-export function DirectorProfilesPanel({ taskId, onProfilesChange }: { taskId: string; onProfilesChange?: (profiles: DirectorProfile[]) => void }) {
+export function DirectorProfilesPanel({
+  taskId,
+  profiles,
+  productionLines = [],
+  loading = false,
+  loadError = null,
+  onProfilesChange,
+  onReload,
+}: {
+  taskId: string;
+  profiles: DirectorProfile[];
+  productionLines?: VoiceLine[];
+  loading?: boolean;
+  loadError?: string | null;
+  onProfilesChange?: (profiles: DirectorProfile[]) => void;
+  onReload?: () => void | Promise<void>;
+}) {
   const { voices } = useAppState();
-  const [profiles, setProfiles] = useState<DirectorProfile[]>([]);
   const [selectedId, setSelectedId] = useState<string | "new">("new");
   const [draft, setDraft] = useState<Partial<DirectorProfile>>(emptyProfile(taskId));
+  const [initializedTaskId, setInitializedTaskId] = useState<string | null>(null);
+  const [autoSelectedTaskId, setAutoSelectedTaskId] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
 
   const voiceOptions = useMemo(() => voices.length > 0 ? voices.map((voice) => voice.name) : ["Zephyr", "Puck", "Kore"], [voices]);
-
-  const loadProfiles = useCallback(async () => {
-    setPhase("loading");
-    setError(null);
-    try {
-      const result = await taskApi.listDirectorProfiles(taskId);
-      const list = result.profiles ?? [];
-      setProfiles(list);
-      onProfilesChange?.(list);
-      if (list.length > 0) {
-        setSelectedId(list[0].id);
-        setDraft(list[0]);
-      } else {
-        setSelectedId("new");
-        setDraft(emptyProfile(taskId));
-      }
-      setPhase("success");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "导演配置加载失败");
-      setPhase("error");
-    }
-  }, [onProfilesChange, taskId]);
+  const bindingMap = useMemo(() => buildProfileBindingMap(productionLines), [productionLines]);
+  const selectedBinding = selectedId === "new" ? null : bindingMap.get(selectedId) ?? null;
+  const filteredProfiles = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return profiles;
+    return profiles.filter((profile) => [profile.name, profile.audioProfile, profile.scene, profile.directorNotes, profile.speakers.map((speaker) => `${speaker.name} ${speaker.voice}`).join(" ")].join(" ").toLowerCase().includes(q));
+  }, [profiles, search]);
 
   useEffect(() => {
-    loadProfiles();
-  }, [loadProfiles]);
+    if (initializedTaskId === taskId) return;
+    setInitializedTaskId(taskId);
+    setAutoSelectedTaskId(null);
+    setSelectedId("new");
+    setDraft(emptyProfile(taskId));
+    setError(null);
+    setSuccess(null);
+  }, [initializedTaskId, taskId]);
+
+  useEffect(() => {
+    if (autoSelectedTaskId === taskId || profiles.length === 0 || selectedId !== "new") return;
+    setSelectedId(profiles[0].id);
+    setDraft(profiles[0]);
+    setAutoSelectedTaskId(taskId);
+  }, [autoSelectedTaskId, profiles, selectedId, taskId]);
+
+  useEffect(() => {
+    if (selectedId === "new") return;
+    const latest = profiles.find((profile) => profile.id === selectedId);
+    if (latest) {
+      if (latest.source === "production-list") setDraft(latest);
+      return;
+    }
+    if (profiles.length > 0) {
+      setSelectedId(profiles[0].id);
+      setDraft(profiles[0]);
+    } else {
+      setSelectedId("new");
+      setDraft(emptyProfile(taskId));
+    }
+  }, [profiles, selectedId, taskId]);
+
+  useEffect(() => {
+    if (loadError) setError(loadError);
+  }, [loadError]);
 
   const selectProfile = (id: string | "new") => {
     setSelectedId(id);
@@ -86,6 +123,10 @@ export function DirectorProfilesPanel({ taskId, onProfilesChange }: { taskId: st
   };
 
   const save = async () => {
+    if (draft.source === "production-list") {
+      setError("来自当前生产列表的配置为只读，不能保存为全局导演配置");
+      return;
+    }
     if (!draft.name?.trim()) {
       setError("请填写配置名称");
       return;
@@ -93,6 +134,11 @@ export function DirectorProfilesPanel({ taskId, onProfilesChange }: { taskId: st
     if ((draft.speakers ?? []).length > 2) {
       setError("最多支持 2 位 speakers");
       return;
+    }
+    const binding = selectedId === "new" ? null : bindingMap.get(selectedId);
+    if (binding && binding.count > 1) {
+      const confirmed = window.confirm(`此配置被 ${binding.count} 条语音共享（行号 ${binding.lineNumbers.join(", ")}）。确认保存共享配置并影响所有绑定行？`);
+      if (!confirmed) return;
     }
     setPhase("saving");
     setError(null);
@@ -104,7 +150,6 @@ export function DirectorProfilesPanel({ taskId, onProfilesChange }: { taskId: st
       const next = selectedId === "new"
         ? [saved, ...profiles]
         : profiles.map((profile) => profile.id === saved.id ? saved : profile);
-      setProfiles(next);
       onProfilesChange?.(next);
       setSelectedId(saved.id);
       setDraft(saved);
@@ -116,53 +161,111 @@ export function DirectorProfilesPanel({ taskId, onProfilesChange }: { taskId: st
     }
   };
 
+  const duplicateSelectedProfile = async () => {
+    if (selectedId === "new") {
+      setError("请先选择一个已有导演配置再复制");
+      return;
+    }
+    const source = profiles.find((profile) => profile.id === selectedId);
+    if (!source) return;
+    setPhase("saving");
+    setError(null);
+    setSuccess(null);
+    try {
+      const saved = await taskApi.createDirectorProfile(taskId, {
+        source: "global",
+        name: `${source.name} - 独立副本 ${new Date().toLocaleTimeString("zh-CN")}`,
+        audioProfile: source.audioProfile,
+        scene: source.scene,
+        directorNotes: source.directorNotes,
+        sampleContext: source.sampleContext,
+        speakers: source.speakers.map((speaker) => ({ ...speaker })),
+      });
+      onProfilesChange?.([saved, ...profiles]);
+      setSelectedId(saved.id);
+      setDraft(saved);
+      setSuccess("已复制为新的全局导演配置；未自动修改任何生产行绑定。");
+      setPhase("success");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "复制导演配置失败");
+      setPhase("error");
+    }
+  };
+
+  const isProductionListProfile = selectedId !== "new" && draft.source === "production-list";
+  const canEdit = !isProductionListProfile;
+  const savingDisabled = phase === "saving" || isProductionListProfile;
+
   return (
     <section className="h-full min-h-[520px] grid grid-cols-[300px_1fr] border border-border-subtle bg-bg-surface">
       <aside className="border-r border-border-subtle bg-bg-sunken/70 flex flex-col">
         <div className="h-11 px-3 border-b border-border-subtle flex items-center justify-between">
           <div className="flex items-center gap-2 text-sm font-semibold"><Users size={15} /> 导演配置</div>
-          <button className="text-xs text-accent hover:text-accent-hover flex items-center gap-1" onClick={() => selectProfile("new")}><Plus size={13} /> 新建</button>
+          <div className="flex items-center gap-2">
+            {onReload && <button className="text-xs text-text-tertiary hover:text-text-primary flex items-center gap-1 disabled:opacity-50" onClick={() => void onReload()} disabled={loading}><RefreshCw size={12} className={loading ? "animate-spin" : ""} /> 刷新</button>}
+            <button className="text-xs text-accent hover:text-accent-hover flex items-center gap-1" onClick={() => selectProfile("new")}><Plus size={13} /> 新建</button>
+          </div>
         </div>
-        <div className="p-3 border-b border-border-subtle text-[10px] text-warning bg-warning-muted/30">MVP 阶段最多 2 位 speakers，超出需拆分为多条生产行。</div>
+        <div className="p-3 border-b border-border-subtle flex flex-col gap-2">
+          <label className="relative flex items-center">
+            <Search size={12} className="absolute left-2 text-text-tertiary" />
+            <input className="w-full h-8 bg-bg-base border border-border rounded pl-7 pr-2 text-xs outline-none focus:border-border-focus" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索配置、场景、音色" />
+          </label>
+          <div className="text-[10px] text-warning bg-warning-muted/30 border border-warning/20 rounded px-2 py-1">MVP 阶段最多 2 位 speakers，超出需拆分为多条生产行。</div>
+        </div>
         <div className="flex-1 overflow-y-auto">
-          {phase === "loading" && profiles.length === 0 && <PanelNote text="正在加载导演配置" loading />}
-          {phase !== "loading" && profiles.length === 0 && <PanelNote text="暂无导演配置" hint="创建后可在生产行中引用" />}
-          {profiles.map((profile) => (
-            <button key={profile.id} className={`w-full text-left px-3 py-3 border-b border-border-subtle hover:bg-bg-hover ${selectedId === profile.id ? "bg-accent-subtle" : ""}`} onClick={() => selectProfile(profile.id)}>
+          {loading && profiles.length === 0 && <PanelNote text="正在加载导演配置" loading />}
+          {!loading && profiles.length === 0 && <PanelNote text="暂无导演配置" hint="创建后可在生产行中引用" />}
+          {!loading && profiles.length > 0 && filteredProfiles.length === 0 && <PanelNote text="没有匹配的导演配置" hint="请调整搜索关键词" />}
+          {filteredProfiles.map((profile) => {
+            const binding = bindingMap.get(profile.id);
+            return <button key={profile.id} className={`w-full text-left px-3 py-3 border-b border-border-subtle hover:bg-bg-hover ${selectedId === profile.id ? "bg-accent-subtle" : ""}`} onClick={() => selectProfile(profile.id)}>
               <div className="text-sm font-medium truncate">{profile.name}</div>
-              <div className="text-[10px] text-text-tertiary mt-1">{profile.speakers?.length ?? 0} speakers · v{profile.version}</div>
-            </button>
-          ))}
+              <div className="text-[10px] text-text-tertiary mt-1">{profile.speakers?.length ?? 0} 位说话者 · v{profile.version} · {profile.source === "production-list" ? "当前生产列表/只读" : "全局配置"}</div>
+              <div className="mt-1 text-[10px] text-text-secondary">绑定语音: {binding?.count ?? 0} 条{binding && binding.lineNumbers.length > 0 ? ` · 行号 ${binding.lineNumbers.slice(0, 6).map((n) => String(n).padStart(2, "0")).join(", ")}${binding.lineNumbers.length > 6 ? "..." : ""}` : ""}</div>
+            </button>;
+          })}
         </div>
       </aside>
 
       <main className="min-w-0 flex flex-col">
         <header className="h-11 px-4 border-b border-border-subtle flex items-center justify-between">
-          <div className="text-sm font-semibold">{selectedId === "new" ? "新建配置" : "编辑配置"}</div>
-          <button className="px-4 py-1.5 rounded bg-accent text-bg-base text-xs font-semibold hover:bg-accent-hover disabled:opacity-50 flex items-center gap-1" onClick={save} disabled={phase === "saving"}>{phase === "saving" ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} 保存配置</button>
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-semibold">{selectedId === "new" ? "新建配置" : isProductionListProfile ? "只读配置" : "编辑配置"}</div>
+            {isProductionListProfile && <span className="px-2 py-0.5 rounded border border-warning/30 bg-warning-muted text-[10px] text-warning">来自当前生产列表/只读</span>}
+            {selectedBinding && <span className="px-2 py-0.5 rounded border border-border bg-bg-sunken text-[10px] text-text-secondary">绑定 {selectedBinding.count} 行</span>}
+          </div>
+          <div className="flex items-center gap-2">
+            <button className="px-3 py-1.5 rounded border border-border text-xs hover:bg-bg-hover disabled:opacity-50 flex items-center gap-1" onClick={() => void duplicateSelectedProfile()} disabled={selectedId === "new" || phase === "saving"}><Copy size={13} /> 复制为独立配置</button>
+            <button className="px-4 py-1.5 rounded bg-accent text-bg-base text-xs font-semibold hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1" onClick={save} disabled={savingDisabled} title={isProductionListProfile ? "来自当前生产列表的配置不能写入全局导演配置" : "保存全局导演配置"}>{phase === "saving" ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} {isProductionListProfile ? "只读不可保存" : "保存配置"}</button>
+          </div>
         </header>
+
+        {isProductionListProfile && <div className="mx-4 mt-3 px-3 py-2 rounded border border-warning/20 bg-warning-muted/30 text-xs text-warning">此配置来自当前任务的生产列表，仅用于查看和生产行绑定。为避免覆盖全局配置，本页不会调用全局导演配置保存接口。</div>}
+        {selectedBinding && selectedBinding.count > 1 && <div className="mx-4 mt-3 px-3 py-2 rounded border border-warning/20 bg-warning-muted/30 text-xs text-warning">此配置被 {selectedBinding.count} 条语音共享，行号：{selectedBinding.lineNumbers.join(", ")}。直接保存会影响所有绑定行；保存前将再次确认。</div>}
+        {selectedBinding && selectedBinding.count > 0 && selectedBinding.count <= 1 && <div className="mx-4 mt-3 px-3 py-2 rounded border border-border-subtle bg-bg-sunken text-xs text-text-secondary">绑定语音行号：{selectedBinding.lineNumbers.join(", ")}</div>}
 
         {(error || success) && <div className={`mx-4 mt-3 px-3 py-2 rounded border text-xs flex items-center gap-2 ${error ? "bg-error-muted border-error/20 text-error" : "bg-success-muted border-success/20 text-success"}`}>{error ? <AlertCircle size={14} /> : <CheckCircle2 size={14} />}{error || success}</div>}
 
         <div className="flex-1 overflow-y-auto p-4 grid grid-cols-2 gap-4 content-start">
-          <Field label="配置名称" className="col-span-2"><input className={CONTROL_CLASS} value={draft.name ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, name: event.target.value }))} /></Field>
-          <Field label="Audio Profile"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.audioProfile ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, audioProfile: event.target.value }))} /></Field>
-          <Field label="Scene"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.scene ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, scene: event.target.value }))} /></Field>
-          <Field label="Director Notes"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.directorNotes ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, directorNotes: event.target.value }))} /></Field>
-          <Field label="Sample Context"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.sampleContext ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, sampleContext: event.target.value }))} /></Field>
+          <Field label="配置名称" className="col-span-2"><input className={CONTROL_CLASS} value={draft.name ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, name: event.target.value }))} disabled={!canEdit} /></Field>
+          <Field label="音频画像"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.audioProfile ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, audioProfile: event.target.value }))} disabled={!canEdit} /></Field>
+          <Field label="场景"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.scene ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, scene: event.target.value }))} disabled={!canEdit} /></Field>
+          <Field label="导演备注"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.directorNotes ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, directorNotes: event.target.value }))} disabled={!canEdit} /></Field>
+          <Field label="示例上下文"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.sampleContext ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, sampleContext: event.target.value }))} disabled={!canEdit} /></Field>
 
           <div className="col-span-2 border border-border-subtle rounded-md bg-bg-sunken p-3">
             <div className="flex items-center justify-between mb-3">
-              <span className="text-sm font-semibold">Speakers</span>
-              <button className="text-xs text-accent disabled:text-text-tertiary flex items-center gap-1" onClick={addSpeaker} disabled={(draft.speakers ?? []).length >= 2}><Plus size={12} /> 添加 speaker</button>
+              <span className="text-sm font-semibold">说话者</span>
+              <button className="text-xs text-accent disabled:text-text-tertiary flex items-center gap-1" onClick={addSpeaker} disabled={!canEdit || (draft.speakers ?? []).length >= 2}><Plus size={12} /> 添加说话者</button>
             </div>
             <div className="grid grid-cols-2 gap-3">
               {(draft.speakers ?? []).map((speaker) => (
                 <div key={speaker.id} className="border border-border rounded-md bg-bg-base p-3 flex flex-col gap-2">
-                  <div className="flex items-center justify-between text-xs font-semibold"><span>{speaker.label}</span>{speaker.id !== "a" && <button className="text-error" onClick={() => removeSpeaker(speaker.id)}>移除</button>}</div>
-                  <input className={CONTROL_CLASS} placeholder="角色名" value={speaker.name} onChange={(event) => updateSpeaker(speaker.id, { name: event.target.value })} />
-                  <select className={CONTROL_CLASS} value={speaker.voice} onChange={(event) => updateSpeaker(speaker.id, { voice: event.target.value })}>{voiceOptions.map((voice) => <option key={voice} value={voice}>{voice}</option>)}</select>
-                  <input className={CONTROL_CLASS} placeholder="风格" value={speaker.style ?? ""} onChange={(event) => updateSpeaker(speaker.id, { style: event.target.value })} />
+                  <div className="flex items-center justify-between text-xs font-semibold"><span>{displaySpeakerLabel(speaker.label)}</span>{speaker.id !== "a" && <button className="text-error disabled:text-text-tertiary" onClick={() => removeSpeaker(speaker.id)} disabled={!canEdit}>移除</button>}</div>
+                  <input className={CONTROL_CLASS} placeholder="角色名" value={speaker.name} onChange={(event) => updateSpeaker(speaker.id, { name: event.target.value })} disabled={!canEdit} />
+                  <select className={CONTROL_CLASS} value={speaker.voice} onChange={(event) => updateSpeaker(speaker.id, { voice: event.target.value })} disabled={!canEdit}>{voiceOptions.map((voice) => <option key={voice} value={voice}>{voice}</option>)}</select>
+                  <input className={CONTROL_CLASS} placeholder="风格" value={speaker.style ?? ""} onChange={(event) => updateSpeaker(speaker.id, { style: event.target.value })} disabled={!canEdit} />
                 </div>
               ))}
             </div>
@@ -171,6 +274,25 @@ export function DirectorProfilesPanel({ taskId, onProfilesChange }: { taskId: st
       </main>
     </section>
   );
+}
+
+function displaySpeakerLabel(label: string): string {
+  const match = label.match(/^Speaker\s+([A-Z])$/i);
+  return match ? `说话者 ${match[1].toUpperCase()}` : label;
+}
+
+function buildProfileBindingMap(lines: VoiceLine[]) {
+  const map = new Map<string, { count: number; lineIds: string[]; lineNumbers: number[] }>();
+  lines.forEach((line, index) => {
+    const profileId = line.promptProfileId ?? line.directorProfileId;
+    if (!profileId) return;
+    const current = map.get(profileId) ?? { count: 0, lineIds: [], lineNumbers: [] };
+    current.count += 1;
+    current.lineIds.push(line.id);
+    current.lineNumbers.push(index + 1);
+    map.set(profileId, current);
+  });
+  return map;
 }
 
 function Field({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) {

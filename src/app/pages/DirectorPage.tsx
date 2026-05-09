@@ -9,6 +9,19 @@ const EMOTION_TAGS = ["[happy]", "[sad]", "[excited]", "[calm]", "[angry]", "[ne
 const EXPRESS_TAGS = ["[slow]", "[fast]", "[pause]", "[whisper]", "[shout]", "[sigh]", "[laugh]"];
 const PARA_TAGS = { "情绪": EMOTION_TAGS, "表达": EXPRESS_TAGS, "副语言": ["[breath]", "[cough]", "[giggle]", "[gasp]", "[yawn]"] };
 
+function displaySpeakerLabel(label: string): string {
+  const match = label.match(/^Speaker\s+([A-Z])$/i);
+  return match ? `说话者 ${match[1].toUpperCase()}` : label;
+}
+
+const DIRECTOR_FIELD_LABELS = {
+  audioProfile: "音频画像",
+  scene: "场景",
+  directorNotes: "导演备注",
+  sampleContext: "示例上下文",
+  transcript: "台词文本",
+};
+
 type DirectorStep = "edit" | "preview" | "confirm";
 
 export function DirectorPage() {
@@ -207,40 +220,40 @@ export function DirectorPage() {
         <div className="flex-1 flex overflow-hidden">
           {/* Left Column: Editor */}
           <div className="flex-1 p-6 overflow-y-auto flex flex-col gap-4">
-            <Section id="audioProfile" icon={<span className="text-text-tertiary text-xs">*</span>} title="Audio Profile">
+            <Section id="audioProfile" icon={<span className="text-text-tertiary text-xs">*</span>} title={DIRECTOR_FIELD_LABELS.audioProfile}>
               <textarea
                 className="w-full min-h-[80px] bg-transparent outline-none resize-y text-sm text-text-primary placeholder:text-text-tertiary"
-                placeholder="A warm, middle-aged male voice with a calm, reassuring tone..."
+                placeholder="例如：温暖、沉稳的中年男声，语气安心且有叙述感..."
                 value={audioProfile}
                 onChange={(e) => setAudioProfile(e.target.value)}
                 disabled={assemblePhase === "loading"}
               />
             </Section>
 
-            <Section id="scene" icon={<span className="text-text-tertiary text-xs">*</span>} title="Scene">
+            <Section id="scene" icon={<span className="text-text-tertiary text-xs">*</span>} title={DIRECTOR_FIELD_LABELS.scene}>
               <textarea
                 className="w-full min-h-[80px] bg-transparent outline-none resize-y text-sm text-text-primary placeholder:text-text-tertiary"
-                placeholder="A cozy living room with a crackling fireplace..."
+                placeholder="例如：壁炉轻响的温暖客厅，窗外正在下雨..."
                 value={scene}
                 onChange={(e) => setScene(e.target.value)}
                 disabled={assemblePhase === "loading"}
               />
             </Section>
 
-            <Section id="directorNotes" icon={<span className="text-text-tertiary text-xs">*</span>} title="Director's Notes">
+            <Section id="directorNotes" icon={<span className="text-text-tertiary text-xs">*</span>} title={DIRECTOR_FIELD_LABELS.directorNotes}>
               <textarea
                 className="w-full min-h-[80px] bg-transparent outline-none resize-y text-sm text-text-primary placeholder:text-text-tertiary"
-                placeholder="Speak slowly and thoughtfully. Emphasize key words..."
+                placeholder="例如：语速放慢，思考感更强，关键句略作停顿..."
                 value={directorNotes}
                 onChange={(e) => setDirectorNotes(e.target.value)}
                 disabled={assemblePhase === "loading"}
               />
             </Section>
 
-            <Section id="sampleContext" icon={<span className="text-text-tertiary text-xs">*</span>} title="Sample Context">
+            <Section id="sampleContext" icon={<span className="text-text-tertiary text-xs">*</span>} title={DIRECTOR_FIELD_LABELS.sampleContext}>
               <textarea
                 className="w-full min-h-[80px] bg-transparent outline-none resize-y text-sm text-text-primary placeholder:text-text-tertiary"
-                placeholder="Provide background context: previous episode summary, character backstory, world-building details..."
+                placeholder="补充背景信息：前情提要、角色经历、世界观设定等..."
                 value={sampleContext}
                 onChange={(e) => setSampleContext(e.target.value)}
                 disabled={assemblePhase === "loading"}
@@ -250,14 +263,14 @@ export function DirectorPage() {
             <div className="border border-border-focus rounded-lg bg-bg-surface overflow-hidden flex-1 flex flex-col min-h-[200px]">
               <div className="h-9 px-3 flex items-center justify-between border-b border-border-subtle bg-bg-hover">
                 <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
-                  <span className="text-accent">*</span> Transcript
+                  <span className="text-accent">*</span> {DIRECTOR_FIELD_LABELS.transcript}
                 </div>
                 <span className="text-xs text-text-tertiary">{transcript.length} 字符</span>
               </div>
               <div className="p-3 bg-bg-sunken flex-1 flex flex-col">
                 <textarea
                   className="w-full flex-1 bg-transparent outline-none resize-none text-sm text-text-primary placeholder:text-text-tertiary"
-                  placeholder="Type the exact transcript here..."
+                  placeholder="在此输入需要朗读的完整台词..."
                   value={transcript}
                   onChange={(e) => setTranscript(e.target.value)}
                   disabled={assemblePhase === "loading"}
@@ -271,7 +284,7 @@ export function DirectorPage() {
             {/* Speakers */}
             <div className="flex flex-col gap-4">
               <h3 className="text-sm font-semibold text-text-primary flex items-center justify-between">
-                Speaker Config
+                说话者配置
                 <button
                   className={`text-xs font-medium flex items-center gap-1 transition-colors ${
                     isSpeakerLimitReached
@@ -280,9 +293,9 @@ export function DirectorPage() {
                   }`}
                   onClick={addSpeaker}
                   disabled={isSpeakerLimitReached}
-                  title={isSpeakerLimitReached ? `MVP 阶段最多 ${MAX_SPEAKERS} 位说话者` : "添加 Speaker"}
+                  title={isSpeakerLimitReached ? `MVP 阶段最多 ${MAX_SPEAKERS} 位说话者` : "添加说话者"}
                 >
-                  <Plus size={14} /> 添加 Speaker
+                  <Plus size={14} /> 添加说话者
                 </button>
               </h3>
 
@@ -291,7 +304,7 @@ export function DirectorPage() {
               {speakers.map((speaker) => (
                 <div key={speaker.id} className="border border-border rounded-md p-3 bg-bg-surface flex flex-col gap-3">
                   <div className="flex justify-between items-center text-xs font-medium text-text-secondary">
-                    <span>{speaker.label}</span>
+                    <span>{displaySpeakerLabel(speaker.label)}</span>
                     {speaker.id !== "a" && (
                       <button
                         className="text-error hover:text-error/80 transition-colors"
@@ -391,7 +404,7 @@ export function DirectorPage() {
                 onClick={() => setFormat("pcm")}
                 disabled={assemblePhase === "loading"}
               >
-                PCM (raw)
+                PCM（原始）
               </button>
             </div>
 
@@ -440,7 +453,7 @@ export function DirectorPage() {
             <div>
               <h2 className="text-lg font-semibold font-display text-text-primary">提示词组装结果</h2>
               <p className="text-text-tertiary text-xs mt-1">
-                Request ID: {assembleSuccess.requestId}
+                请求 ID: {assembleSuccess.requestId}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -478,22 +491,22 @@ export function DirectorPage() {
           {/* Normalized speakers */}
           {assembleSuccess.normalized.speakers.length > 0 && (
             <div className="flex flex-col gap-2">
-              <h3 className="text-sm font-semibold text-text-primary">规范化 Speaker 信息</h3>
+              <h3 className="text-sm font-semibold text-text-primary">规范化说话者信息</h3>
               <div className="grid gap-2">
                 {assembleSuccess.normalized.speakers.map((s) => (
                   <div key={s.id} className="flex items-center gap-3 px-3 py-2 rounded-md bg-bg-surface border border-border-subtle text-xs">
-                    <span className="font-semibold text-text-primary">{s.label}</span>
+                    <span className="font-semibold text-text-primary">{displaySpeakerLabel(s.label)}</span>
                     {s.name && <span className="text-text-secondary">({s.name})</span>}
-                    <span className="text-text-tertiary">Voice:</span>
+                    <span className="text-text-tertiary">音色:</span>
                     <span className="text-accent font-mono">{s.voice}</span>
                     {s.wasLegacyAlias && (
                       <span className="px-1.5 py-0.5 rounded bg-warning-muted text-warning border border-warning/20 text-[10px]">
-                        legacy alias 已映射
+                        旧音色别名已映射
                       </span>
                     )}
                     {s.style && (
                       <>
-                        <span className="text-text-tertiary">Style:</span>
+                        <span className="text-text-tertiary">风格:</span>
                         <span className="text-text-secondary">{s.style}</span>
                       </>
                     )}
@@ -508,16 +521,16 @@ export function DirectorPage() {
             <h3 className="text-sm font-semibold text-text-primary">五要素概要</h3>
             <div className="grid gap-2 text-xs">
               {[
-                { label: "Audio Profile", value: assembleSuccess.normalized.audioProfile },
-                { label: "Scene", value: assembleSuccess.normalized.scene },
-                { label: "Director's Notes", value: assembleSuccess.normalized.directorNotes },
-                { label: "Sample Context", value: assembleSuccess.normalized.sampleContext },
-                { label: "Transcript", value: assembleSuccess.normalized.transcript },
+                { label: DIRECTOR_FIELD_LABELS.audioProfile, value: assembleSuccess.normalized.audioProfile },
+                { label: DIRECTOR_FIELD_LABELS.scene, value: assembleSuccess.normalized.scene },
+                { label: DIRECTOR_FIELD_LABELS.directorNotes, value: assembleSuccess.normalized.directorNotes },
+                { label: DIRECTOR_FIELD_LABELS.sampleContext, value: assembleSuccess.normalized.sampleContext },
+                { label: DIRECTOR_FIELD_LABELS.transcript, value: assembleSuccess.normalized.transcript },
               ].map((el) => (
                 <div key={el.label} className="flex items-start gap-2 px-3 py-1.5 rounded-md bg-bg-surface border border-border-subtle">
                   <span className="text-text-tertiary shrink-0 w-[110px]">{el.label}:</span>
                   <span className={`break-all ${el.value ? "text-text-secondary" : "text-text-tertiary italic"}`}>
-                    {el.value || "(empty)"}
+                    {el.value || "未填写"}
                   </span>
                 </div>
               ))}
@@ -532,7 +545,7 @@ export function DirectorPage() {
             </div>
             <div className="flex items-center justify-between text-xs text-text-tertiary">
               <span>{assembleSuccess.prompt.length} 字符</span>
-              <span>此步骤不消耗 Token / API 额度</span>
+              <span>此步骤不消耗额度</span>
             </div>
           </div>
         </div>
@@ -584,9 +597,9 @@ export function DirectorPage() {
               <div className="w-12 h-12 rounded-full bg-error-muted flex items-center justify-center mx-auto">
                 <AlertCircle size={24} className="text-error" />
               </div>
-              <h3 className="text-sm font-semibold text-text-primary">未配置 API Key</h3>
+              <h3 className="text-sm font-semibold text-text-primary">未配置 API 密钥</h3>
               <p className="text-xs text-text-secondary">
-                生成语音需要调用 OpenRouter API，请先在设置页面配置 API Key。组装提示词不消耗额度，但实际生成需要有效的 API Key。
+                生成语音需要调用 OpenRouter API，请先在设置页面配置 API 密钥。组装提示词不消耗额度，但实际生成需要有效的 API 密钥。
               </p>
               <button
                 className="text-sm text-accent hover:text-accent-hover transition-colors"
@@ -629,7 +642,7 @@ export function DirectorPage() {
 
               {generateResult.audioUrl && (
                 <audio controls className="w-full" src={generateResult.audioUrl}>
-                  Your browser does not support the audio element.
+                  当前浏览器不支持音频播放控件。
                 </audio>
               )}
 
@@ -726,7 +739,7 @@ export function DirectorPage() {
             <p className="text-xs text-text-secondary">{assembleError.message}</p>
             {assembleError.code === "DIRECTOR_SPEAKER_LIMIT_EXCEEDED" && (
               <p className="text-xs text-text-tertiary">
-                MVP 阶段最多支持 {MAX_SPEAKERS} 位说话者。请返回编辑并减少 Speaker 数量。
+                MVP 阶段最多支持 {MAX_SPEAKERS} 位说话者。请返回编辑并减少说话者数量。
               </p>
             )}
           </div>

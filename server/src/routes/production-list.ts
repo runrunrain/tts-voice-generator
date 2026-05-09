@@ -5,10 +5,18 @@
  * PUT    /api/tasks/:taskId/production-list              - Replace production list (with expectedVersion)
  * PATCH  /api/tasks/:taskId/production-list              - Domain-level patches
  * POST   /api/tasks/:taskId/production-list/validate     - Validate production list
+ * POST   /api/tasks/:taskId/production-list/generate     - Generate speech from lines
+ * GET    /api/tasks/:taskId/production-list/versions     - Version history
+ * GET    /api/tasks/:taskId/production-list/versions/:from/diff/:to - Version diff
+ * POST   /api/tasks/:taskId/production-list/rollback     - Rollback to target version
+ * GET    /api/tasks/:taskId/production-list/export       - Export (json/md/csv)
+ * POST   /api/tasks/:taskId/production-list/import       - Import (json/csv)
+ * GET    /api/tasks/:taskId/production-list/quality-report - Quality report
  */
 
 import { Hono } from "hono";
 import { v4 as uuidv4 } from "uuid";
+import { z } from "zod";
 import { eq, and, desc } from "drizzle-orm";
 import { getDb } from "../db/index.js";
 import { directorProfile as dpTable } from "../db/schema-extended.js";
@@ -33,14 +41,35 @@ import {
   writeArtifact,
   readArtifact,
   productionListArtifactName,
+  productionListVersionArtifactName,
 } from "../services/artifact-store.js";
 import { generateSpeech, type GenerateSpeechRequest } from "../services/tts-generator.js";
 import { isOpenRouterConfigured } from "../services/key-resolver.js";
+import { parseCsv } from "./production-list-modules/csv.js";
+import { resolvePromptAssemblyInput } from "./production-list-modules/director-snapshot.js";
+import { assemblePrompt } from "../services/prompt-assembly.js";
+import {
+  buildProductionListExportData,
+  formatProductionListCsv,
+  formatProductionListMarkdown,
+  sanitizeLinesForExport,
+} from "./production-list-modules/export-formatters.js";
+import { applyPatch } from "./production-list-modules/patch.js";
+import { buildQualityReportMetrics } from "./production-list-modules/quality-report.js";
+import {
+  getCurrentVersion,
+  loadProductionList,
+  loadVersionLines,
+} from "./production-list-modules/repository.js";
 
 const app = new Hono();
 
 function apiError(c: any, requestId: string, status: number, code: string, message: string, category: string, retryable = false, metadata?: unknown) {
   return c.json({ ok: false, requestId, error: { code, message, category, retryable, metadata } }, status);
+}
+
+function logicalLineId(line: { id: string; lineId?: string | null }): string {
+  return line.lineId ?? line.id;
 }
 
 function auditLog(entityType: string, entityId: string, operation: string, actor: string, snapshot?: unknown, requestId?: string) {
@@ -56,83 +85,6 @@ function auditLog(entityType: string, entityId: string, operation: string, actor
       createdAt: new Date(),
     }).run();
   } catch { /* non-critical */ }
-}
-
-/**
- * Get current production list version number for a task.
- */
-function getCurrentVersion(taskId: string): number {
-  const db = getDb();
-  const latest = db.select().from(productionListVersion)
-    .where(eq(productionListVersion.taskId, taskId))
-    .orderBy(desc(productionListVersion.version))
-    .limit(1)
-    .get();
-  return latest?.version ?? 0;
-}
-
-/**
- * Load production list from artifact + DB.
- */
-function loadProductionList(taskId: string, versionId: string) {
-  const db = getDb();
-  const version = db.select().from(productionListVersion)
-    .where(eq(productionListVersion.id, versionId))
-    .get();
-  if (!version) return null;
-
-  const lines = db.select().from(voiceLine)
-    .where(eq(voiceLine.versionId, versionId))
-    .orderBy(voiceLine.order)
-    .all();
-
-  const artifact = readArtifact<{
-    lines: Array<Record<string, unknown>>;
-    speakers: unknown[];
-  }>(taskId, productionListArtifactName());
-
-  const artifactLinesById = new Map<string, Record<string, unknown>>();
-  if (Array.isArray(artifact?.lines)) {
-    for (const line of artifact.lines) {
-      if (line && typeof line.id === "string") artifactLinesById.set(line.id, line);
-    }
-  }
-
-  return {
-    taskId: version.taskId,
-    version: version.version,
-    versionId: version.id,
-    lines: lines.map((l) => {
-      const artifactLine = artifactLinesById.get(l.id) ?? {};
-      return {
-        id: l.id,
-        order: l.order,
-        speaker: l.speaker,
-        text: l.text,
-        voice: l.voice,
-        style: l.style,
-        notes: l.notes,
-        status: l.status,
-        model: typeof artifactLine.model === "string" ? artifactLine.model : "google/gemini-3.1-flash-tts-preview",
-        responseFormat: artifactLine.responseFormat === "pcm" || artifactLine.responseFormat === "mp3" || artifactLine.responseFormat === "wav" ? artifactLine.responseFormat : "wav",
-        directorProfileId: l.directorProfileId ?? (typeof artifactLine.directorProfileId === "string" ? artifactLine.directorProfileId : null),
-        directorOverrideJson: l.directorOverrideJson ?? (typeof artifactLine.directorOverrideJson === "string" ? artifactLine.directorOverrideJson : null),
-        generationStatus: l.generationStatus ?? (typeof artifactLine.generationStatus === "string" ? artifactLine.generationStatus : "draft"),
-        relatedJobId: l.relatedJobId ?? (typeof artifactLine.relatedJobId === "string" ? artifactLine.relatedJobId : null),
-        relatedAssetId: l.relatedAssetId ?? (typeof artifactLine.relatedAssetId === "number" ? artifactLine.relatedAssetId : null),
-        generationErrorCode: l.generationStatus === "failed"
-          ? (l.generationErrorCode ?? (typeof artifactLine.generationErrorCode === "string" ? artifactLine.generationErrorCode : null))
-          : null,
-        generationErrorMessage: l.generationStatus === "failed"
-          ? (l.generationErrorMessage ?? (typeof artifactLine.generationErrorMessage === "string" ? artifactLine.generationErrorMessage : null))
-          : null,
-      };
-    }),
-    speakers: artifact?.speakers ? JSON.parse(JSON.stringify(artifact.speakers)) : [],
-    directorProfileId: version.directorProfileId,
-    metadata: version.metadataJson ? JSON.parse(version.metadataJson) : {},
-    createdAt: version.createdAt.toISOString(),
-  };
 }
 
 // ─── GET /api/tasks/:taskId/production-list ────────────────────────────────────
@@ -213,7 +165,7 @@ app.put("/api/tasks/:taskId/production-list", async (c) => {
     return apiError(c, requestId, 400, "VALIDATION_ERROR", "Request validation failed.", "validation", false, { issues: parsed.error.flatten() });
   }
 
-  const { expectedVersion, lines, speakers, directorProfileId, metadata } = parsed.data;
+  const { expectedVersion, lines, speakers, promptProfiles, directorProfiles, directorProfileId, metadata } = parsed.data;
 
   // Version conflict check
   const currentVersion = getCurrentVersion(taskId);
@@ -240,14 +192,13 @@ app.put("/api/tasks/:taskId/production-list", async (c) => {
     createdAt: now,
   }).run();
 
-  // Insert voice lines
+  // Insert voice-line index rows. `voice_line.id` is now a version-row id while
+  // `voice_line.line_id` keeps the stable logical line id used by artifacts/API.
+  // Do not delete prior version rows: historical DB indexes must remain intact.
   for (const line of lines) {
-    // voice_line.id is the semantic line id in the current schema. A new
-    // production-list version may legitimately carry the same semantic line id,
-    // so replace the index row before inserting the latest version row.
-    db.delete(voiceLine).where(eq(voiceLine.id, line.id)).run();
     db.insert(voiceLine).values({
-      id: line.id || uuidv4(),
+      id: uuidv4(),
+      lineId: line.id || uuidv4(),
       taskId,
       versionId,
       order: line.order,
@@ -257,7 +208,7 @@ app.put("/api/tasks/:taskId/production-list", async (c) => {
       style: line.style ?? "",
       notes: line.notes ?? "",
       status: line.status ?? "pending",
-      directorProfileId: line.directorProfileId ?? null,
+      directorProfileId: line.directorProfileId ?? line.promptProfileId ?? null,
       directorOverrideJson: line.directorOverrideJson ?? null,
       generationStatus: line.generationStatus ?? "draft",
       relatedJobId: line.relatedJobId ?? null,
@@ -269,16 +220,31 @@ app.put("/api/tasks/:taskId/production-list", async (c) => {
     }).run();
   }
 
-  // Store full production list in artifact
-  writeArtifact(taskId, productionListArtifactName(), {
+  // Store full production list in current artifact
+  const artifactData = {
+    schemaVersion: promptProfiles.length > 0 || directorProfiles.length > 0 ? "tts.production-list.v2" : metadata.schemaVersion,
     version: newVersion,
     versionId,
-    lines,
+    lines: lines.map((line) => ({
+      ...line,
+      transcript: line.transcript ?? line.text,
+      promptProfileId: line.promptProfileId ?? line.directorProfileId ?? null,
+      directorProfileId: line.directorProfileId ?? line.promptProfileId ?? null,
+    })),
     speakers,
+    promptProfiles: promptProfiles.length > 0 ? promptProfiles : directorProfiles,
+    directorProfiles: directorProfiles.length > 0 ? directorProfiles : promptProfiles,
     directorProfileId,
-    metadata,
+    metadata: {
+      ...metadata,
+      ...(promptProfiles.length > 0 || directorProfiles.length > 0 ? { schemaVersion: "tts.production-list.v2" } : {}),
+    },
     updatedAt: now.toISOString(),
-  });
+  };
+  writeArtifact(taskId, productionListArtifactName(), artifactData);
+
+  // Also write a versioned snapshot so rollback/diff can read historical data
+  writeArtifact(taskId, productionListVersionArtifactName(newVersion), artifactData);
 
   auditLog("production_list", versionId, "put", "user", { taskId, version: newVersion, lineCount: lines.length }, requestId);
 
@@ -350,8 +316,8 @@ app.patch("/api/tasks/:taskId/production-list", async (c) => {
     }
   }
   const mergedCurrentLines = currentLines.map((line) => ({
-    ...artifactLinesById.get(line.id),
-    id: line.id,
+    ...artifactLinesById.get(logicalLineId(line)),
+    id: logicalLineId(line),
     order: line.order,
     speaker: line.speaker,
     text: line.text,
@@ -359,13 +325,13 @@ app.patch("/api/tasks/:taskId/production-list", async (c) => {
     style: line.style,
     notes: line.notes,
     status: line.status,
-    directorProfileId: line.directorProfileId ?? (artifactLinesById.get(line.id)?.directorProfileId ?? null),
-    directorOverrideJson: line.directorOverrideJson ?? (artifactLinesById.get(line.id)?.directorOverrideJson ?? null),
-    generationStatus: line.generationStatus ?? (artifactLinesById.get(line.id)?.generationStatus ?? "draft"),
-    relatedJobId: line.relatedJobId ?? (artifactLinesById.get(line.id)?.relatedJobId ?? null),
-    relatedAssetId: line.relatedAssetId ?? (artifactLinesById.get(line.id)?.relatedAssetId ?? null),
-    generationErrorCode: line.generationErrorCode ?? (artifactLinesById.get(line.id)?.generationErrorCode ?? null),
-    generationErrorMessage: line.generationErrorMessage ?? (artifactLinesById.get(line.id)?.generationErrorMessage ?? null),
+    directorProfileId: line.directorProfileId ?? (artifactLinesById.get(logicalLineId(line))?.directorProfileId ?? null),
+    directorOverrideJson: line.directorOverrideJson ?? (artifactLinesById.get(logicalLineId(line))?.directorOverrideJson ?? null),
+    generationStatus: line.generationStatus ?? (artifactLinesById.get(logicalLineId(line))?.generationStatus ?? "draft"),
+    relatedJobId: line.relatedJobId ?? (artifactLinesById.get(logicalLineId(line))?.relatedJobId ?? null),
+    relatedAssetId: line.relatedAssetId ?? (artifactLinesById.get(logicalLineId(line))?.relatedAssetId ?? null),
+    generationErrorCode: line.generationErrorCode ?? (artifactLinesById.get(logicalLineId(line))?.generationErrorCode ?? null),
+    generationErrorMessage: line.generationErrorMessage ?? (artifactLinesById.get(logicalLineId(line))?.generationErrorMessage ?? null),
   }));
 
   // Apply domain-level patch
@@ -414,9 +380,9 @@ app.patch("/api/tasks/:taskId/production-list", async (c) => {
   }).run();
 
   for (const line of validatedLines) {
-    db.delete(voiceLine).where(eq(voiceLine.id, (line as any).id)).run();
     db.insert(voiceLine).values({
-      id: (line as any).id || uuidv4(),
+      id: uuidv4(),
+      lineId: (line as any).id || uuidv4(),
       taskId,
       versionId,
       order: (line as any).order,
@@ -438,128 +404,33 @@ app.patch("/api/tasks/:taskId/production-list", async (c) => {
     }).run();
   }
 
-  writeArtifact(taskId, productionListArtifactName(), {
+  const patchArtifactData = {
+    schemaVersion: (currentArtifact as any)?.schemaVersion,
     version: newVersion,
     versionId,
-    lines: validatedLines,
+    lines: validatedLines.map((line: any) => ({
+      ...line,
+      transcript: line.transcript ?? line.text,
+      promptProfileId: line.promptProfileId ?? line.directorProfileId ?? null,
+      directorProfileId: line.directorProfileId ?? line.promptProfileId ?? null,
+    })),
     speakers,
+    promptProfiles: (currentArtifact as any)?.promptProfiles ?? (currentArtifact as any)?.directorProfiles ?? [],
+    directorProfiles: (currentArtifact as any)?.directorProfiles ?? (currentArtifact as any)?.promptProfiles ?? [],
     directorProfileId: latestVersion.directorProfileId,
     metadata: latestVersion.metadataJson ? JSON.parse(latestVersion.metadataJson) : {},
     updatedAt: now.toISOString(),
-  });
+  };
+  writeArtifact(taskId, productionListArtifactName(), patchArtifactData);
+
+  // Also write a versioned snapshot so rollback/diff can read historical data
+  writeArtifact(taskId, productionListVersionArtifactName(newVersion), patchArtifactData);
 
   auditLog("production_list", versionId, `patch:${op}`, "user", { taskId, version: newVersion, op }, requestId);
 
   const pl = loadProductionList(taskId, versionId);
   return c.json({ ok: true, requestId, productionList: pl });
 });
-
-function applyPatch(op: string, payload: Record<string, unknown>, currentLines: any[], currentSpeakers: unknown[]): { lines: any[]; speakers?: unknown[] } {
-  const lines = [...currentLines];
-  let speakers: unknown[] | undefined;
-
-  switch (op) {
-    case "updateLine": {
-      const { lineId, updates } = payload as { lineId: string; updates: Record<string, unknown> };
-      const idx = lines.findIndex((l) => l.id === lineId);
-      if (idx === -1) throw new Error(`Line "${lineId}" not found`);
-      const allowed = ["text", "voice", "style", "notes", "speaker", "model", "responseFormat", "directorProfileId", "directorOverrideJson"];
-      for (const key of Object.keys(updates)) {
-        if (allowed.includes(key)) {
-          (lines[idx] as any)[key] = updates[key];
-        }
-      }
-      return { lines };
-    }
-    case "addLine": {
-      const { afterLineId, line } = payload as { afterLineId?: string; line: Record<string, unknown> };
-      const newLine = {
-        id: (line.id as string) || uuidv4(),
-        order: 0,
-        speaker: line.speaker as string || "narrator",
-        text: line.text as string || "",
-        voice: line.voice as string || "Zephyr",
-        style: (line.style as string) || "",
-        notes: (line.notes as string) || "",
-        status: "pending",
-        model: (line.model as string) || "google/gemini-3.1-flash-tts-preview",
-        responseFormat: (line.responseFormat as string) || "wav",
-        directorProfileId: typeof line.directorProfileId === "string" ? line.directorProfileId : null,
-        directorOverrideJson: typeof line.directorOverrideJson === "string" ? line.directorOverrideJson : null,
-        generationStatus: typeof line.generationStatus === "string" ? line.generationStatus : "draft",
-        relatedJobId: null,
-        relatedAssetId: null,
-      };
-
-      if (afterLineId) {
-        const idx = lines.findIndex((l) => l.id === afterLineId);
-        if (idx === -1) throw new Error(`After-line "${afterLineId}" not found`);
-        lines.splice(idx + 1, 0, newLine);
-      } else {
-        lines.push(newLine);
-      }
-
-      // Re-order
-      lines.forEach((l, i) => { l.order = i; });
-      return { lines };
-    }
-    case "removeLine": {
-      const { lineId } = payload as { lineId: string };
-      const filtered = lines.filter((l) => l.id !== lineId);
-      filtered.forEach((l, i) => { l.order = i; });
-      return { lines: filtered };
-    }
-    case "reorderLines": {
-      const { lineIds } = payload as { lineIds: string[] };
-      const reordered = lineIds.map((id: string, i: number) => {
-        const line = lines.find((l) => l.id === id);
-        if (!line) throw new Error(`Line "${id}" not found for reorder`);
-        return { ...line, order: i };
-      });
-      return { lines: reordered };
-    }
-    case "updateSpeakers": {
-      // payload: { speakers: Speaker[] }
-      // Validate and replace the speakers array.
-      const { speakers: incomingSpeakers } = payload as { speakers: unknown[] };
-      if (!Array.isArray(incomingSpeakers)) {
-        throw new Error("updateSpeakers payload must include a 'speakers' array");
-      }
-      // Validate each speaker against SpeakerSchema
-      for (const sp of incomingSpeakers) {
-        const result = SpeakerSchema.safeParse(sp);
-        if (!result.success) {
-          throw new Error(`Invalid speaker in updateSpeakers: ${JSON.stringify(result.error.flatten())}`);
-        }
-      }
-      if (incomingSpeakers.length > 2) {
-        throw new Error("Maximum 2 speakers allowed");
-      }
-      speakers = incomingSpeakers;
-      return { lines, speakers };
-    }
-    case "updateDirectorProfile": {
-      // payload: { directorProfileId?: string | null, lineIds?: string[] }
-      // If lineIds provided, set directorProfileId only on those lines.
-      // If lineIds omitted, set on all lines.
-      const { directorProfileId, lineIds } = payload as {
-        directorProfileId?: string | null;
-        lineIds?: string[];
-      };
-      const targetIds = lineIds && lineIds.length > 0
-        ? new Set(lineIds)
-        : new Set(lines.map((l) => l.id));
-      for (const line of lines) {
-        if (targetIds.has(line.id)) {
-          (line as any).directorProfileId = directorProfileId ?? null;
-        }
-      }
-      return { lines };
-    }
-    default:
-      throw new Error(`Unknown patch operation: ${op}`);
-  }
-}
 
 // ─── POST /api/tasks/:taskId/production-list/validate ──────────────────────────
 
@@ -654,7 +525,7 @@ app.post("/api/tasks/:taskId/production-list/validate", async (c) => {
 
   const report = validateProductionList({
     lines: lines.map((l) => ({
-      id: l.id,
+      id: logicalLineId(l),
       order: l.order,
       speaker: l.speaker,
       text: l.text,
@@ -698,7 +569,15 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
     return apiError(c, requestId, 400, "VALIDATION_ERROR", "Request validation failed.", "validation", false, { issues: parsed.error.flatten() });
   }
 
-  const { expectedVersion, lineIds, skipCompleted } = parsed.data;
+  const { expectedVersion, lineIds, skipCompleted, source, confirm } = parsed.data;
+
+  // 2.5 Cost guard: non-user sources must explicitly confirm cost action
+  if (source !== "user" && !confirm) {
+    return apiError(c, requestId, 403, "COST_CONFIRMATION_REQUIRED",
+      `Generation from source "${source}" requires explicit cost confirmation (confirm: true). ` +
+      `This prevents automated tools from silently triggering real external cost actions.`,
+      "auth", false, { source, hint: "Set confirm: true in the request body to proceed." });
+  }
 
   // 3. Version conflict check (only if expectedVersion provided)
   const currentVersion = getCurrentVersion(taskId);
@@ -730,6 +609,15 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
     .orderBy(voiceLine.order)
     .all();
 
+  const productionArtifact = readArtifact<{
+    lines?: Array<Record<string, unknown>>;
+    promptProfiles?: Array<Record<string, unknown>>;
+    directorProfiles?: Array<Record<string, unknown>>;
+  }>(taskId, productionListArtifactName());
+  const artifactProfiles = Array.isArray(productionArtifact?.promptProfiles)
+    ? productionArtifact.promptProfiles
+    : (Array.isArray(productionArtifact?.directorProfiles) ? productionArtifact.directorProfiles : []);
+
   if (allLines.length === 0) {
     return apiError(c, requestId, 400, "EMPTY_PRODUCTION_LIST", "Production list has no lines to generate.", "validation");
   }
@@ -739,10 +627,10 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
   if (lineIds && lineIds.length > 0) {
     // Explicit selection
     const requestedIds = new Set(lineIds);
-    targetLines = allLines.filter((l) => requestedIds.has(l.id));
+    targetLines = allLines.filter((l) => requestedIds.has(logicalLineId(l)));
 
     // Check for missing line IDs
-    const foundIds = new Set(targetLines.map((l) => l.id));
+    const foundIds = new Set(targetLines.map((l) => logicalLineId(l)));
     const missingIds = lineIds.filter((id) => !foundIds.has(id));
     if (missingIds.length > 0) {
       return apiError(c, requestId, 404, "LINES_NOT_FOUND", `Lines not found in current version: ${missingIds.join(", ")}`, "validation");
@@ -752,11 +640,12 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
   // 6. Filter out ineligible lines
   const results: LineGenerationResult[] = [];
   const eligibleLines = targetLines.filter((line) => {
+    const lineId = logicalLineId(line);
     const genStatus = (line.generationStatus ?? "draft") as LineGenerationStatus;
     // MIN-1: also skip "pending" to align with frontend ACTIVE_STATUSES = ["pending", "running"]
     if (skipCompleted && (genStatus === "succeeded" || genStatus === "running" || genStatus === "pending")) {
       results.push({
-        lineId: line.id,
+        lineId,
         status: "skipped",
         jobId: line.relatedJobId,
         assetId: line.relatedAssetId,
@@ -766,7 +655,7 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
     }
     if (!line.text || line.text.trim().length === 0) {
       results.push({
-        lineId: line.id,
+        lineId,
         status: "skipped",
         errorMessage: "Line has empty text",
       });
@@ -774,7 +663,7 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
     }
     if (!line.voice || line.voice.trim().length === 0) {
       results.push({
-        lineId: line.id,
+        lineId,
         status: "skipped",
         errorMessage: "Line has no voice configured",
       });
@@ -836,27 +725,43 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
     }
 
     // Build the TTS request from the line data
-    const artifact = readArtifact<{ lines?: Array<Record<string, unknown>> }>(taskId, productionListArtifactName());
-    const artifactLine = artifact?.lines?.find((al) => al?.id === line.id) ?? {};
+    const lineId = logicalLineId(line);
+    const artifactLine = productionArtifact?.lines?.find((al) => al?.id === lineId) ?? {};
+
+    const promptResolution = resolvePromptAssemblyInput(line, artifactLine, artifactProfiles as any);
+    if (!promptResolution.ok) {
+      db.update(voiceLine).set({
+        generationStatus: "failed",
+        generationErrorCode: promptResolution.code,
+        generationErrorMessage: promptResolution.message,
+        updatedAt: new Date(),
+      }).where(eq(voiceLine.id, line.id)).run();
+
+      results.push({
+        lineId,
+        status: "failed",
+        errorCode: promptResolution.code,
+        errorMessage: promptResolution.message,
+      });
+      failedCount++;
+      continue;
+    }
+
+    const assembledPrompt = assemblePrompt(promptResolution.input);
 
     const ttsRequest: GenerateSpeechRequest = {
       model: typeof artifactLine.model === "string" ? artifactLine.model : "google/gemini-3.1-flash-tts-preview",
-      input: line.text,
+      input: assembledPrompt.prompt,
       voice: line.voice,
       responseFormat: (artifactLine.responseFormat === "pcm" || artifactLine.responseFormat === "mp3" || artifactLine.responseFormat === "wav")
         ? artifactLine.responseFormat
         : "wav",
     };
 
-    // Attach director snapshot if available
-    const directorSnapshot = resolveDirectorSnapshot(line, artifactLine);
-
-    if (directorSnapshot) {
-      ttsRequest.directorSnapshot = directorSnapshot;
-    }
+    ttsRequest.directorSnapshot = assembledPrompt.normalized;
 
     try {
-      const genResult = await generateSpeech(ttsRequest, uuidv4(), { source: "user" });
+      const genResult = await generateSpeech(ttsRequest, uuidv4(), { source });
       const genBody = genResult.body;
 
       if (genBody.ok && genBody.status === "succeeded") {
@@ -871,7 +776,7 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
         }).where(eq(voiceLine.id, line.id)).run();
 
         results.push({
-          lineId: line.id,
+          lineId,
           status: "succeeded",
           jobId: typeof genBody.jobId === "string" ? genBody.jobId : null,
           assetId: typeof genBody.assetId === "number" ? genBody.assetId : null,
@@ -892,7 +797,7 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
         }).where(eq(voiceLine.id, line.id)).run();
 
         results.push({
-          lineId: line.id,
+          lineId,
           status: "failed",
           jobId: typeof genBody.jobId === "string" ? genBody.jobId : null,
           errorCode,
@@ -912,7 +817,7 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
       }).where(eq(voiceLine.id, line.id)).run();
 
       results.push({
-        lineId: line.id,
+        lineId,
         status: "failed",
         errorCode: "INTERNAL_ERROR",
         errorMessage: safeMsg,
@@ -922,13 +827,14 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
   }
 
   // 9. Write audit log
-  auditLog("production_list", latestVersion.id, "generate", "user", {
+  auditLog("production_list", latestVersion.id, "generate", source, {
     taskId,
     version: currentVersion,
     requestedCount: targetLines.length,
     succeededCount,
     failedCount,
     skippedCount: results.filter((r) => r.status === "skipped").length,
+    source,
   }, requestId);
 
   return c.json({
@@ -946,79 +852,709 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
   });
 });
 
-/**
- * Resolve director snapshot for a voice line.
- * Checks: line-level override > referenced profile > null.
- */
-function resolveDirectorSnapshot(
-  line: { directorProfileId: string | null; directorOverrideJson: string | null },
-  artifactLine: Record<string, unknown>,
-): GenerateSpeechRequest["directorSnapshot"] {
-  // Try line-level directorOverride first
-  if (artifactLine.directorOverrideJson && typeof artifactLine.directorOverrideJson === "string") {
-    try {
-      const override = JSON.parse(artifactLine.directorOverrideJson);
-      if (override && typeof override === "object") {
-        return {
-          audioProfile: typeof override.audioProfile === "string" ? override.audioProfile : undefined,
-          scene: typeof override.scene === "string" ? override.scene : undefined,
-          directorNotes: typeof override.directorNotes === "string" ? override.directorNotes : undefined,
-          sampleContext: typeof override.sampleContext === "string" ? override.sampleContext : undefined,
-          transcript: typeof override.transcript === "string" ? override.transcript : undefined,
-        };
-      }
-    } catch {
-      // Invalid JSON, fall through
+// ─── GET /api/tasks/:taskId/production-list/versions ────────────────────────
+
+app.get("/api/tasks/:taskId/production-list/versions", (c) => {
+  const requestId = uuidv4();
+  const taskId = c.req.param("taskId");
+  const db = getDb();
+
+  const task = db.select().from(voiceTask).where(eq(voiceTask.id, taskId)).get();
+  if (!task) {
+    return apiError(c, requestId, 404, "TASK_NOT_FOUND", `Task "${taskId}" not found.`, "validation");
+  }
+
+  const versions = db.select().from(productionListVersion)
+    .where(eq(productionListVersion.taskId, taskId))
+    .orderBy(desc(productionListVersion.version))
+    .all();
+
+  return c.json({
+    ok: true,
+    requestId,
+    versions: versions.map((v) => ({
+      version: v.version,
+      versionId: v.id,
+      lineCount: v.lineCount,
+      directorProfileId: v.directorProfileId,
+      createdAt: v.createdAt.toISOString(),
+    })),
+  });
+});
+
+// ─── GET /api/tasks/:taskId/production-list/versions/:fromVersion/diff/:toVersion ─
+
+app.get("/api/tasks/:taskId/production-list/versions/:fromVersion/diff/:toVersion", (c) => {
+  const requestId = uuidv4();
+  const taskId = c.req.param("taskId");
+  const fromVersion = parseInt(c.req.param("fromVersion"), 10);
+  const toVersion = parseInt(c.req.param("toVersion"), 10);
+  const db = getDb();
+
+  if (isNaN(fromVersion) || isNaN(toVersion)) {
+    return apiError(c, requestId, 400, "VALIDATION_ERROR", "Version parameters must be integers.", "validation");
+  }
+
+  const task = db.select().from(voiceTask).where(eq(voiceTask.id, taskId)).get();
+  if (!task) {
+    return apiError(c, requestId, 404, "TASK_NOT_FOUND", `Task "${taskId}" not found.`, "validation");
+  }
+
+  const fromVer = db.select().from(productionListVersion)
+    .where(and(eq(productionListVersion.taskId, taskId), eq(productionListVersion.version, fromVersion)))
+    .get();
+  const toVer = db.select().from(productionListVersion)
+    .where(and(eq(productionListVersion.taskId, taskId), eq(productionListVersion.version, toVersion)))
+    .get();
+
+  if (!fromVer) {
+    return apiError(c, requestId, 404, "VERSION_NOT_FOUND", `Version ${fromVersion} not found.`, "validation");
+  }
+  if (!toVer) {
+    return apiError(c, requestId, 404, "VERSION_NOT_FOUND", `Version ${toVersion} not found.`, "validation");
+  }
+
+  // Load lines for both versions (from DB for current, from versioned artifact for historical)
+  const fromLinesRaw = loadVersionLines(taskId, fromVer);
+  const toLinesRaw = loadVersionLines(taskId, toVer);
+
+  type LineLike = { id: string; order?: number; text?: string; speaker?: string; voice?: string; style?: string; notes?: string; directorProfileId?: string | null; generationStatus?: string; status?: string };
+  const fromLines = fromLinesRaw as LineLike[];
+  const toLines = toLinesRaw as LineLike[];
+
+  // Compute diff
+  const fromMap = new Map(fromLines.map((l) => [l.id, l]));
+  const toMap = new Map(toLines.map((l) => [l.id, l]));
+
+  const added: string[] = [];
+  const removed: string[] = [];
+  const changed: Array<{ lineId: string; fields: string[] }> = [];
+  const unchanged: string[] = [];
+
+  for (const [id] of toMap) {
+    if (!fromMap.has(id)) added.push(id);
+  }
+  for (const [id] of fromMap) {
+    if (!toMap.has(id)) removed.push(id);
+  }
+  for (const [id, toLine] of toMap) {
+    const fromLine = fromMap.get(id);
+    if (!fromLine) continue;
+    const diffFields: string[] = [];
+    if (fromLine.text !== toLine.text) diffFields.push("text");
+    if (fromLine.speaker !== toLine.speaker) diffFields.push("speaker");
+    if (fromLine.voice !== toLine.voice) diffFields.push("voice");
+    if (fromLine.style !== toLine.style) diffFields.push("style");
+    if (fromLine.notes !== toLine.notes) diffFields.push("notes");
+    if (fromLine.directorProfileId !== toLine.directorProfileId) diffFields.push("directorProfileId");
+    if (fromLine.generationStatus !== toLine.generationStatus) diffFields.push("generationStatus");
+    if (fromLine.order !== toLine.order) diffFields.push("order");
+    if (diffFields.length > 0) {
+      changed.push({ lineId: id, fields: diffFields });
+    } else {
+      unchanged.push(id);
     }
   }
 
-  // Also check DB-level overrideJson if not in artifact
-  if (line.directorOverrideJson) {
-    try {
-      const override = JSON.parse(line.directorOverrideJson);
-      if (override && typeof override === "object") {
-        return {
-          audioProfile: typeof override.audioProfile === "string" ? override.audioProfile : undefined,
-          scene: typeof override.scene === "string" ? override.scene : undefined,
-          directorNotes: typeof override.directorNotes === "string" ? override.directorNotes : undefined,
-          sampleContext: typeof override.sampleContext === "string" ? override.sampleContext : undefined,
-        };
-      }
-    } catch {
-      // Invalid JSON, fall through
+  return c.json({
+    ok: true,
+    requestId,
+    diff: {
+      fromVersion,
+      toVersion,
+      summary: {
+        addedCount: added.length,
+        removedCount: removed.length,
+        changedCount: changed.length,
+        unchangedCount: unchanged.length,
+        fromLineCount: fromLines.length,
+        toLineCount: toLines.length,
+      },
+      added,
+      removed,
+      changed,
+    },
+  });
+});
+
+// ─── POST /api/tasks/:taskId/production-list/rollback ───────────────────────
+
+const RollbackSchema = z.object({
+  expectedVersion: z.number().int().min(0),
+  targetVersion: z.number().int().min(1),
+  summary: z.string().optional().default(""),
+});
+
+app.post("/api/tasks/:taskId/production-list/rollback", async (c) => {
+  const requestId = uuidv4();
+  const taskId = c.req.param("taskId");
+  const db = getDb();
+
+  const task = db.select().from(voiceTask).where(eq(voiceTask.id, taskId)).get();
+  if (!task) {
+    return apiError(c, requestId, 404, "TASK_NOT_FOUND", `Task "${taskId}" not found.`, "validation");
+  }
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return apiError(c, requestId, 400, "VALIDATION_ERROR", "Request body must be valid JSON.", "validation");
+  }
+
+  const parsed = RollbackSchema.safeParse(body);
+  if (!parsed.success) {
+    return apiError(c, requestId, 400, "VALIDATION_ERROR", "Request validation failed.", "validation", false, { issues: parsed.error.flatten() });
+  }
+
+  const { expectedVersion, targetVersion, summary } = parsed.data;
+
+  // Version conflict check
+  const currentVersion = getCurrentVersion(taskId);
+  if (expectedVersion !== currentVersion) {
+    return apiError(c, requestId, 409, "VERSION_CONFLICT", `Expected version ${expectedVersion} but current is ${currentVersion}.`, "conflict", true, {
+      expectedVersion,
+      currentVersion,
+    });
+  }
+
+  if (targetVersion > currentVersion) {
+    return apiError(c, requestId, 400, "INVALID_TARGET_VERSION", `Target version ${targetVersion} is newer than current version ${currentVersion}.`, "validation");
+  }
+
+  // Load target version
+  const targetVer = db.select().from(productionListVersion)
+    .where(and(eq(productionListVersion.taskId, taskId), eq(productionListVersion.version, targetVersion)))
+    .get();
+
+  if (!targetVer) {
+    return apiError(c, requestId, 404, "VERSION_NOT_FOUND", `Target version ${targetVersion} not found.`, "validation");
+  }
+
+  // Load target lines from versioned artifact (DB only holds current version rows)
+  const targetLinesRaw = loadVersionLines(taskId, targetVer);
+  type TargetLine = { id: string; order?: number; speaker?: string; text?: string; voice?: string; style?: string; notes?: string; status?: string; directorProfileId?: string | null; directorOverrideJson?: string | null; generationStatus?: string; relatedJobId?: string | null; relatedAssetId?: number | null; generationErrorCode?: string | null; generationErrorMessage?: string | null };
+  const targetLines = targetLinesRaw as TargetLine[];
+
+  // Copy-on-write: create a new version from the target version's data
+  const newVersion = currentVersion + 1;
+  const versionId = uuidv4();
+  const now = new Date();
+
+  // Build merged lines for artifact (using target artifact data when available)
+  const mergedLinesForArtifact = targetLines.map((l) => ({
+    ...l,
+    id: l.id,
+    order: l.order ?? 0,
+    speaker: l.speaker ?? "narrator",
+    text: l.text ?? "",
+    voice: l.voice ?? "Zephyr",
+    style: l.style ?? "",
+    notes: l.notes ?? "",
+    status: l.status ?? "pending",
+    directorProfileId: l.directorProfileId ?? null,
+    directorOverrideJson: l.directorOverrideJson ?? null,
+    generationStatus: l.generationStatus ?? "draft",
+    relatedJobId: l.relatedJobId ?? null,
+    relatedAssetId: l.relatedAssetId ?? null,
+    generationErrorCode: l.generationErrorCode ?? null,
+    generationErrorMessage: l.generationErrorMessage ?? null,
+  }));
+
+  // Create new version record
+  db.insert(productionListVersion).values({
+    id: versionId,
+    taskId,
+    version: newVersion,
+    directorProfileId: targetVer.directorProfileId,
+    speakersJson: targetVer.speakersJson,
+    metadataJson: targetVer.metadataJson,
+    lineCount: targetLines.length,
+    createdAt: now,
+  }).run();
+
+  // Insert voice lines for the new version
+  for (const line of targetLines) {
+    db.insert(voiceLine).values({
+      id: uuidv4(),
+      lineId: line.id,
+      taskId,
+      versionId,
+      order: line.order ?? 0,
+      speaker: line.speaker ?? "narrator",
+      text: line.text ?? "",
+      voice: line.voice ?? "Zephyr",
+      style: line.style ?? "",
+      notes: line.notes ?? "",
+      status: line.status ?? "pending",
+      directorProfileId: line.directorProfileId ?? null,
+      directorOverrideJson: line.directorOverrideJson ?? null,
+      generationStatus: line.generationStatus ?? "draft",
+      relatedJobId: line.relatedJobId ?? null,
+      relatedAssetId: line.relatedAssetId ?? null,
+      generationErrorCode: line.generationErrorCode ?? null,
+      generationErrorMessage: line.generationErrorMessage ?? null,
+      createdAt: now,
+      updatedAt: now,
+    }).run();
+  }
+
+  // Update current artifact
+  const speakers = (() => {
+    try { return JSON.parse(targetVer.speakersJson); } catch { return []; }
+  })();
+
+  writeArtifact(taskId, productionListArtifactName(), {
+    version: newVersion,
+    versionId,
+    lines: mergedLinesForArtifact,
+    speakers,
+    directorProfileId: targetVer.directorProfileId,
+    metadata: (() => { try { return JSON.parse(targetVer.metadataJson); } catch { return {}; } })(),
+    updatedAt: now.toISOString(),
+    rolledBackFrom: targetVersion,
+  });
+
+  // Also save a versioned snapshot
+  writeArtifact(taskId, productionListVersionArtifactName(newVersion), {
+    version: newVersion,
+    versionId,
+    lines: mergedLinesForArtifact,
+    speakers,
+    directorProfileId: targetVer.directorProfileId,
+    metadata: (() => { try { return JSON.parse(targetVer.metadataJson); } catch { return {}; } })(),
+    updatedAt: now.toISOString(),
+    rolledBackFrom: targetVersion,
+  });
+
+  auditLog("production_list", versionId, "rollback", "user", {
+    taskId,
+    fromVersion: currentVersion,
+    targetVersion,
+    newVersion,
+    summary,
+  }, requestId);
+
+  const pl = loadProductionList(taskId, versionId);
+  return c.json({
+    ok: true,
+    requestId,
+    productionList: pl,
+    rollback: {
+      fromVersion: currentVersion,
+      targetVersion,
+      newVersion,
+    },
+  });
+});
+
+// ─── GET /api/tasks/:taskId/production-list/export ──────────────────────────
+
+app.get("/api/tasks/:taskId/production-list/export", (c) => {
+  const requestId = uuidv4();
+  const taskId = c.req.param("taskId");
+  const format = c.req.query("format") || "json";
+  const db = getDb();
+
+  const task = db.select().from(voiceTask).where(eq(voiceTask.id, taskId)).get();
+  if (!task) {
+    return apiError(c, requestId, 404, "TASK_NOT_FOUND", `Task "${taskId}" not found.`, "validation");
+  }
+
+  const currentVersion = getCurrentVersion(taskId);
+  if (currentVersion === 0) {
+    return apiError(c, requestId, 404, "NO_PRODUCTION_LIST", "No production list exists for this task.", "validation");
+  }
+
+  const latestVersion = db.select().from(productionListVersion)
+    .where(and(eq(productionListVersion.taskId, taskId), eq(productionListVersion.version, currentVersion)))
+    .get();
+
+  if (!latestVersion) {
+    return apiError(c, requestId, 404, "NO_PRODUCTION_LIST", "Current version record not found.", "validation");
+  }
+
+  const lines = db.select().from(voiceLine)
+    .where(eq(voiceLine.versionId, latestVersion.id))
+    .orderBy(voiceLine.order)
+    .all();
+
+  // Read artifact for extended line data
+  const artifact = readArtifact<{ lines?: Array<Record<string, unknown>>; speakers?: unknown[]; promptProfiles?: Array<Record<string, unknown>>; directorProfiles?: Array<Record<string, unknown>> }>(taskId, productionListArtifactName());
+  const artifactLinesById = new Map<string, Record<string, unknown>>();
+  if (Array.isArray(artifact?.lines)) {
+    for (const line of artifact.lines) {
+      if (line && typeof line.id === "string") artifactLinesById.set(line.id, line);
     }
   }
 
-  // Try referenced director profile
-  const profileId = line.directorProfileId ?? (typeof artifactLine.directorProfileId === "string" ? artifactLine.directorProfileId : null);
-  if (profileId) {
+  const sanitizedLines = sanitizeLinesForExport(lines, artifactLinesById);
+  const speakers = (() : Array<Record<string, unknown>> => {
     try {
-      const db = getDb();
-      const profile = db.select().from(dpTable).where(eq(dpTable.id, profileId)).get();
-      if (profile?.config) {
-        const config = JSON.parse(typeof profile.config === "string" ? profile.config : "{}");
-        if (config && typeof config === "object") {
-          return {
-            audioProfile: typeof config.audioProfile === "string" ? config.audioProfile : undefined,
-            scene: typeof config.scene === "string" ? config.scene : undefined,
-            directorNotes: typeof config.directorNotes === "string" ? config.directorNotes : undefined,
-            sampleContext: typeof config.sampleContext === "string" ? config.sampleContext : undefined,
-            speakers: Array.isArray(config.speakers) ? config.speakers.map((sp: Record<string, unknown>) => ({
-              id: typeof sp.id === "string" ? sp.id : "",
-              label: typeof sp.label === "string" ? sp.label : "",
-              name: typeof sp.name === "string" ? sp.name : undefined,
-              voice: typeof sp.voice === "string" ? sp.voice : undefined,
-              style: typeof sp.style === "string" ? sp.style : undefined,
-            })) : undefined,
-          };
-        }
-      }
+      const parsedSpeakers = JSON.parse(latestVersion.speakersJson);
+      return Array.isArray(parsedSpeakers) ? parsedSpeakers : [];
     } catch {
-      // Profile resolution failed, return null
+      return [];
+    }
+  })();
+  const exportProfiles = Array.isArray(artifact?.promptProfiles)
+    ? artifact.promptProfiles
+    : (Array.isArray(artifact?.directorProfiles) ? artifact.directorProfiles : []);
+  const exportData = buildProductionListExportData(taskId, currentVersion, speakers, sanitizedLines, exportProfiles);
+
+  if (format === "csv") {
+    return c.text(formatProductionListCsv(sanitizedLines), 200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="production-list-v${currentVersion}.csv"`,
+    });
+  }
+
+  if (format === "md" || format === "markdown") {
+    const exportSpeakers = Array.isArray(exportData.speakers) ? exportData.speakers as Array<Record<string, unknown>> : [];
+    return c.text(formatProductionListMarkdown(taskId, currentVersion, exportData.exportedAt, exportSpeakers, sanitizedLines, exportProfiles), 200, {
+      "Content-Type": "text/markdown; charset=utf-8",
+      "Content-Disposition": `attachment; filename="production-list-v${currentVersion}.md"`,
+    });
+  }
+
+  // JSON export (default)
+  return c.json(exportData, 200, {
+    "Content-Disposition": `attachment; filename="production-list-v${currentVersion}.json"`,
+  });
+});
+
+// ─── POST /api/tasks/:taskId/production-list/import ─────────────────────────
+
+const ImportSchema = z.object({
+  expectedVersion: z.number().int().min(0),
+  format: z.enum(["json", "csv"]).optional().default("json"),
+  data: z.unknown(),
+  summary: z.string().optional().default(""),
+});
+
+app.post("/api/tasks/:taskId/production-list/import", async (c) => {
+  const requestId = uuidv4();
+  const taskId = c.req.param("taskId");
+  const db = getDb();
+
+  const task = db.select().from(voiceTask).where(eq(voiceTask.id, taskId)).get();
+  if (!task) {
+    return apiError(c, requestId, 404, "TASK_NOT_FOUND", `Task "${taskId}" not found.`, "validation");
+  }
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return apiError(c, requestId, 400, "VALIDATION_ERROR", "Request body must be valid JSON.", "validation");
+  }
+
+  const parsed = ImportSchema.safeParse(body);
+  if (!parsed.success) {
+    return apiError(c, requestId, 400, "VALIDATION_ERROR", "Request validation failed.", "validation", false, { issues: parsed.error.flatten() });
+  }
+
+  const { expectedVersion, format, data, summary } = parsed.data;
+
+  // Version conflict check
+  const currentVersion = getCurrentVersion(taskId);
+  if (expectedVersion !== currentVersion) {
+    return apiError(c, requestId, 409, "VERSION_CONFLICT", `Expected version ${expectedVersion} but current is ${currentVersion}.`, "conflict", true, {
+      expectedVersion,
+      currentVersion,
+    });
+  }
+
+  let importedLines: unknown[];
+  let importedPromptProfiles: Array<Record<string, unknown>> = [];
+
+  if (format === "json") {
+    // JSON import: expect { lines: [...], speakers?: [...] }
+    if (!data || typeof data !== "object" || !Array.isArray((data as Record<string, unknown>).lines)) {
+      return apiError(c, requestId, 400, "IMPORT_FORMAT_ERROR", "JSON import data must contain a 'lines' array.", "validation");
+    }
+    importedLines = (data as Record<string, unknown>).lines as unknown[];
+    const rawProfiles = (data as Record<string, unknown>).promptProfiles ?? (data as Record<string, unknown>).directorProfiles;
+    importedPromptProfiles = Array.isArray(rawProfiles) ? rawProfiles.filter((profile): profile is Record<string, unknown> => Boolean(profile && typeof profile === "object" && !Array.isArray(profile))) : [];
+  } else {
+    // CSV import: data should be a string
+    if (typeof data !== "string") {
+      return apiError(c, requestId, 400, "IMPORT_FORMAT_ERROR", "CSV import data must be a string.", "validation");
+    }
+    const csvRows = parseCsv(data);
+    if (csvRows.length < 2) {
+      return apiError(c, requestId, 400, "IMPORT_FORMAT_ERROR", "CSV must have at least a header row and one data row.", "validation");
+    }
+    // First row is headers; remaining rows are data
+    const headers = csvRows[0].map((h) => h.trim());
+    importedLines = [];
+    for (let i = 1; i < csvRows.length; i++) {
+      const values = csvRows[i];
+      // Skip empty rows
+      if (values.length === 0 || (values.length === 1 && values[0].trim() === "")) continue;
+      const line: Record<string, string> = {};
+      for (let j = 0; j < headers.length; j++) {
+        line[headers[j]] = values[j] ?? "";
+      }
+      importedLines.push(line);
     }
   }
 
-  return null;
-}
+  // Validate each imported line through VoiceLineSchema
+  const validatedLines: Array<z.infer<typeof VoiceLineSchema>> = [];
+  const importErrors: Array<{ index: number; message: string }> = [];
+
+  for (let i = 0; i < importedLines.length; i++) {
+    const line = importedLines[i];
+    // Ensure required defaults
+    const normalized = {
+      id: (line as Record<string, unknown>).id || `imported_${i}`,
+      order: typeof (line as Record<string, unknown>).order === "number" ? (line as Record<string, unknown>).order : i,
+      moduleName: (line as Record<string, unknown>).moduleName ?? null,
+      title: (line as Record<string, unknown>).title ?? null,
+      speaker: (line as Record<string, unknown>).speaker || "narrator",
+      text: (line as Record<string, unknown>).text || "",
+      voice: (line as Record<string, unknown>).voice || "Zephyr",
+      style: (line as Record<string, unknown>).style || "",
+      notes: (line as Record<string, unknown>).notes || "",
+      status: (line as Record<string, unknown>).status || "pending",
+      model: (line as Record<string, unknown>).model || "google/gemini-3.1-flash-tts-preview",
+      responseFormat: (line as Record<string, unknown>).responseFormat || "wav",
+      directorProfileId: (line as Record<string, unknown>).directorProfileId ?? null,
+      promptProfileId: (line as Record<string, unknown>).promptProfileId ?? (line as Record<string, unknown>).directorProfileId ?? null,
+      speakerLabel: (line as Record<string, unknown>).speakerLabel ?? null,
+      transcript: (line as Record<string, unknown>).transcript ?? (line as Record<string, unknown>).text ?? "",
+      promptOverride: (line as Record<string, unknown>).promptOverride ?? null,
+      directorOverrideJson: (line as Record<string, unknown>).directorOverrideJson ?? null,
+      generationStatus: "draft" as const,
+    };
+
+    const result = VoiceLineSchema.safeParse(normalized);
+    if (!result.success) {
+      importErrors.push({
+        index: i,
+        message: result.error.issues.map((iss) => `${iss.path.join(".")}: ${iss.message}`).join("; "),
+      });
+      continue;
+    }
+    validatedLines.push(result.data);
+  }
+
+  // Check for duplicate line IDs within the import batch
+  const seenIds = new Set<string>();
+  const duplicateIds: string[] = [];
+  for (const line of validatedLines) {
+    if (seenIds.has(line.id)) {
+      duplicateIds.push(line.id);
+    } else {
+      seenIds.add(line.id);
+    }
+  }
+  if (duplicateIds.length > 0) {
+    return apiError(c, requestId, 400, "DUPLICATE_LINE_IDS",
+      `Import contains duplicate line IDs: ${[...new Set(duplicateIds)].join(", ")}. Each line must have a unique ID.`,
+      "validation", false, { duplicateIds: [...new Set(duplicateIds)] });
+  }
+
+  if (importErrors.length > 0 && validatedLines.length === 0) {
+    return apiError(c, requestId, 400, "IMPORT_VALIDATION_ERROR", "All imported lines failed validation.", "validation", false, { errors: importErrors });
+  }
+
+  // Director completeness check: warn but do not block for import
+  const directorWarnings: string[] = [];
+  for (const line of validatedLines) {
+    if (!line.directorProfileId) {
+      directorWarnings.push(`Line "${line.id}" has no director profile bound`);
+    } else {
+      const profile = db.select().from(dpTable).where(eq(dpTable.id, line.directorProfileId)).get();
+      if (!profile) {
+        directorWarnings.push(`Line "${line.id}" references non-existent director profile "${line.directorProfileId}"`);
+      }
+    }
+  }
+
+  // Create new version
+  const newVersion = currentVersion + 1;
+  const versionId = uuidv4();
+  const now = new Date();
+
+  // Import speakers: validate through SpeakerSchema whitelist and enforce max 2
+  const rawImportSpeakers = (format === "json" && data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).speakers))
+    ? ((data as Record<string, unknown>).speakers as unknown[])
+    : [];
+
+  const speakers: Array<{ id: string; label: string; name?: string; voice: string; style?: string }> = [];
+  for (const sp of rawImportSpeakers.slice(0, 2)) {
+    const parsed = SpeakerSchema.safeParse(sp);
+    if (parsed.success) {
+      speakers.push(parsed.data);
+    }
+    // Silently drop speakers that fail schema validation (contain unknown/sensitive fields)
+  }
+
+  db.insert(productionListVersion).values({
+    id: versionId,
+    taskId,
+    version: newVersion,
+    directorProfileId: null,
+    speakersJson: JSON.stringify(speakers),
+    metadataJson: JSON.stringify({ imported: true, importedAt: now.toISOString() }),
+    lineCount: validatedLines.length,
+    createdAt: now,
+  }).run();
+
+  for (const line of validatedLines) {
+    db.insert(voiceLine).values({
+      id: uuidv4(),
+      lineId: line.id,
+      taskId,
+      versionId,
+      order: line.order,
+      speaker: line.speaker,
+      text: line.text,
+      voice: line.voice,
+      style: line.style ?? "",
+      notes: line.notes ?? "",
+      status: line.status ?? "pending",
+      directorProfileId: line.directorProfileId ?? line.promptProfileId ?? null,
+      directorOverrideJson: line.directorOverrideJson ?? null,
+      generationStatus: "draft",
+      relatedJobId: null,
+      relatedAssetId: null,
+      generationErrorCode: null,
+      generationErrorMessage: null,
+      createdAt: now,
+      updatedAt: now,
+    }).run();
+  }
+
+  writeArtifact(taskId, productionListArtifactName(), {
+    schemaVersion: importedPromptProfiles.length > 0 ? "tts.production-list.v2" : undefined,
+    version: newVersion,
+    versionId,
+    lines: validatedLines.map((line) => ({
+      ...line,
+      transcript: line.transcript ?? line.text,
+      promptProfileId: line.promptProfileId ?? line.directorProfileId ?? null,
+      directorProfileId: line.directorProfileId ?? line.promptProfileId ?? null,
+    })),
+    speakers,
+    promptProfiles: importedPromptProfiles,
+    directorProfiles: importedPromptProfiles,
+    directorProfileId: null,
+    metadata: { imported: true, importedAt: now.toISOString(), ...(importedPromptProfiles.length > 0 ? { schemaVersion: "tts.production-list.v2" } : {}) },
+    updatedAt: now.toISOString(),
+  });
+
+  writeArtifact(taskId, productionListVersionArtifactName(newVersion), {
+    schemaVersion: importedPromptProfiles.length > 0 ? "tts.production-list.v2" : undefined,
+    version: newVersion,
+    versionId,
+    lines: validatedLines.map((line) => ({
+      ...line,
+      transcript: line.transcript ?? line.text,
+      promptProfileId: line.promptProfileId ?? line.directorProfileId ?? null,
+      directorProfileId: line.directorProfileId ?? line.promptProfileId ?? null,
+    })),
+    speakers,
+    promptProfiles: importedPromptProfiles,
+    directorProfiles: importedPromptProfiles,
+    directorProfileId: null,
+    metadata: { imported: true, importedAt: now.toISOString(), ...(importedPromptProfiles.length > 0 ? { schemaVersion: "tts.production-list.v2" } : {}) },
+    updatedAt: now.toISOString(),
+  });
+
+  auditLog("production_list", versionId, "import", "user", {
+    taskId,
+    version: newVersion,
+    lineCount: validatedLines.length,
+    importErrors: importErrors.length,
+    format,
+    summary,
+  }, requestId);
+
+  const pl = loadProductionList(taskId, versionId);
+  return c.json({
+    ok: true,
+    requestId,
+    productionList: pl,
+    import: {
+      importedLines: validatedLines.length,
+      skippedLines: importErrors.length,
+      errors: importErrors.length > 0 ? importErrors : undefined,
+      directorWarnings: directorWarnings.length > 0 ? directorWarnings : undefined,
+    },
+  });
+});
+
+// ─── GET /api/tasks/:taskId/production-list/quality-report ──────────────────
+
+app.get("/api/tasks/:taskId/production-list/quality-report", (c) => {
+  const requestId = uuidv4();
+  const taskId = c.req.param("taskId");
+  const db = getDb();
+
+  const task = db.select().from(voiceTask).where(eq(voiceTask.id, taskId)).get();
+  if (!task) {
+    return apiError(c, requestId, 404, "TASK_NOT_FOUND", `Task "${taskId}" not found.`, "validation");
+  }
+
+  const currentVersion = getCurrentVersion(taskId);
+  if (currentVersion === 0) {
+    return c.json({
+      ok: true,
+      requestId,
+      qualityReport: {
+        taskId,
+        version: 0,
+        totalLines: 0,
+        generatedAt: new Date().toISOString(),
+        metrics: {},
+        issues: [{ severity: "info", code: "NO_PRODUCTION_LIST", message: "No production list exists for this task." }],
+      },
+    });
+  }
+
+  const latestVersion = db.select().from(productionListVersion)
+    .where(and(eq(productionListVersion.taskId, taskId), eq(productionListVersion.version, currentVersion)))
+    .get();
+
+  if (!latestVersion) {
+    return apiError(c, requestId, 404, "NO_PRODUCTION_LIST", "Current version record not found.", "validation");
+  }
+
+  const lines = db.select().from(voiceLine)
+    .where(eq(voiceLine.versionId, latestVersion.id))
+    .orderBy(voiceLine.order)
+    .all();
+
+  const artifact = readArtifact<{ lines?: Array<Record<string, unknown>>; promptProfiles?: Array<Record<string, unknown>>; directorProfiles?: Array<Record<string, unknown>> }>(taskId, productionListArtifactName());
+  const artifactLinesById = new Map<string, Record<string, unknown>>();
+  if (Array.isArray(artifact?.lines)) {
+    for (const line of artifact.lines) {
+      if (line && typeof line.id === "string") artifactLinesById.set(line.id, line);
+    }
+  }
+
+  const { metrics, issues } = buildQualityReportMetrics(
+    lines,
+    artifactLinesById,
+    (profileId) => Boolean(db.select().from(dpTable).where(eq(dpTable.id, profileId)).get()),
+    Array.isArray(artifact?.promptProfiles) ? artifact.promptProfiles : (artifact?.directorProfiles ?? []),
+  );
+
+  return c.json({
+    ok: true,
+    requestId,
+    qualityReport: {
+      taskId,
+      version: currentVersion,
+      totalLines: lines.length,
+      generatedAt: new Date().toISOString(),
+      metrics,
+      issues,
+    },
+  });
+});
 
 export default app;

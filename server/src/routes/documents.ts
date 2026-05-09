@@ -19,6 +19,7 @@ import {
   PasteDocumentSchema,
   UploadDocumentBodySchema,
   UpdateDocumentSchema,
+  MAX_DOCUMENT_BYTES,
 } from "../domain/validators.js";
 import {
   writeArtifact,
@@ -89,6 +90,15 @@ app.post("/api/tasks/:taskId/documents/upload", async (c) => {
 
   const parsed = UploadDocumentBodySchema.safeParse(body);
   if (!parsed.success) {
+    // Check if the failure was specifically due to content size for a 413 response
+    const sizeIssue = parsed.error.issues.find(
+      (i) => i.message.includes("exceeds maximum size"),
+    );
+    if (sizeIssue) {
+      return apiError(c, requestId, 413, "DOCUMENT_TOO_LARGE",
+        `Document content exceeds maximum size of ${MAX_DOCUMENT_BYTES} bytes.`,
+        "validation");
+    }
     return apiError(c, requestId, 400, "VALIDATION_ERROR", "Request validation failed.", "validation", false, { issues: parsed.error.flatten() });
   }
 
@@ -138,6 +148,15 @@ app.post("/api/tasks/:taskId/documents/paste", async (c) => {
 
   const parsed = PasteDocumentSchema.safeParse(body);
   if (!parsed.success) {
+    // Check if the failure was specifically due to content size for a 413 response
+    const sizeIssue = parsed.error.issues.find(
+      (i) => i.message.includes("exceeds maximum size"),
+    );
+    if (sizeIssue) {
+      return apiError(c, requestId, 413, "DOCUMENT_TOO_LARGE",
+        `Document content exceeds maximum size of ${MAX_DOCUMENT_BYTES} bytes.`,
+        "validation");
+    }
     return apiError(c, requestId, 400, "VALIDATION_ERROR", "Request validation failed.", "validation", false, { issues: parsed.error.flatten() });
   }
 
@@ -243,6 +262,15 @@ app.patch("/api/tasks/:taskId/documents/:documentId", async (c) => {
 
   const parsed = UpdateDocumentSchema.safeParse(body);
   if (!parsed.success) {
+    // Check if the failure was specifically due to content size for a 413 response
+    const sizeIssue = parsed.error.issues.find(
+      (i) => i.message.includes("exceeds maximum size"),
+    );
+    if (sizeIssue) {
+      return apiError(c, requestId, 413, "DOCUMENT_TOO_LARGE",
+        `Document content exceeds maximum size of ${MAX_DOCUMENT_BYTES} bytes.`,
+        "validation");
+    }
     return apiError(c, requestId, 400, "VALIDATION_ERROR", "Request validation failed.", "validation", false, { issues: parsed.error.flatten() });
   }
 

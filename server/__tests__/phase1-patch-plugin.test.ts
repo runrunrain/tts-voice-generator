@@ -74,6 +74,10 @@ import directorProfilesRoutes from "../src/routes/director-profiles.js";
 import agentButtonsRoutes from "../src/routes/agent-buttons.js";
 import agentChatRoutes from "../src/routes/agent-chat.js";
 import {
+  _setSpawnRunner,
+  _resetSpawnRunner,
+} from "../src/services/opencode-runner.js";
+import {
   VoiceLineSchema,
   SpeakerSchema,
 } from "../src/domain/validators.js";
@@ -99,7 +103,9 @@ async function jsonRes(res: Response) {
   return res.json();
 }
 
-// Helper: create task + paste doc + normalize -> get production list with lines
+// Helper: create task + direct PUT production list -> get production list with lines.
+// Agent normalize is strict v2 and no longer creates legacy fallback data when
+// OpenCode is unavailable, so patch tests should not depend on normalize fallback.
 async function setupProductionList(app: Hono): Promise<{ taskId: string; lineIds: string[]; version: number }> {
   const createRes = await req(app, "/api/tasks", {
     method: "POST",
@@ -109,18 +115,26 @@ async function setupProductionList(app: Hono): Promise<{ taskId: string; lineIds
   const { task } = await jsonRes(createRes);
   const taskId = task.id;
 
-  await req(app, `/api/tasks/${taskId}/documents/paste`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fileName: "script.txt", content: "Alice: Hello world\nBob: Hi Alice" }),
-  });
+  const lines = [
+    { id: "line_alice", order: 0, speaker: "alice", text: "Hello world", voice: "Zephyr" },
+    { id: "line_bob", order: 1, speaker: "bob", text: "Hi Alice", voice: "Puck" },
+  ];
+  const speakers = [
+    { id: "alice", label: "Alice", voice: "Zephyr" },
+    { id: "bob", label: "Bob", voice: "Puck" },
+  ];
 
-  const normRes = await req(app, `/api/tasks/${taskId}/agent/normalize-requirements`, { method: "POST" });
-  const normBody = await jsonRes(normRes);
+  const putRes = await req(app, `/api/tasks/${taskId}/production-list`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expectedVersion: 0, lines, speakers }),
+  });
+  expect(putRes.status).toBe(200);
+  const putBody = await jsonRes(putRes);
   return {
     taskId,
-    lineIds: normBody.productionList.lines.map((l: any) => l.id),
-    version: normBody.productionList.version,
+    lineIds: putBody.productionList.lines.map((l: any) => l.id),
+    version: putBody.productionList.version,
   };
 }
 
@@ -208,6 +222,10 @@ describe("PATCH updateSpeakers", () => {
     closeDb();
     if (fs.existsSync(testState.dbFilePath)) fs.unlinkSync(testState.dbFilePath);
     initSchema();
+    // Mock _spawnRunner to avoid real opencode run calls in tests
+    _setSpawnRunner(async () => {
+      throw new Error("opencode run not available in test environment");
+    });
     app = createApp();
     const setup = await setupProductionList(app);
     taskId = setup.taskId;
@@ -215,6 +233,7 @@ describe("PATCH updateSpeakers", () => {
   });
 
   afterAll(() => {
+    _resetSpawnRunner();
     closeDb();
     if (testState.tmpDir && fs.existsSync(testState.tmpDir)) {
       fs.rmSync(testState.tmpDir, { recursive: true, force: true });
@@ -299,6 +318,10 @@ describe("PATCH updateDirectorProfile", () => {
     closeDb();
     if (fs.existsSync(testState.dbFilePath)) fs.unlinkSync(testState.dbFilePath);
     initSchema();
+    // Mock _spawnRunner to avoid real opencode run calls in tests
+    _setSpawnRunner(async () => {
+      throw new Error("opencode run not available in test environment");
+    });
     app = createApp();
     const setup = await setupProductionList(app);
     taskId = setup.taskId;
@@ -307,6 +330,7 @@ describe("PATCH updateDirectorProfile", () => {
   });
 
   afterAll(() => {
+    _resetSpawnRunner();
     closeDb();
     if (testState.tmpDir && fs.existsSync(testState.tmpDir)) {
       fs.rmSync(testState.tmpDir, { recursive: true, force: true });
