@@ -20,6 +20,11 @@ function emptyProfile(taskId: string): Partial<DirectorProfile> {
     audioProfile: "",
     scene: "",
     directorNotes: "",
+    style: "",
+    pacing: "",
+    accent: "",
+    emotion: "",
+    performanceNotes: "",
     sampleContext: "",
     speakers: [emptySpeaker("a", "Speaker A")],
   };
@@ -58,7 +63,7 @@ export function DirectorProfilesPanel({
   const filteredProfiles = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return profiles;
-    return profiles.filter((profile) => [profile.name, profile.audioProfile, profile.scene, profile.directorNotes, profile.speakers.map((speaker) => `${speaker.name} ${speaker.voice}`).join(" ")].join(" ").toLowerCase().includes(q));
+    return profiles.filter((profile) => [profile.name, profile.audioProfile, profile.scene, profile.directorNotes, profile.style, profile.pacing, profile.accent, profile.emotion, profile.performanceNotes, profile.speakers.map((speaker) => `${speaker.name} ${speaker.voice} ${speaker.style ?? ""}`).join(" ")].join(" ").toLowerCase().includes(q));
   }, [profiles, search]);
 
   useEffect(() => {
@@ -178,6 +183,11 @@ export function DirectorProfilesPanel({
         audioProfile: source.audioProfile,
         scene: source.scene,
         directorNotes: source.directorNotes,
+        style: source.style,
+        pacing: source.pacing,
+        accent: source.accent,
+        emotion: source.emotion,
+        performanceNotes: source.performanceNotes,
         sampleContext: source.sampleContext,
         speakers: source.speakers.map((speaker) => ({ ...speaker })),
       });
@@ -249,10 +259,28 @@ export function DirectorProfilesPanel({
 
         <div className="flex-1 overflow-y-auto p-4 grid grid-cols-2 gap-4 content-start">
           <Field label="配置名称" className="col-span-2"><input className={CONTROL_CLASS} value={draft.name ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, name: event.target.value }))} disabled={!canEdit} /></Field>
-          <Field label="音频画像"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.audioProfile ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, audioProfile: event.target.value }))} disabled={!canEdit} /></Field>
-          <Field label="场景"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.scene ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, scene: event.target.value }))} disabled={!canEdit} /></Field>
-          <Field label="导演备注"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.directorNotes ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, directorNotes: event.target.value }))} disabled={!canEdit} /></Field>
-          <Field label="示例上下文"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.sampleContext ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, sampleContext: event.target.value }))} disabled={!canEdit} /></Field>
+          <Field label="音频画像"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.audioProfile ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, audioProfile: event.target.value }))} disabled={!canEdit} placeholder="未设置" /></Field>
+          <Field label="场景"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.scene ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, scene: event.target.value }))} disabled={!canEdit} placeholder="未设置" /></Field>
+
+          <div className="col-span-2 border border-border-subtle rounded-md bg-[linear-gradient(135deg,rgba(201,148,74,0.08),transparent_38%),var(--color-bg-sunken)] p-3">
+            <div className="mb-3 flex items-start justify-between gap-4">
+              <div>
+                <div className="text-sm font-semibold text-text-primary">表演风格参数</div>
+                <div className="mt-1 text-[10px] text-text-tertiary">Profile 级导演控制字段；空值显示为未设置，不会从旧导演备注自动回填。</div>
+              </div>
+              <span className="rounded border border-border-subtle bg-bg-base px-2 py-1 text-[10px] text-text-tertiary">Gemini input 五要素</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="表演风格"><input className={CONTROL_CLASS} value={draft.style ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, style: event.target.value }))} disabled={!canEdit} placeholder="未设置，例如冷静克制、战地旁白" /></Field>
+              <Field label="语速节奏"><input className={CONTROL_CLASS} value={draft.pacing ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, pacing: event.target.value }))} disabled={!canEdit} placeholder="未设置，例如慢速、有停顿、紧迫" /></Field>
+              <Field label="口音发音"><input className={CONTROL_CLASS} value={draft.accent ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, accent: event.target.value }))} disabled={!canEdit} placeholder="未设置，例如清晰咬字、轻微地域口音" /></Field>
+              <Field label="情绪基调"><input className={CONTROL_CLASS} value={draft.emotion ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, emotion: event.target.value }))} disabled={!canEdit} placeholder="未设置，例如克制愤怒、温柔安抚" /></Field>
+              <Field label="表演备注" className="col-span-2"><textarea className={`${CONTROL_CLASS} h-20`} value={draft.performanceNotes ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, performanceNotes: event.target.value }))} disabled={!canEdit} placeholder="未设置，填写无法归类的导演表演提示" /></Field>
+            </div>
+          </div>
+
+          <Field label="导演备注（兼容旧字段）"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.directorNotes ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, directorNotes: event.target.value }))} disabled={!canEdit} placeholder="旧配置仍会作为表演备注进入 prompt" /></Field>
+          <Field label="示例上下文"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.sampleContext ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, sampleContext: event.target.value }))} disabled={!canEdit} placeholder="未设置" /></Field>
 
           <div className="col-span-2 border border-border-subtle rounded-md bg-bg-sunken p-3">
             <div className="flex items-center justify-between mb-3">
@@ -265,7 +293,7 @@ export function DirectorProfilesPanel({
                   <div className="flex items-center justify-between text-xs font-semibold"><span>{displaySpeakerLabel(speaker.label)}</span>{speaker.id !== "a" && <button className="text-error disabled:text-text-tertiary" onClick={() => removeSpeaker(speaker.id)} disabled={!canEdit}>移除</button>}</div>
                   <input className={CONTROL_CLASS} placeholder="角色名" value={speaker.name} onChange={(event) => updateSpeaker(speaker.id, { name: event.target.value })} disabled={!canEdit} />
                   <select className={CONTROL_CLASS} value={speaker.voice} onChange={(event) => updateSpeaker(speaker.id, { voice: event.target.value })} disabled={!canEdit}>{voiceOptions.map((voice) => <option key={voice} value={voice}>{voice}</option>)}</select>
-                  <input className={CONTROL_CLASS} placeholder="风格" value={speaker.style ?? ""} onChange={(event) => updateSpeaker(speaker.id, { style: event.target.value })} disabled={!canEdit} />
+                  <input className={CONTROL_CLASS} placeholder="角色风格，未设置则继承 profile" value={speaker.style ?? ""} onChange={(event) => updateSpeaker(speaker.id, { style: event.target.value })} disabled={!canEdit} />
                 </div>
               ))}
             </div>

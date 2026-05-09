@@ -21,6 +21,12 @@ export const GenerateSpeechSchema = z.object({
     scene: z.string().optional(),
     directorNotes: z.string().optional(),
     sampleContext: z.string().optional(),
+    style: z.string().optional(),
+    pacing: z.string().optional(),
+    accent: z.string().optional(),
+    emotion: z.string().optional(),
+    performanceNotes: z.string().optional(),
+    lineStyle: z.string().optional(),
     transcript: z.string().optional(),
     speakers: z.array(z.object({
       id: z.string(),

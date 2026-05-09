@@ -69,11 +69,28 @@ export type ProductionList = z.infer<typeof ProductionListSchema>;
 
 // ─── Director Profile Config ───────────────────────────────────────────────────
 
+const DirectorStyleFieldsSchema = {
+  style: z.string().optional().default(""),
+  pacing: z.string().optional().default(""),
+  accent: z.string().optional().default(""),
+  emotion: z.string().optional().default(""),
+  performanceNotes: z.string().optional().default(""),
+};
+
+const PromptDirectorStyleFieldsSchema = {
+  style: z.string().optional().default(""),
+  pacing: z.string().optional().default(""),
+  accent: z.string().optional().default(""),
+  emotion: z.string().optional().default(""),
+  performanceNotes: z.string().optional().default(""),
+};
+
 export const DirectorConfigSchema = z.object({
   audioProfile: z.string().optional().default(""),
   scene: z.string().optional().default(""),
   directorNotes: z.string().optional().default(""),
   sampleContext: z.string().optional().default(""),
+  ...DirectorStyleFieldsSchema,
   defaultVoice: z.string().optional().default("Zephyr"),
   defaultModel: z.string().optional().default("google/gemini-3.1-flash-tts-preview"),
   defaultFormat: z.enum(["wav", "pcm", "mp3"]).optional().default("wav"),
@@ -384,6 +401,11 @@ export const PromptOverrideSchema = z.object({
   scene: z.string().optional(),
   directorNotes: z.string().optional(),
   sampleContext: z.string().optional(),
+  style: z.string().optional(),
+  pacing: z.string().optional(),
+  accent: z.string().optional(),
+  emotion: z.string().optional(),
+  performanceNotes: z.string().optional(),
   speakers: z.array(PromptSpeakerSchema).min(1).max(2).optional(),
 }).passthrough();
 
@@ -395,6 +417,7 @@ export const PromptProfileSchema = z.object({
   scene: NonEmptyTrimmedString,
   directorNotes: NonEmptyTrimmedString,
   sampleContext: NonEmptyTrimmedString,
+  ...PromptDirectorStyleFieldsSchema,
   speakers: z.array(PromptSpeakerSchema).min(1, "Profile must have at least one speaker").max(2, "Profile supports at most 2 speakers"),
   reusePolicy: z.enum(["one-line", "many-lines"]).optional(),
   sourceDocumentIds: z.array(z.string()).optional(),
@@ -417,7 +440,7 @@ export const PromptStructuredLineSchema = z.object({
   model: z.string().optional(),
   responseFormat: z.enum(["wav", "pcm", "mp3"]).optional(),
   notes: z.string().optional(),
-  style: z.string().optional(),
+  style: z.string().max(500, "Line style must be concise and must not contain transcript text").optional(),
   generationStatus: z.enum(["draft", "ready", "pending", "running", "succeeded", "failed", "needs_revision"]).optional(),
 }).passthrough();
 
@@ -449,6 +472,7 @@ export type QualityIssueCode =
   | "TRANSCRIPT_URL_ONLY"
   | "TRANSCRIPT_EMPTY_OR_PUNCTUATION_ONLY"
   | "TRANSCRIPT_SECTION_MARKER"
+  | "TRANSCRIPT_PROMPT_STRUCTURE_POLLUTION"
   | "TRANSCRIPT_NON_SPEECH_DESCRIPTION"
   | "LOW_CANDIDATE_COVERAGE"
   | "MISSING_PROMPT_PROFILES"
@@ -481,10 +505,13 @@ export interface BusinessQualityReport {
 const PROMPT_PLACEHOLDER_VALUES = new Set([
   "todo",
   "tbd",
+  "placeholder",
   "n/a",
   "na",
   "none",
   "null",
+  "占位",
+  "占位符",
   "待补充",
   "待定",
   "空",
@@ -492,9 +519,37 @@ const PROMPT_PLACEHOLDER_VALUES = new Set([
   "无",
 ]);
 
+const PROMPT_STYLE_FIELD_NAMES = ["style", "pacing", "accent", "emotion", "performanceNotes"] as const;
+
+type PromptStyleFieldName = typeof PROMPT_STYLE_FIELD_NAMES[number];
+
+const PROMPT_PLACEHOLDER_EDGE_CHARS = /^[\s"'“”‘’`【】\[\]（）(){}<>《》]+|[\s"'“”‘’`【】\[\]（）(){}<>《》，,。.!！?？:：;；]+$/g;
+
+function normalizePromptPlaceholderValue(value: string): string {
+  return value.trim().toLowerCase().replace(PROMPT_PLACEHOLDER_EDGE_CHARS, "");
+}
+
 function isPlaceholderPromptValue(value: string): boolean {
-  const normalized = value.trim().toLowerCase();
+  const normalized = normalizePromptPlaceholderValue(value);
   return PROMPT_PLACEHOLDER_VALUES.has(normalized);
+}
+
+function readPromptStyleField(source: unknown, field: PromptStyleFieldName): string | null {
+  if (!source || typeof source !== "object" || Array.isArray(source)) return null;
+  const value = (source as Record<string, unknown>)[field];
+  return typeof value === "string" ? value : null;
+}
+
+function parseJsonRecord(value: string | null | undefined): Record<string, unknown> | null {
+  if (!value?.trim()) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function hasSemanticTranscript(value: string): boolean {
@@ -508,6 +563,21 @@ function truncateTranscriptSample(value: string): string {
 function classifyTranscriptQualityIssue(transcript: string): QualityIssueCode | null {
   const normalized = transcript.trim();
   if (!normalized || !hasSemanticTranscript(normalized)) return "TRANSCRIPT_EMPTY_OR_PUNCTUATION_ONLY";
+  if (/^(?:style|pacing|accent|emotion|director(?:'s|s)?\s+notes|performance\s+notes|audio\s+profile|sample\s+context)\s*[：:].+$/i.test(normalized)) {
+    return "TRANSCRIPT_PROMPT_STRUCTURE_POLLUTION";
+  }
+  if (/^(?:风格|语速|节奏|口音|发音|情绪|导演备注|表演备注|音频档案|场景|示例上下文)\s*[：:].+$/i.test(normalized)) {
+    return "TRANSCRIPT_PROMPT_STRUCTURE_POLLUTION";
+  }
+  if (/^#{1,6}\s*(?:audio\s+profile|the\s+scene|director(?:'s|s)?\s+notes|sample\s+context|transcript)\b/i.test(normalized)) {
+    return "TRANSCRIPT_PROMPT_STRUCTURE_POLLUTION";
+  }
+  if (/^#{1,6}\s*(?:音频档案|场景|导演备注|表演备注|示例上下文|台词|对白)\b/i.test(normalized)) {
+    return "TRANSCRIPT_PROMPT_STRUCTURE_POLLUTION";
+  }
+  if (/(?:^|\n)#{3,4}\s*(?:DIRECTOR(?:'S|S)?\s+NOTES|TRANSCRIPT|SAMPLE\s+CONTEXT)\b/i.test(normalized)) {
+    return "TRANSCRIPT_PROMPT_STRUCTURE_POLLUTION";
+  }
   if (/^https?:\/\/\S+$/i.test(normalized)) return "TRANSCRIPT_URL_ONLY";
   if (/^(?:来源|出处|数据来源|source|url|link|链接)\s*[：:].*$/i.test(normalized)) return "TRANSCRIPT_METADATA_SOURCE";
   if (/^(?:标题|题目|title)\s*[：:].*$/i.test(normalized)) return "TRANSCRIPT_METADATA_TITLE";
@@ -579,6 +649,50 @@ export function validateBusinessQualityGate(options: {
         actual: line.promptProfileId,
       });
     }
+
+    const lineStyle = typeof line.style === "string" ? line.style : "";
+    if (lineStyle.trim() && isPlaceholderPromptValue(lineStyle)) {
+      issues.push({
+        code: "PROFILE_CONTENT_TOO_WEAK",
+        severity: "blocking",
+        message: `Line "${line.id}" field "style" uses a placeholder value and cannot enter the final prompt.`,
+        lineId: line.id,
+        lineIndex: index,
+        expected: "specific non-placeholder line style or empty string",
+        actual: lineStyle,
+      });
+    }
+
+    for (const field of PROMPT_STYLE_FIELD_NAMES) {
+      const overrideValue = readPromptStyleField(line.promptOverride, field);
+      if (overrideValue?.trim() && isPlaceholderPromptValue(overrideValue)) {
+        issues.push({
+          code: "PROFILE_CONTENT_TOO_WEAK",
+          severity: "blocking",
+          message: `Line "${line.id}" promptOverride field "${field}" uses a placeholder value and cannot enter the final prompt.`,
+          lineId: line.id,
+          lineIndex: index,
+          expected: "specific non-placeholder override content or empty string",
+          actual: overrideValue,
+        });
+      }
+    }
+
+    const directorOverride = parseJsonRecord(line.directorOverrideJson);
+    for (const field of PROMPT_STYLE_FIELD_NAMES) {
+      const overrideValue = readPromptStyleField(directorOverride, field);
+      if (overrideValue?.trim() && isPlaceholderPromptValue(overrideValue)) {
+        issues.push({
+          code: "PROFILE_CONTENT_TOO_WEAK",
+          severity: "blocking",
+          message: `Line "${line.id}" directorOverrideJson field "${field}" uses a placeholder value and cannot enter the final prompt.`,
+          lineId: line.id,
+          lineIndex: index,
+          expected: "specific non-placeholder override content or empty string",
+          actual: overrideValue,
+        });
+      }
+    }
   }
 
   for (const profile of options.draft.promptProfiles) {
@@ -590,6 +704,55 @@ export function validateBusinessQualityGate(options: {
           message: `Prompt profile "${profile.id}" field "${field}" is too weak for production quality commit.`,
           expected: "specific non-placeholder content",
           actual: profile[field],
+        });
+      }
+    }
+    for (const field of PROMPT_STYLE_FIELD_NAMES) {
+      const value = typeof profile[field] === "string" ? profile[field] : "";
+      if (value.trim() && isPlaceholderPromptValue(value)) {
+        issues.push({
+          code: "PROFILE_CONTENT_TOO_WEAK",
+          severity: "blocking",
+          message: `Prompt profile "${profile.id}" field "${field}" uses a placeholder value and cannot enter the final prompt.`,
+          expected: "specific non-placeholder style content or empty string",
+          actual: value,
+        });
+      }
+    }
+    for (const speaker of profile.speakers) {
+      if (speaker.style?.trim() && isPlaceholderPromptValue(speaker.style)) {
+        issues.push({
+          code: "PROFILE_CONTENT_TOO_WEAK",
+          severity: "blocking",
+          message: `Prompt profile "${profile.id}" speaker "${speaker.id}" field "style" uses a placeholder value and cannot enter the final prompt.`,
+          expected: "specific non-placeholder speaker style or empty string",
+          actual: speaker.style,
+        });
+      }
+    }
+  }
+
+  for (const profile of options.draft.directorProfiles ?? []) {
+    for (const field of PROMPT_STYLE_FIELD_NAMES) {
+      const value = typeof profile[field] === "string" ? profile[field] : "";
+      if (value.trim() && isPlaceholderPromptValue(value)) {
+        issues.push({
+          code: "PROFILE_CONTENT_TOO_WEAK",
+          severity: "blocking",
+          message: `Director profile "${profile.id}" field "${field}" uses a placeholder value and cannot enter the final prompt.`,
+          expected: "specific non-placeholder style content or empty string",
+          actual: value,
+        });
+      }
+    }
+    for (const speaker of profile.speakers) {
+      if (speaker.style?.trim() && isPlaceholderPromptValue(speaker.style)) {
+        issues.push({
+          code: "PROFILE_CONTENT_TOO_WEAK",
+          severity: "blocking",
+          message: `Director profile "${profile.id}" speaker "${speaker.id}" field "style" uses a placeholder value and cannot enter the final prompt.`,
+          expected: "specific non-placeholder speaker style or empty string",
+          actual: speaker.style,
         });
       }
     }
@@ -768,6 +931,29 @@ export function validateRawPromptStructuredAgentDraft(rawDraft: unknown): Valida
       }
     }
 
+    for (const field of PROMPT_STYLE_FIELD_NAMES) {
+      const value = profile[field];
+      if (value.trim() && isPlaceholderPromptValue(value)) {
+        issues.push({
+          severity: "error",
+          code: "PLACEHOLDER_PROMPT_FIELD",
+          message: `Prompt profile "${profileId}" field "${field}" uses a placeholder value`,
+          field: `promptProfiles[${profileId}].${field}`,
+        });
+      }
+    }
+
+    for (const speaker of profile.speakers) {
+      if (speaker.style?.trim() && isPlaceholderPromptValue(speaker.style)) {
+        issues.push({
+          severity: "error",
+          code: "PLACEHOLDER_PROMPT_FIELD",
+          message: `Prompt profile "${profileId}" speaker "${speaker.id}" field "style" uses a placeholder value`,
+          field: `promptProfiles[${profileId}].speakers[${speaker.id}].style`,
+        });
+      }
+    }
+
     if (profile.speakers.length < 1 || profile.speakers.length > 2) {
       issues.push({
         severity: "error",
@@ -777,6 +963,32 @@ export function validateRawPromptStructuredAgentDraft(rawDraft: unknown): Valida
       });
     }
 
+  }
+
+  for (const profile of draft.directorProfiles ?? []) {
+    const profileId = profile.id.trim();
+    for (const field of PROMPT_STYLE_FIELD_NAMES) {
+      const value = profile[field];
+      if (value.trim() && isPlaceholderPromptValue(value)) {
+        issues.push({
+          severity: "error",
+          code: "PLACEHOLDER_PROMPT_FIELD",
+          message: `Director profile "${profileId}" field "${field}" uses a placeholder value`,
+          field: `directorProfiles[${profileId}].${field}`,
+        });
+      }
+    }
+
+    for (const speaker of profile.speakers) {
+      if (speaker.style?.trim() && isPlaceholderPromptValue(speaker.style)) {
+        issues.push({
+          severity: "error",
+          code: "PLACEHOLDER_PROMPT_FIELD",
+          message: `Director profile "${profileId}" speaker "${speaker.id}" field "style" uses a placeholder value`,
+          field: `directorProfiles[${profileId}].speakers[${speaker.id}].style`,
+        });
+      }
+    }
   }
 
   const orders = draft.lines.map((line) => line.order);
@@ -799,6 +1011,43 @@ export function validateRawPromptStructuredAgentDraft(rawDraft: unknown): Valida
         field: `lines[${line.id}].transcript`,
         lineId: line.id,
       });
+    }
+
+    if (line.style?.trim() && isPlaceholderPromptValue(line.style)) {
+      issues.push({
+        severity: "error",
+        code: "PLACEHOLDER_PROMPT_FIELD",
+        message: `Line "${line.id}" field "style" uses a placeholder value`,
+        field: `lines[${line.id}].style`,
+        lineId: line.id,
+      });
+    }
+
+    for (const field of PROMPT_STYLE_FIELD_NAMES) {
+      const overrideValue = readPromptStyleField(line.promptOverride, field);
+      if (overrideValue?.trim() && isPlaceholderPromptValue(overrideValue)) {
+        issues.push({
+          severity: "error",
+          code: "PLACEHOLDER_PROMPT_FIELD",
+          message: `Line "${line.id}" promptOverride field "${field}" uses a placeholder value`,
+          field: `lines[${line.id}].promptOverride.${field}`,
+          lineId: line.id,
+        });
+      }
+    }
+
+    const directorOverride = parseJsonRecord(line.directorOverrideJson);
+    for (const field of PROMPT_STYLE_FIELD_NAMES) {
+      const overrideValue = readPromptStyleField(directorOverride, field);
+      if (overrideValue?.trim() && isPlaceholderPromptValue(overrideValue)) {
+        issues.push({
+          severity: "error",
+          code: "PLACEHOLDER_PROMPT_FIELD",
+          message: `Line "${line.id}" directorOverrideJson field "${field}" uses a placeholder value`,
+          field: `lines[${line.id}].directorOverrideJson.${field}`,
+          lineId: line.id,
+        });
+      }
     }
 
     if (typeof line.text === "string" && line.text.trim() !== transcript) {

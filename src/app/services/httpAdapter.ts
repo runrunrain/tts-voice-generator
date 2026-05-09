@@ -223,12 +223,17 @@ export const httpAdapter: TtsServiceAdapter = {
         responseFormat: req.format,
       };
 
-      const hasDirectorFields = req.audioProfile?.trim() || req.scene?.trim() || req.directorNotes?.trim() || req.sampleContext?.trim() || req.transcript?.trim() || (req.speakers && req.speakers.length > 0);
+      const hasDirectorFields = req.audioProfile?.trim() || req.scene?.trim() || req.directorNotes?.trim() || req.style?.trim() || req.pacing?.trim() || req.accent?.trim() || req.emotion?.trim() || req.performanceNotes?.trim() || req.sampleContext?.trim() || req.transcript?.trim() || (req.speakers && req.speakers.length > 0);
       if (hasDirectorFields) {
         body.directorSnapshot = {
           audioProfile: req.audioProfile?.trim() || undefined,
           scene: req.scene?.trim() || undefined,
           directorNotes: req.directorNotes?.trim() || undefined,
+          style: req.style?.trim() || undefined,
+          pacing: req.pacing?.trim() || undefined,
+          accent: req.accent?.trim() || undefined,
+          emotion: req.emotion?.trim() || undefined,
+          performanceNotes: req.performanceNotes?.trim() || undefined,
           sampleContext: req.sampleContext?.trim() || undefined,
           // Preserve the original user transcript, not the assembled prompt.
           // req.transcript is the raw user input; req.text is the assembled TTS prompt.
@@ -534,6 +539,11 @@ export const httpAdapter: TtsServiceAdapter = {
           audioProfile: req.audioProfile ?? "",
           scene: req.scene ?? "",
           directorNotes: req.directorNotes ?? "",
+          style: req.style ?? "",
+          pacing: req.pacing ?? "",
+          accent: req.accent ?? "",
+          emotion: req.emotion ?? "",
+          performanceNotes: req.performanceNotes ?? "",
           sampleContext: req.sampleContext ?? "",
           transcript: req.transcript,
           speakers: (req.speakers ?? []).map((s) => ({
@@ -1006,6 +1016,11 @@ function mapPromptOverride(raw: unknown): PromptOverride | null {
   if (typeof raw.audioProfile === "string") override.audioProfile = raw.audioProfile;
   if (typeof raw.scene === "string") override.scene = raw.scene;
   if (typeof raw.directorNotes === "string") override.directorNotes = raw.directorNotes;
+  if (typeof raw.style === "string") override.style = raw.style;
+  if (typeof raw.pacing === "string") override.pacing = raw.pacing;
+  if (typeof raw.accent === "string") override.accent = raw.accent;
+  if (typeof raw.emotion === "string") override.emotion = raw.emotion;
+  if (typeof raw.performanceNotes === "string") override.performanceNotes = raw.performanceNotes;
   if (typeof raw.sampleContext === "string") override.sampleContext = raw.sampleContext;
   if (Array.isArray(raw.speakers)) override.speakers = raw.speakers.map(mapPromptSpeaker);
   return Object.keys(override).length > 0 ? override : null;
@@ -1039,7 +1054,8 @@ function mapVoiceLine(raw: unknown): VoiceLine {
     voice: asString(l.voice, "Zephyr"),
     model: asString(l.model, DEFAULT_TTS_MODEL),
     responseFormat: normalizeResponseFormat(l.responseFormat ?? l.format),
-    notes: asString(l.notes ?? l.style, ""),
+    style: asString(l.style, ""),
+    notes: asString(l.notes, ""),
     directorProfileId,
     directorOverrideJson: asNullableString(l.directorOverrideJson),
     promptProfileId,
@@ -1054,7 +1070,6 @@ function mapVoiceLine(raw: unknown): VoiceLine {
     validationErrors: Array.isArray(l.validationErrors) ? l.validationErrors.filter((item): item is string => typeof item === "string") : undefined,
     version: asNumber(l.version, undefined as unknown as number),
     ...(typeof l.speaker === "string" ? { speaker: l.speaker } : {}),
-    ...(typeof l.style === "string" ? { style: l.style } : {}),
     ...(typeof l.status === "string" ? { status: l.status } : {}),
   };
 }
@@ -1074,7 +1089,7 @@ function toBackendVoiceLine(line: VoiceLine, index: number) {
     transcript: line.transcript,
     text: line.transcript,
     voice: line.voice,
-    style: asString(raw.style, line.notes ?? ""),
+    style: line.style ?? "",
     notes: line.notes ?? "",
     status: asString(raw.status, "pending"),
     model: line.model || DEFAULT_TTS_MODEL,
@@ -1238,6 +1253,11 @@ function mapDirectorProfile(raw: unknown): DirectorProfile {
     audioProfile: asString(p.audioProfile ?? config.audioProfile),
     scene: asString(p.scene ?? config.scene),
     directorNotes: asString(p.directorNotes ?? config.directorNotes),
+    style: asString(p.style ?? config.style),
+    pacing: asString(p.pacing ?? config.pacing),
+    accent: asString(p.accent ?? config.accent),
+    emotion: asString(p.emotion ?? config.emotion),
+    performanceNotes: asString(p.performanceNotes ?? config.performanceNotes),
     sampleContext: asString(p.sampleContext ?? config.sampleContext),
     speakers: asArray(p.speakers ?? config.speakers).map((speaker, index) => {
       const s = isRecord(speaker) ? speaker : {};
@@ -1279,6 +1299,11 @@ function toBackendDirectorProfilePayload(payload: Partial<DirectorProfile>) {
       audioProfile: payload.audioProfile ?? "",
       scene: payload.scene ?? "",
       directorNotes: payload.directorNotes ?? "",
+      style: payload.style ?? "",
+      pacing: payload.pacing ?? "",
+      accent: payload.accent ?? "",
+      emotion: payload.emotion ?? "",
+      performanceNotes: payload.performanceNotes ?? "",
       sampleContext: payload.sampleContext ?? "",
       speakers: payload.speakers ?? [],
       defaultVoice: payload.speakers?.[0]?.voice ?? "Zephyr",

@@ -723,10 +723,14 @@ describe("Phase 2: Generation Bridge", () => {
       expect(body.ok).toBe(true);
       expect(body.generation.succeededCount).toBe(1);
       expect(testState.lastGenerateRequest).toBeTruthy();
-      expect(testState.lastGenerateRequest.input).toContain("Audio Profile:");
-      expect(testState.lastGenerateRequest.input).toContain("Scene:");
-      expect(testState.lastGenerateRequest.input).toContain("Director's Notes:");
-      expect(testState.lastGenerateRequest.input).toContain("Sample Context:");
+      expect(testState.lastGenerateRequest.input).toContain("TTS the following script:");
+      expect(testState.lastGenerateRequest.input).toContain("# AUDIO PROFILE");
+      expect(testState.lastGenerateRequest.input).toContain("## THE SCENE");
+      expect(testState.lastGenerateRequest.input).toContain("### DIRECTOR'S NOTES");
+      expect(testState.lastGenerateRequest.input).toContain("Style:");
+      expect(testState.lastGenerateRequest.input).toContain("Pacing:");
+      expect(testState.lastGenerateRequest.input).toContain("### SAMPLE CONTEXT");
+      expect(testState.lastGenerateRequest.input).toContain("#### TRANSCRIPT");
       expect(testState.lastGenerateRequest.directorSnapshot.transcript).toBeTruthy();
       expect(testState.lastGenerateRequest.input).toContain(testState.lastGenerateRequest.directorSnapshot.transcript);
     });

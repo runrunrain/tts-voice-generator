@@ -162,6 +162,11 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
         audioProfile: source.audioProfile,
         scene: source.scene,
         directorNotes: source.directorNotes,
+        style: source.style,
+        pacing: source.pacing,
+        accent: source.accent,
+        emotion: source.emotion,
+        performanceNotes: source.performanceNotes,
         sampleContext: source.sampleContext,
         speakers: source.speakers.map((speaker) => ({ ...speaker })),
       });
@@ -217,7 +222,7 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
         {draftLines.length === 0 ? (
           <PanelState icon={<Plus size={18} />} title="暂无生产行" hint="点击新增行创建第一条语音台词，或在右侧 Agent 面板执行 Normalize。" />
         ) : (
-          <table className="w-full min-w-[1220px] border-collapse text-xs">
+          <table className="w-full min-w-[1360px] border-collapse text-xs">
             <thead className="sticky top-0 z-10 bg-bg-sunken text-text-tertiary border-b border-border-subtle">
               <tr>
                 <Th className="w-16"><label className="flex items-center gap-2"><input type="checkbox" className="accent-accent" checked={allSelected} onChange={toggleAll} disabled={saving || generating} /> #</label></Th>
@@ -225,6 +230,7 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
                 <Th className="w-40">标题</Th>
                 <Th className="w-28">角色</Th>
                 <Th>语音文本</Th>
+                <Th className="w-48">行级风格</Th>
                 <Th className="w-32">音色</Th>
                 <Th className="w-36">导演</Th>
                 <Th className="w-36">状态</Th>
@@ -337,6 +343,7 @@ function ProductionRow({ line, index, voices, directorProfiles, profileBindingMa
         <Td><ShortInput value={line.title ?? ""} onChange={(value) => onChange({ title: value })} disabled={disabled || rowLocked} placeholder={line.transcript.slice(0, 18) || "标题"} /></Td>
         <Td><ShortInput value={line.speakerLabel ?? ""} onChange={(value) => onChange({ speakerLabel: value })} disabled={disabled || rowLocked} placeholder="Narrator" /></Td>
         <Td><div className="truncate text-text-secondary max-w-[420px]" title={line.transcript}>{line.transcript || <span className="text-text-tertiary">待填写台词</span>}</div><div className={`mt-1 text-[10px] ${charCount > MAX_TRANSCRIPT_CHARS ? "text-warning" : "text-text-tertiary"}`}>{charCount}/{MAX_TRANSCRIPT_CHARS} 字符</div></Td>
+        <Td><LineStyleSummary value={line.style} /></Td>
         <Td><select className="w-full h-8 bg-bg-base border border-border rounded px-2 text-xs outline-none focus:border-border-focus" value={line.voice} onChange={(event) => onChange({ voice: event.target.value })} disabled={disabled || rowLocked}>{voices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}</select></Td>
         <Td><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${currentProfileId ? "bg-success" : "bg-error"}`} /><span className="truncate" title={currentProfile?.name ?? "未绑定"}>{currentProfile?.name ?? "未绑定"}</span></div></Td>
         <Td><StatusStack status={generationStatus} issues={issues} result={result} line={line} /></Td>
@@ -344,7 +351,7 @@ function ProductionRow({ line, index, voices, directorProfiles, profileBindingMa
       </tr>
       {expanded && (
         <tr className="border-b border-border-subtle bg-bg-base">
-          <td colSpan={9} className="p-0">
+          <td colSpan={10} className="p-0">
             <LineDetailPanel
               line={line}
               voices={voices}
@@ -395,7 +402,17 @@ function LineDetailPanel({ line, voices, directorProfiles, profileBindingMap, is
           <Field label="音色"><select className={CONTROL_CLASS} value={line.voice} onChange={(event) => onChange({ voice: event.target.value })} disabled={editDisabled}>{voices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}</select></Field>
           <Field label="模型"><input className={`${CONTROL_CLASS} font-mono`} value={line.model} onChange={(event) => onChange({ model: event.target.value })} disabled={editDisabled} /></Field>
           <Field label="格式"><select className={`${CONTROL_CLASS} font-mono`} value={line.responseFormat} onChange={(event) => onChange({ responseFormat: event.target.value as ResponseFormat })} disabled={editDisabled}>{FORMAT_OPTIONS.map((format) => <option key={format} value={format}>{format}</option>)}</select></Field>
-          <Field label="备注" className="col-span-2"><textarea className={`${CONTROL_CLASS} h-16`} value={line.notes ?? ""} onChange={(event) => onChange({ notes: event.target.value })} disabled={editDisabled} /></Field>
+          <Field label="行级风格" className="col-span-2">
+            <textarea
+              className={`${CONTROL_CLASS} h-16`}
+              value={line.style ?? ""}
+              onChange={(event) => onChange({ style: event.target.value })}
+              disabled={editDisabled}
+              placeholder="未设置，使用导演配置/角色风格"
+            />
+            <span className="text-[10px] text-text-tertiary">仅保存到 style 字段；制作备注请写入下方备注，不会互相回填。</span>
+          </Field>
+          <Field label="备注" className="col-span-2"><textarea className={`${CONTROL_CLASS} h-16`} value={line.notes ?? ""} onChange={(event) => onChange({ notes: event.target.value })} disabled={editDisabled} placeholder="制作备注，不作为行级风格" /></Field>
           <div className={`col-span-2 text-[10px] ${line.transcript.length > MAX_TRANSCRIPT_CHARS ? "text-warning" : "text-text-tertiary"}`}>字符数 {line.transcript.length}/{MAX_TRANSCRIPT_CHARS}</div>
         </section>
 
@@ -459,6 +476,14 @@ function BulkActionBar({ selectedCount, directorProfiles, voices, bulkProfileId,
       <span className="ml-auto text-[10px] text-text-tertiary">批量绑定/改音色/删除仅修改 draft；保存时使用 expectedVersion。</span>
     </footer>
   );
+}
+
+function LineStyleSummary({ value }: { value?: string }) {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) {
+    return <span className="inline-flex max-w-full rounded border border-border-subtle bg-bg-sunken px-2 py-1 text-[10px] text-text-tertiary">继承导演配置/角色风格</span>;
+  }
+  return <span className="block max-w-[180px] truncate rounded border border-accent/20 bg-accent-muted/25 px-2 py-1 text-[10px] text-accent" title={trimmed}>{trimmed}</span>;
 }
 
 function StatusStack({ status, issues, result, line }: { status: LineGenerationStatus; issues: ValidationIssue[]; result?: LineGenerationResult; line: VoiceLine }) {

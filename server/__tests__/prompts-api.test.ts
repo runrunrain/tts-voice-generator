@@ -113,6 +113,11 @@ function validAssembleBody(overrides: Record<string, unknown> = {}) {
     scene: "A cozy living room",
     directorNotes: "Keep it relaxed and natural",
     sampleContext: "Previous episode established the hosts",
+    style: "warm conversational host delivery",
+    pacing: "relaxed with natural pauses",
+    accent: "neutral clear diction",
+    emotion: "welcoming and friendly",
+    performanceNotes: "Legacy notes should be merged into this section.",
     transcript: "Speaker A: Welcome back! Speaker B: Thanks for having me.",
     speakers: [
       { id: "a", label: "Speaker A", name: "Host", voice: "Zephyr", style: "conversational" },
@@ -210,10 +215,20 @@ describe("Prompt Assembly API", () => {
       const body = await res.json();
       const prompt: string = body.prompt;
 
-      expect(prompt).toContain("Audio Profile: Warm, conversational podcast");
-      expect(prompt).toContain("Scene: A cozy living room");
-      expect(prompt).toContain("Director's Notes: Keep it relaxed and natural");
-      expect(prompt).toContain("Sample Context: Previous episode established the hosts");
+      expect(prompt).toContain("TTS the following script:");
+      expect(prompt).toContain("# AUDIO PROFILE: Speaker A");
+      expect(prompt).toContain("Role/Identity: Warm, conversational podcast");
+      expect(prompt).toContain("## THE SCENE");
+      expect(prompt).toContain("A cozy living room");
+      expect(prompt).toContain("### DIRECTOR'S NOTES");
+      expect(prompt).toContain("Style: warm conversational host delivery");
+      expect(prompt).toContain("Pacing: relaxed with natural pauses");
+      expect(prompt).toContain("Accent: neutral clear diction");
+      expect(prompt).toContain("Emotion: welcoming and friendly");
+      expect(prompt).toContain("Performance Notes: Legacy notes should be merged into this section.; Keep it relaxed and natural");
+      expect(prompt).toContain("### SAMPLE CONTEXT");
+      expect(prompt).toContain("Previous episode established the hosts");
+      expect(prompt).toContain("#### TRANSCRIPT");
       expect(prompt).toContain("Speaker A: Welcome back! Speaker B: Thanks for having me.");
     });
 
@@ -227,11 +242,11 @@ describe("Prompt Assembly API", () => {
       const body = await res.json();
       const prompt: string = body.prompt;
 
-      expect(prompt).toContain("Speakers:");
+      expect(prompt).toContain("Voice:");
       expect(prompt).toContain("Speaker A");
-      expect(prompt).toContain("[Voice: Zephyr]");
+      expect(prompt).toContain("Zephyr");
       expect(prompt).toContain("Speaker B");
-      expect(prompt).toContain("[Voice: Puck]");
+      expect(prompt).toContain("Puck");
     });
 
     it("assembles prompt with only transcript (minimal input)", async () => {
@@ -247,10 +262,8 @@ describe("Prompt Assembly API", () => {
       const body = await res.json();
       expect(body.ok).toBe(true);
       expect(body.prompt).toContain("Hello world, this is a test.");
-      // Should not contain empty preamble sections
-      expect(body.prompt).not.toContain("Audio Profile:");
-      expect(body.prompt).not.toContain("Scene:");
-      expect(body.prompt).not.toContain("Speakers:");
+      expect(body.prompt).toContain("TTS the following script:");
+      expect(body.prompt).toContain("#### TRANSCRIPT");
     });
 
     it("omits empty optional sections from the prompt", async () => {
@@ -267,7 +280,8 @@ describe("Prompt Assembly API", () => {
       });
 
       const body = await res.json();
-      expect(body.prompt).toBe("Just the transcript.");
+      expect(body.prompt).toContain("TTS the following script:");
+      expect(body.prompt).toContain("#### TRANSCRIPT\nJust the transcript.");
     });
   });
 
@@ -454,8 +468,8 @@ describe("Prompt Assembly API", () => {
       });
 
       const body = await res.json();
-      expect(body.prompt).toContain("[Voice: Zephyr]");
-      expect(body.prompt).not.toContain("[Voice: alloy]");
+      expect(body.prompt).toContain("Voice: Host: Zephyr");
+      expect(body.prompt).not.toContain("alloy");
     });
 
     it("does not warn when using canonical voice name", async () => {
@@ -699,12 +713,14 @@ describe("Prompt Assembly API", () => {
         ],
       });
 
-      expect(result.prompt).toContain("Audio Profile: Warm podcast");
-      expect(result.prompt).toContain("Scene: Living room");
-      expect(result.prompt).toContain("Director's Notes: Relaxed tone");
-      expect(result.prompt).toContain("Sample Context: Previous episode");
+      expect(result.prompt).toContain("TTS the following script:");
+      expect(result.prompt).toContain("# AUDIO PROFILE: Host");
+      expect(result.prompt).toContain("Role/Identity: Warm podcast");
+      expect(result.prompt).toContain("Living room");
+      expect(result.prompt).toContain("Performance Notes: Relaxed tone");
+      expect(result.prompt).toContain("Previous episode");
       expect(result.prompt).toContain("Hello and welcome!");
-      expect(result.prompt).toContain("[Voice: Zephyr]");
+      expect(result.prompt).toContain("Voice: Host: Zephyr");
     });
 
     it("includes speaker name and style in prompt when provided", () => {
@@ -720,7 +736,47 @@ describe("Prompt Assembly API", () => {
       });
 
       expect(result.prompt).toContain("(Alice)");
-      expect(result.prompt).toContain("[Style: cheerful]");
+      expect(result.prompt).toContain("Style: Speaker A: cheerful");
+    });
+
+    it("places line style in Director's Notes and keeps transcript clean", () => {
+      const result = assemblePrompt({
+        audioProfile: "Tactical commander",
+        scene: "Night battlefield briefing",
+        directorNotes: "Legacy notes remain compatible.",
+        sampleContext: "The squad is waiting for orders.",
+        style: "low restrained command",
+        pacing: "slow with firm pauses",
+        accent: "clear diction",
+        emotion: "controlled tension",
+        performanceNotes: "Avoid melodrama.",
+        lineStyle: "near whisper on the final phrase",
+        transcript: "Hold the line until dawn.",
+        speakers: [
+          { id: "commander", label: "Commander", voice: "Orus", style: "firm" },
+        ],
+      });
+
+      const transcriptSection = result.prompt.split("#### TRANSCRIPT")[1] ?? "";
+      expect(result.prompt).toContain("Line Style Override: near whisper on the final phrase");
+      expect(result.prompt).toContain("Performance Notes: Avoid melodrama.; Legacy notes remain compatible.");
+      expect(transcriptSection).toContain("Hold the line until dawn.");
+      expect(transcriptSection).not.toContain("Line Style Override");
+      expect(transcriptSection).not.toContain("Style:");
+    });
+
+    it("keeps old directorNotes compatible by merging into Performance Notes", () => {
+      const result = assemblePrompt({
+        audioProfile: "Narrator",
+        scene: "Archive narration",
+        directorNotes: "measured pace, restrained pride",
+        sampleContext: "Historical monologue",
+        transcript: "The old city gates opened.",
+        speakers: [{ id: "narrator", label: "Narrator", voice: "Zephyr" }],
+      });
+
+      expect(result.prompt).toContain("Performance Notes: measured pace, restrained pride");
+      expect(result.normalized.performanceNotes).toBe("measured pace, restrained pride");
     });
 
     it("normalized.speakers contains wasLegacyAlias flag", () => {
@@ -750,8 +806,8 @@ describe("Prompt Assembly API", () => {
         speakers: [],
       });
 
-      expect(result.prompt).toBe("Just a plain transcript.");
-      expect(result.warnings.length).toBe(3); // audioProfile, scene, directorNotes
+      expect(result.prompt).toContain("#### TRANSCRIPT\nJust a plain transcript.");
+      expect(result.warnings.length).toBe(4); // audioProfile, scene, directorNotes, style fields
     });
 
     it("canonicalizeVoice handles empty string as Zephyr", () => {

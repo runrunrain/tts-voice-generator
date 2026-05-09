@@ -40,6 +40,12 @@ export interface PromptAssemblyInput {
   scene: string;
   directorNotes: string;
   sampleContext: string;
+  style?: string;
+  pacing?: string;
+  accent?: string;
+  emotion?: string;
+  performanceNotes?: string;
+  lineStyle?: string;
   transcript: string;
   speakers: SpeakerInput[];
 }
@@ -59,6 +65,12 @@ export interface PromptAssemblyResult {
     scene: string;
     directorNotes: string;
     sampleContext: string;
+    style: string;
+    pacing: string;
+    accent: string;
+    emotion: string;
+    performanceNotes: string;
+    lineStyle: string;
     transcript: string;
   };
 }
@@ -130,12 +142,28 @@ export function assemblePrompt(input: PromptAssemblyInput): PromptAssemblyResult
     });
   }
 
+  if (!input.style?.trim() || !input.pacing?.trim() || !input.emotion?.trim()) {
+    warnings.push({
+      code: "SUGGEST_STYLE_FIELDS",
+      message: "Style, pacing, and emotion are recommended for Gemini TTS director prompts.",
+      field: "style,pacing,emotion",
+    });
+  }
+
+  const performanceNotes = mergePromptNotes(input.performanceNotes, input.directorNotes);
+
   // 3. Build the assembled prompt
   const prompt = buildPromptText({
     audioProfile: input.audioProfile,
     scene: input.scene,
     directorNotes: input.directorNotes,
     sampleContext: input.sampleContext,
+    style: input.style ?? "",
+    pacing: input.pacing ?? "",
+    accent: input.accent ?? "",
+    emotion: input.emotion ?? "",
+    performanceNotes,
+    lineStyle: input.lineStyle ?? "",
     transcript: input.transcript,
     speakers: normalizedSpeakers,
   });
@@ -149,6 +177,12 @@ export function assemblePrompt(input: PromptAssemblyInput): PromptAssemblyResult
       scene: input.scene,
       directorNotes: input.directorNotes,
       sampleContext: input.sampleContext,
+      style: input.style ?? "",
+      pacing: input.pacing ?? "",
+      accent: input.accent ?? "",
+      emotion: input.emotion ?? "",
+      performanceNotes,
+      lineStyle: input.lineStyle ?? "",
       transcript: input.transcript,
     },
   };
@@ -169,48 +203,67 @@ function buildPromptText(params: {
   scene: string;
   directorNotes: string;
   sampleContext: string;
+  style: string;
+  pacing: string;
+  accent: string;
+  emotion: string;
+  performanceNotes: string;
+  lineStyle: string;
   transcript: string;
   speakers: NormalizedSpeaker[];
 }): string {
-  const sections: string[] = [];
+  const primarySpeaker = params.speakers[0];
+  const audioProfileTitle = primarySpeaker?.label || "TTS Voice Profile";
+  const voiceSummary = params.speakers.length > 0
+    ? params.speakers.map((speaker) => {
+      const namePart = speaker.name ? ` (${speaker.name})` : "";
+      const stylePart = speaker.style ? `, style: ${speaker.style}` : "";
+      return `${speaker.label}${namePart}: ${speaker.voice}${stylePart}`;
+    }).join("; ")
+    : "Use the requested OpenRouter/Gemini voice.";
+  const style = mergePromptNotes(
+    params.style,
+    ...params.speakers.map((speaker) => speaker.style ? `${speaker.label}: ${speaker.style}` : ""),
+    params.lineStyle ? `Line Style Override: ${params.lineStyle}` : "",
+  ) || "Natural, clear delivery that fits the transcript.";
 
-  // Preamble: Director instructions
-  const preambleLines: string[] = [];
+  const performanceNotes = params.performanceNotes || "Keep all director metadata out of the spoken transcript.";
 
-  if (params.audioProfile.trim()) {
-    preambleLines.push(`Audio Profile: ${params.audioProfile.trim()}`);
+  return [
+    "TTS the following script:",
+    "",
+    `# AUDIO PROFILE: ${audioProfileTitle}`,
+    `Role/Identity: ${params.audioProfile.trim() || "General natural TTS narration."}`,
+    `Voice: ${voiceSummary}`,
+    "",
+    "## THE SCENE",
+    params.scene.trim() || "No specific scene context provided.",
+    "",
+    "### DIRECTOR'S NOTES",
+    `Style: ${style}`,
+    `Pacing: ${params.pacing.trim() || "Natural conversational pacing with clear pauses."}`,
+    `Accent: ${params.accent.trim() || "No specific accent requirement; prioritize clear natural diction."}`,
+    `Emotion: ${params.emotion.trim() || "Match the transcript context naturally."}`,
+    `Performance Notes: ${performanceNotes}`,
+    "",
+    "### SAMPLE CONTEXT",
+    params.sampleContext.trim() || "No additional sample context.",
+    "",
+    "#### TRANSCRIPT",
+    params.transcript.trim(),
+  ].join("\n");
+}
+
+function mergePromptNotes(...values: Array<string | undefined | null>): string {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const value of values) {
+    const trimmed = typeof value === "string" ? value.trim() : "";
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(trimmed);
   }
-
-  if (params.scene.trim()) {
-    preambleLines.push(`Scene: ${params.scene.trim()}`);
-  }
-
-  if (params.directorNotes.trim()) {
-    preambleLines.push(`Director's Notes: ${params.directorNotes.trim()}`);
-  }
-
-  if (params.sampleContext.trim()) {
-    preambleLines.push(`Sample Context: ${params.sampleContext.trim()}`);
-  }
-
-  if (preambleLines.length > 0) {
-    sections.push(preambleLines.join("\n\n"));
-  }
-
-  // Speaker definitions
-  if (params.speakers.length > 0) {
-    const speakerLines = params.speakers.map((s) => {
-      const parts: string[] = [s.label];
-      if (s.name) parts.push(`(${s.name})`);
-      parts.push(`[Voice: ${s.voice}]`);
-      if (s.style) parts.push(`[Style: ${s.style}]`);
-      return parts.join(" ");
-    });
-    sections.push(`Speakers:\n${speakerLines.join("\n")}`);
-  }
-
-  // Transcript (always present - validated at route level)
-  sections.push(params.transcript);
-
-  return sections.join("\n\n");
+  return merged.join("; ");
 }

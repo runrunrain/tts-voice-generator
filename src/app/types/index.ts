@@ -58,6 +58,10 @@ export interface GenerateRequest {
   audioProfile?: string;
   scene?: string;
   directorNotes?: string;
+  pacing?: string;
+  accent?: string;
+  emotion?: string;
+  performanceNotes?: string;
   sampleContext?: string;
   /**
    * Original user transcript (before prompt assembly).
@@ -95,6 +99,14 @@ export interface SpeakerConfig {
   name: string;      // display name e.g. "主持人"
   voice: string;
   style: string;
+}
+
+export interface DirectorStyleFields {
+  style?: string;
+  pacing?: string;
+  accent?: string;
+  emotion?: string;
+  performanceNotes?: string;
 }
 
 // ─── History ─────────────────────────────────────────────────────────────────
@@ -199,6 +211,7 @@ export interface VoiceLine {
   voice: string;
   model: string;
   responseFormat: ResponseFormat;
+  style?: string;
   notes?: string;
   directorProfileId?: string | null;
   directorOverrideJson?: string | null;
@@ -247,7 +260,7 @@ export interface DirectorSpeakerProfile {
 
 export type DirectorProfileSource = "global" | "production-list";
 
-export interface DirectorProfile {
+export interface DirectorProfile extends DirectorStyleFields {
   id: string;
   taskId: string;
   source: DirectorProfileSource;
@@ -268,6 +281,11 @@ export interface PromptOverride {
   audioProfile?: string;
   scene?: string;
   directorNotes?: string;
+  style?: string;
+  pacing?: string;
+  accent?: string;
+  emotion?: string;
+  performanceNotes?: string;
   sampleContext?: string;
   speakers?: PromptSpeaker[];
 }
@@ -653,6 +671,11 @@ export interface AssemblePromptRequest {
   audioProfile?: string;
   scene?: string;
   directorNotes?: string;
+  style?: string;
+  pacing?: string;
+  accent?: string;
+  emotion?: string;
+  performanceNotes?: string;
   sampleContext?: string;
   transcript: string;
   speakers?: AssembleSpeakerInput[];
@@ -683,6 +706,11 @@ export interface AssemblePromptSuccess {
     audioProfile: string;
     scene: string;
     directorNotes: string;
+    style?: string;
+    pacing?: string;
+    accent?: string;
+    emotion?: string;
+    performanceNotes?: string;
     sampleContext: string;
     transcript: string;
   };

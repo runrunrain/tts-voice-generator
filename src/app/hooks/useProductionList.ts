@@ -18,6 +18,7 @@ export function createEmptyVoiceLine(sortOrder: number): VoiceLine {
     moduleName: "",
     title: "",
     speakerLabel: "Narrator",
+    style: "",
     notes: "",
     directorProfileId: null,
     promptProfileId: null,

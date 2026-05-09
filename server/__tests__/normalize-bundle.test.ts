@@ -63,7 +63,11 @@ import {
   validateProductionList,
   validateRawAgentDraft,
   validateRawPromptStructuredAgentDraft,
+  validateBusinessQualityGate,
   RawAgentDraftSchema,
+  DirectorConfigSchema,
+  PromptOverrideSchema,
+  PromptProfileSchema,
 } from "../src/domain/validators.js";
 
 // ─── Test Fixtures ──────────────────────────────────────────────────────────────
@@ -384,6 +388,20 @@ describe("generateProductionListSchemaSnapshot", () => {
     expect(hasSpeakerRule).toBe(true);
   });
 
+  it("exports Gemini style-quality fields and clean transcript rules", () => {
+    const snapshot = generateProductionListSchemaSnapshot();
+    const profileFields = snapshot.nestedSchemas.PromptProfile.map((f) => f.name);
+    const overrideFields = snapshot.nestedSchemas.PromptOverride.map((f) => f.name);
+    const lineStyle = snapshot.nestedSchemas.VoiceLine.find((f) => f.name === "style");
+    for (const field of ["style", "pacing", "accent", "emotion", "performanceNotes"]) {
+      expect(profileFields).toContain(field);
+      expect(overrideFields).toContain(field);
+    }
+    expect(lineStyle?.description).toContain("Line-level performance");
+    expect(JSON.stringify(snapshot)).toContain("Transcript/text must contain only spoken words");
+    expect(JSON.stringify(snapshot)).toContain("Do not invent inline audio tags");
+  });
+
   it("does not contain any secret or key values", () => {
     const snapshot = generateProductionListSchemaSnapshot();
     const serialized = JSON.stringify(snapshot);
@@ -435,6 +453,221 @@ describe("writeInstructionMarkdown", () => {
     expect(content).toContain("Safety");
     // No API key patterns
     expect(content).not.toMatch(/api[_-]?key\s*[=:]/i);
+  });
+
+  it("writes style extraction and clean transcript instructions", () => {
+    const runId = crypto.randomUUID();
+    const paths = makeRunPaths(TASK_ID, runId);
+
+    writeInstructionMarkdown(paths.instructionPath, {
+      userInstruction: "",
+      taskTitle: "Style Test",
+      taskDescription: "Voice production",
+      targetDatasetType: "production-list",
+      language: "zh-CN",
+      businessRules: [],
+    });
+
+    const content = fs.readFileSync(paths.instructionPath, "utf-8");
+    expect(content).toContain("style, pacing, accent, emotion, and performanceNotes");
+    expect(content).toContain("Keep every line transcript/text clean");
+    expect(content).toContain("Do not invent unsupported inline audio tags");
+    expect(content).toContain("Preserve line.style");
+  });
+});
+
+describe("Gemini director style validator fields", () => {
+  it("parses old DirectorConfig data with empty string defaults", () => {
+    const parsed = DirectorConfigSchema.parse({});
+    expect(parsed.style).toBe("");
+    expect(parsed.pacing).toBe("");
+    expect(parsed.accent).toBe("");
+    expect(parsed.emotion).toBe("");
+    expect(parsed.performanceNotes).toBe("");
+  });
+
+  it("accepts profile and override style-quality fields", () => {
+    const profile = PromptProfileSchema.parse({
+      id: "profile_style",
+      name: "Style Profile",
+      audioProfile: "A precise narrator voice.",
+      scene: "A tense tactical briefing.",
+      directorNotes: "Legacy compatibility notes.",
+      sampleContext: "Briefing starts after an alarm.",
+      style: "controlled urgency",
+      pacing: "short pauses",
+      accent: "clear diction",
+      emotion: "restrained tension",
+      performanceNotes: "Do not read labels aloud.",
+      speakers: [{ id: "narrator", label: "Narrator", voice: "Zephyr" }],
+    });
+    const override = PromptOverrideSchema.parse({
+      style: "lower and slower",
+      pacing: "very deliberate",
+      accent: "",
+      emotion: "grave",
+      performanceNotes: "Line-specific delivery only.",
+    });
+    expect(profile.style).toBe("controlled urgency");
+    expect(override.performanceNotes).toBe("Line-specific delivery only.");
+  });
+
+  it("allows normal Chinese style descriptions that contain non-placeholder 无 wording", () => {
+    const draft = {
+      schemaVersion: "tts.production-list.v2",
+      promptProfiles: [{
+        id: "profile_chinese_style",
+        name: "Chinese Style Profile",
+        audioProfile: "沉稳清晰的中文旁白声线。",
+        scene: "战术简报开始前的紧张场景。",
+        directorNotes: "保留自然停顿，不朗读字段标签。",
+        sampleContext: "警报声之后进入正式说明。",
+        style: "冷静克制的战地旁白",
+        pacing: "缓慢、有停顿，重点词稍作停留",
+        accent: "无明显口音，清晰吐字",
+        emotion: "紧张但克制",
+        performanceNotes: "句尾不要夸张上扬。",
+        speakers: [{ id: "narrator", label: "Narrator", voice: "Zephyr", style: "成熟稳重" }],
+      }],
+      lines: [{
+        id: "line_chinese_style",
+        order: 0,
+        speaker: "narrator",
+        transcript: "目标已经进入观察范围。",
+        text: "目标已经进入观察范围。",
+        promptProfileId: "profile_chinese_style",
+        voice: "Zephyr",
+        style: "低声、带压迫感",
+        promptOverride: {
+          accent: "无明显地域口音，保持自然咬字",
+        },
+      }],
+    };
+
+    const parseReport = validateRawPromptStructuredAgentDraft(draft);
+    expect(parseReport.valid).toBe(true);
+    const qualityReport = validateBusinessQualityGate({ draft: draft as any, candidateLineCount: 1 });
+    expect(qualityReport.passed).toBe(true);
+  });
+
+  it("blocks placeholder values in profile director style fields", () => {
+    const draft = {
+      schemaVersion: "tts.production-list.v2",
+      promptProfiles: [{
+        id: "profile_style_placeholder",
+        name: "Style Placeholder Profile",
+        audioProfile: "A clear narrator voice.",
+        scene: "A focused production scene.",
+        directorNotes: "Specific natural delivery.",
+        sampleContext: "A valid context line.",
+        style: "TBD",
+        pacing: "measured with short pauses",
+        accent: "clear diction",
+        emotion: "restrained tension",
+        performanceNotes: "Avoid reading labels aloud.",
+        speakers: [{ id: "narrator", label: "Narrator", voice: "Zephyr", style: "placeholder" }],
+      }],
+      lines: [{
+        id: "line_style_placeholder_profile",
+        order: 0,
+        speaker: "narrator",
+        transcript: "The operation begins now.",
+        text: "The operation begins now.",
+        promptProfileId: "profile_style_placeholder",
+        voice: "Zephyr",
+      }],
+    };
+
+    const parseReport = validateRawPromptStructuredAgentDraft(draft);
+    expect(parseReport.valid).toBe(false);
+    expect(parseReport.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "PLACEHOLDER_PROMPT_FIELD", field: "promptProfiles[profile_style_placeholder].style" }),
+      expect.objectContaining({ code: "PLACEHOLDER_PROMPT_FIELD", field: "promptProfiles[profile_style_placeholder].speakers[narrator].style" }),
+    ]));
+
+    const qualityReport = validateBusinessQualityGate({ draft: draft as any, candidateLineCount: 1 });
+    expect(qualityReport.passed).toBe(false);
+    expect(qualityReport.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "PROFILE_CONTENT_TOO_WEAK", actual: "TBD" }),
+      expect.objectContaining({ code: "PROFILE_CONTENT_TOO_WEAK", actual: "placeholder" }),
+    ]));
+  });
+
+  it("blocks placeholder values in line style and structured overrides", () => {
+    const draft = {
+      schemaVersion: "tts.production-list.v2",
+      promptProfiles: [{
+        id: "profile_override_placeholder",
+        name: "Override Placeholder Profile",
+        audioProfile: "A clear narrator voice.",
+        scene: "A focused production scene.",
+        directorNotes: "Specific natural delivery.",
+        sampleContext: "A valid context line.",
+        style: "controlled urgency",
+        pacing: "measured with short pauses",
+        accent: "clear diction",
+        emotion: "restrained tension",
+        performanceNotes: "Avoid reading labels aloud.",
+        speakers: [{ id: "narrator", label: "Narrator", voice: "Zephyr" }],
+      }],
+      lines: [{
+        id: "line_override_placeholder",
+        order: 0,
+        speaker: "narrator",
+        transcript: "The operation begins now.",
+        text: "The operation begins now.",
+        promptProfileId: "profile_override_placeholder",
+        voice: "Zephyr",
+        style: "placeholder",
+        promptOverride: { pacing: "none." },
+        directorOverrideJson: JSON.stringify({ emotion: "无" }),
+      }],
+    };
+
+    const parseReport = validateRawPromptStructuredAgentDraft(draft);
+    expect(parseReport.valid).toBe(false);
+    expect(parseReport.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "PLACEHOLDER_PROMPT_FIELD", field: "lines[line_override_placeholder].style" }),
+      expect.objectContaining({ code: "PLACEHOLDER_PROMPT_FIELD", field: "lines[line_override_placeholder].promptOverride.pacing" }),
+      expect.objectContaining({ code: "PLACEHOLDER_PROMPT_FIELD", field: "lines[line_override_placeholder].directorOverrideJson.emotion" }),
+    ]));
+
+    const qualityReport = validateBusinessQualityGate({ draft: draft as any, candidateLineCount: 1 });
+    expect(qualityReport.passed).toBe(false);
+    expect(qualityReport.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "PROFILE_CONTENT_TOO_WEAK", actual: "placeholder" }),
+      expect.objectContaining({ code: "PROFILE_CONTENT_TOO_WEAK", actual: "none." }),
+      expect.objectContaining({ code: "PROFILE_CONTENT_TOO_WEAK", actual: "无" }),
+    ]));
+  });
+
+  it("blocks transcript pollution from director labels", () => {
+    const draft = {
+      schemaVersion: "tts.production-list.v2",
+      promptProfiles: [{
+        id: "profile_pollution",
+        name: "Pollution Profile",
+        audioProfile: "A clear narrator voice.",
+        scene: "Clean transcript gate test.",
+        directorNotes: "Specific natural delivery.",
+        sampleContext: "A valid context line.",
+        speakers: [{ id: "narrator", label: "Narrator", voice: "Zephyr" }],
+      }],
+      lines: [{
+        id: "line_polluted",
+        order: 0,
+        speaker: "narrator",
+        transcript: "Style: whisper this line",
+        text: "Style: whisper this line",
+        promptProfileId: "profile_pollution",
+        voice: "Zephyr",
+      }],
+    };
+    const parseReport = validateRawPromptStructuredAgentDraft(draft);
+    expect(parseReport.valid).toBe(true);
+    const report = validateBusinessQualityGate({ draft: draft as any, candidateLineCount: 1 });
+    expect(report.passed).toBe(false);
+    expect(report.issues.some((issue) => issue.code === "TRANSCRIPT_PROMPT_STRUCTURE_POLLUTION")).toBe(true);
   });
 });
 
@@ -1288,7 +1521,7 @@ describe("M1: validateProductionList catches invalid data that should block comm
     expect(report.issues.some((i) => i.severity === "error")).toBe(true);
   });
 
-  it("reports invalid when speaker count exceeds 2", () => {
+  it("allows more than 2 top-level speakers for multi-profile v2 compatibility", () => {
     const report = validateProductionList({
       lines: [],
       speakers: [
@@ -1297,8 +1530,8 @@ describe("M1: validateProductionList catches invalid data that should block comm
         { id: "c", label: "C", voice: "Zephyr" },
       ],
     });
-    expect(report.valid).toBe(false);
-    expect(report.issues.some((i) => i.code === "SPEAKER_LIMIT_EXCEEDED")).toBe(true);
+    expect(report.valid).toBe(true);
+    expect(report.issues.some((i) => i.code === "SPEAKER_LIMIT_EXCEEDED")).toBe(false);
   });
 
   it("reports invalid when line references unknown speaker", () => {
@@ -1381,9 +1614,9 @@ describe("R-M1: Raw Agent draft validation gate blocks invalid drafts before nor
     expect(rawReport.issues.some((i) => i.code === "INVALID_SPEAKER_REFERENCE")).toBe(true);
   });
 
-  it("blocks draft with more than 2 speakers before normalization (not truncated)", () => {
-    // An Agent draft with 3 speakers. Normalization would truncate to 2,
-    // but strict validation must reject the raw draft.
+  it("allows raw aggregate drafts with more than 2 top-level speakers before profile-scoped validation", () => {
+    // Top-level aggregate speakers can exceed 2 when multiple promptProfiles each
+    // stay within the Gemini per-request limit.
     const rawReport = validateProductionList({
       lines: [
         { id: "l1", order: 0, speaker: "a", text: "Hello", voice: "Zephyr" },
@@ -1396,8 +1629,8 @@ describe("R-M1: Raw Agent draft validation gate blocks invalid drafts before nor
         { id: "c", label: "C", voice: "Zephyr" },
       ],
     });
-    expect(rawReport.valid).toBe(false);
-    expect(rawReport.issues.some((i) => i.code === "SPEAKER_LIMIT_EXCEEDED")).toBe(true);
+    expect(rawReport.valid).toBe(true);
+    expect(rawReport.issues.some((i) => i.code === "SPEAKER_LIMIT_EXCEEDED")).toBe(false);
   });
 
   it("blocks draft with multiple missing required fields at once", () => {
