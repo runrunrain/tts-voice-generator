@@ -348,7 +348,7 @@ export const ChatMessageSchema = z.object({
 export const CreateOpenCodeSessionSchema = z.object({
   sessionType: z.enum(["automation", "chat"]),
   metadata: z.record(z.unknown()).optional().default({}),
-  taskId: z.string().optional(),
+  taskId: z.string().nullable().optional(),
 });
 
 // ─── Raw Agent Draft Strict Schema ────────────────────────────────────────────

@@ -124,16 +124,16 @@ export function RequirementDocsPanel({ taskId }: { taskId: string }) {
   };
 
   return (
-    <section className="h-full min-h-[520px] grid grid-cols-[320px_1fr] border border-border-subtle bg-bg-surface">
-      <aside className="border-r border-border-subtle bg-bg-sunken/70 flex flex-col">
-        <div className="h-11 px-3 border-b border-border-subtle flex items-center justify-between">
+    <section className="h-full min-h-0 min-w-0 overflow-hidden grid grid-cols-[240px_minmax(0,1fr)] [@media(min-width:1200px)]:grid-cols-[270px_minmax(0,1fr)] [@media(min-width:1440px)]:grid-cols-[320px_minmax(0,1fr)] border border-border-subtle bg-bg-surface">
+      <aside className="min-h-0 min-w-0 overflow-hidden border-r border-border-subtle bg-bg-sunken/70 flex flex-col">
+        <div className="h-11 shrink-0 px-3 border-b border-border-subtle flex items-center justify-between">
           <div className="flex items-center gap-2 text-sm font-semibold"><FileText size={15} /> 需求文档</div>
           <button className="text-text-tertiary hover:text-text-primary" onClick={loadDocuments} disabled={phase === "loading"} title="刷新文档">
             <RefreshCw size={14} className={phase === "loading" ? "animate-spin" : ""} />
           </button>
         </div>
 
-        <div className="p-3 border-b border-border-subtle flex flex-col gap-2">
+        <div className="shrink-0 p-3 [@media(max-height:760px)]:p-2 border-b border-border-subtle flex flex-col gap-2">
           <input
             ref={fileInputRef}
             type="file"
@@ -159,7 +159,7 @@ export function RequirementDocsPanel({ taskId }: { taskId: string }) {
             placeholder="文档标题"
           />
           <textarea
-            className="h-24 bg-bg-base border border-border rounded p-2 text-xs outline-none resize-none focus:border-border-focus"
+            className="h-24 [@media(max-height:760px)]:h-16 bg-bg-base border border-border rounded p-2 text-xs outline-none resize-none focus:border-border-focus"
             value={pasteContent}
             onChange={(event) => setPasteContent(event.target.value)}
             placeholder="粘贴需求文本，保存后纳入任务上下文"
@@ -173,7 +173,7 @@ export function RequirementDocsPanel({ taskId }: { taskId: string }) {
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden">
           {phase === "loading" && documents.length === 0 && <StateNote icon={<Loader2 size={16} className="animate-spin" />} text="正在加载文档" />}
           {phase !== "loading" && documents.length === 0 && <StateNote icon={<FileText size={16} />} text="暂无需求文档" hint="上传或粘贴后开始整理需求" />}
           {documents.map((doc, index) => (
@@ -193,11 +193,11 @@ export function RequirementDocsPanel({ taskId }: { taskId: string }) {
         </div>
       </aside>
 
-      <main className="min-w-0 flex flex-col">
-        <div className="h-11 px-4 border-b border-border-subtle flex items-center justify-between">
+      <main className="min-h-0 min-w-0 overflow-hidden flex flex-col">
+        <div className="h-11 shrink-0 px-4 border-b border-border-subtle flex items-center justify-between gap-3">
           <div className="text-sm font-semibold truncate">{selected ? selected.title || selected.filename : "文档预览"}</div>
           {selected && (
-            <div className="flex items-center gap-2">
+            <div className="shrink-0 flex items-center gap-2">
               <button className="px-2 py-1 rounded border border-border text-xs hover:bg-bg-hover" onClick={() => toggleEnabled(selected)} disabled={phase === "saving"}>{selected.enabled ? "禁用" : "启用"}</button>
               <button className="px-2 py-1 rounded border border-error/30 text-xs text-error hover:bg-error-muted" onClick={() => deleteDocument(selected)} disabled={phase === "saving"}><Trash2 size={12} /></button>
             </div>
@@ -205,13 +205,13 @@ export function RequirementDocsPanel({ taskId }: { taskId: string }) {
         </div>
 
         {(error || success) && (
-          <div className={`mx-4 mt-4 px-3 py-2 rounded border text-xs flex items-center gap-2 ${error ? "bg-error-muted border-error/20 text-error" : "bg-success-muted border-success/20 text-success"}`}>
+          <div className={`shrink-0 mx-4 mt-4 px-3 py-2 rounded border text-xs flex items-center gap-2 ${error ? "bg-error-muted border-error/20 text-error" : "bg-success-muted border-success/20 text-success"}`}>
             {error ? <AlertCircle size={14} /> : <CheckCircle2 size={14} />}
             {error || success}
           </div>
         )}
 
-        <div className="flex-1 overflow-auto p-4">
+        <div className="flex-1 min-h-0 min-w-0 overflow-auto p-4 [@media(max-height:760px)]:p-3">
           {selected ? (
             <pre className="min-h-full whitespace-pre-wrap break-words rounded-md bg-bg-sunken border border-border-subtle p-4 text-xs leading-6 text-text-secondary font-mono">
               {contentLoading ? "正在加载文档内容..." : selected.content || "文档内容为空"}

@@ -207,23 +207,23 @@ export function DirectorProfilesPanel({
   const savingDisabled = phase === "saving" || isProductionListProfile;
 
   return (
-    <section className="h-full min-h-[520px] grid grid-cols-[300px_1fr] border border-border-subtle bg-bg-surface">
-      <aside className="border-r border-border-subtle bg-bg-sunken/70 flex flex-col">
-        <div className="h-11 px-3 border-b border-border-subtle flex items-center justify-between">
-          <div className="flex items-center gap-2 text-sm font-semibold"><Users size={15} /> 导演配置</div>
+    <section className="h-full min-h-0 min-w-0 overflow-hidden grid grid-cols-[240px_minmax(0,1fr)] min-[1200px]:grid-cols-[270px_minmax(0,1fr)] min-[1440px]:grid-cols-[300px_minmax(0,1fr)] border border-border-subtle bg-bg-surface">
+      <aside className="min-w-0 min-h-0 overflow-hidden border-r border-border-subtle bg-bg-sunken/70 flex flex-col">
+        <div className="min-h-11 px-3 py-2 border-b border-border-subtle flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0 flex items-center gap-2 text-sm font-semibold"><Users size={15} className="shrink-0" /> <span className="truncate">导演配置</span></div>
           <div className="flex items-center gap-2">
             {onReload && <button className="text-xs text-text-tertiary hover:text-text-primary flex items-center gap-1 disabled:opacity-50" onClick={() => void onReload()} disabled={loading}><RefreshCw size={12} className={loading ? "animate-spin" : ""} /> 刷新</button>}
             <button className="text-xs text-accent hover:text-accent-hover flex items-center gap-1" onClick={() => selectProfile("new")}><Plus size={13} /> 新建</button>
           </div>
         </div>
-        <div className="p-3 border-b border-border-subtle flex flex-col gap-2">
+        <div className="p-3 [@media(max-height:760px)]:p-2 border-b border-border-subtle flex flex-col gap-2">
           <label className="relative flex items-center">
             <Search size={12} className="absolute left-2 text-text-tertiary" />
             <input className="w-full h-8 bg-bg-base border border-border rounded pl-7 pr-2 text-xs outline-none focus:border-border-focus" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索配置、场景、音色" />
           </label>
           <div className="text-[10px] text-warning bg-warning-muted/30 border border-warning/20 rounded px-2 py-1">MVP 阶段最多 2 位 speakers，超出需拆分为多条生产行。</div>
         </div>
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden">
           {loading && profiles.length === 0 && <PanelNote text="正在加载导演配置" loading />}
           {!loading && profiles.length === 0 && <PanelNote text="暂无导演配置" hint="创建后可在生产行中引用" />}
           {!loading && profiles.length > 0 && filteredProfiles.length === 0 && <PanelNote text="没有匹配的导演配置" hint="请调整搜索关键词" />}
@@ -238,14 +238,14 @@ export function DirectorProfilesPanel({
         </div>
       </aside>
 
-      <main className="min-w-0 flex flex-col">
-        <header className="h-11 px-4 border-b border-border-subtle flex items-center justify-between">
-          <div className="flex items-center gap-2">
+      <main className="min-w-0 min-h-0 overflow-hidden flex flex-col">
+        <header className="min-h-11 px-4 py-2 border-b border-border-subtle flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0 flex flex-wrap items-center gap-2">
             <div className="text-sm font-semibold">{selectedId === "new" ? "新建配置" : isProductionListProfile ? "只读配置" : "编辑配置"}</div>
             {isProductionListProfile && <span className="px-2 py-0.5 rounded border border-warning/30 bg-warning-muted text-[10px] text-warning">来自当前生产列表/只读</span>}
             {selectedBinding && <span className="px-2 py-0.5 rounded border border-border bg-bg-sunken text-[10px] text-text-secondary">绑定 {selectedBinding.count} 行</span>}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <button className="px-3 py-1.5 rounded border border-border text-xs hover:bg-bg-hover disabled:opacity-50 flex items-center gap-1" onClick={() => void duplicateSelectedProfile()} disabled={selectedId === "new" || phase === "saving"}><Copy size={13} /> 复制为独立配置</button>
             <button className="px-4 py-1.5 rounded bg-accent text-bg-base text-xs font-semibold hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1" onClick={save} disabled={savingDisabled} title={isProductionListProfile ? "来自当前生产列表的配置不能写入全局导演配置" : "保存全局导演配置"}>{phase === "saving" ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} {isProductionListProfile ? "只读不可保存" : "保存配置"}</button>
           </div>
@@ -257,12 +257,12 @@ export function DirectorProfilesPanel({
 
         {(error || success) && <div className={`mx-4 mt-3 px-3 py-2 rounded border text-xs flex items-center gap-2 ${error ? "bg-error-muted border-error/20 text-error" : "bg-success-muted border-success/20 text-success"}`}>{error ? <AlertCircle size={14} /> : <CheckCircle2 size={14} />}{error || success}</div>}
 
-        <div className="flex-1 overflow-y-auto p-4 grid grid-cols-2 gap-4 content-start">
-          <Field label="配置名称" className="col-span-2"><input className={CONTROL_CLASS} value={draft.name ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, name: event.target.value }))} disabled={!canEdit} /></Field>
-          <Field label="音频画像"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.audioProfile ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, audioProfile: event.target.value }))} disabled={!canEdit} placeholder="未设置" /></Field>
-          <Field label="场景"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.scene ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, scene: event.target.value }))} disabled={!canEdit} placeholder="未设置" /></Field>
+        <div className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden p-4 [@media(max-height:760px)]:p-3 grid grid-cols-1 min-[1200px]:grid-cols-2 gap-4 content-start">
+          <Field label="配置名称" className="min-[1200px]:col-span-2"><input className={CONTROL_CLASS} value={draft.name ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, name: event.target.value }))} disabled={!canEdit} /></Field>
+          <Field label="音频画像"><textarea className={`${CONTROL_CLASS} h-28 [@media(max-height:760px)]:h-20`} value={draft.audioProfile ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, audioProfile: event.target.value }))} disabled={!canEdit} placeholder="未设置" /></Field>
+          <Field label="场景"><textarea className={`${CONTROL_CLASS} h-28 [@media(max-height:760px)]:h-20`} value={draft.scene ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, scene: event.target.value }))} disabled={!canEdit} placeholder="未设置" /></Field>
 
-          <div className="col-span-2 border border-border-subtle rounded-md bg-[linear-gradient(135deg,rgba(201,148,74,0.08),transparent_38%),var(--color-bg-sunken)] p-3">
+          <div className="min-[1200px]:col-span-2 border border-border-subtle rounded-md bg-[linear-gradient(135deg,rgba(201,148,74,0.08),transparent_38%),var(--color-bg-sunken)] p-3">
             <div className="mb-3 flex items-start justify-between gap-4">
               <div>
                 <div className="text-sm font-semibold text-text-primary">表演风格参数</div>
@@ -270,24 +270,24 @@ export function DirectorProfilesPanel({
               </div>
               <span className="rounded border border-border-subtle bg-bg-base px-2 py-1 text-[10px] text-text-tertiary">Gemini input 五要素</span>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 min-[1200px]:grid-cols-2 gap-3">
               <Field label="表演风格"><input className={CONTROL_CLASS} value={draft.style ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, style: event.target.value }))} disabled={!canEdit} placeholder="未设置，例如冷静克制、战地旁白" /></Field>
               <Field label="语速节奏"><input className={CONTROL_CLASS} value={draft.pacing ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, pacing: event.target.value }))} disabled={!canEdit} placeholder="未设置，例如慢速、有停顿、紧迫" /></Field>
               <Field label="口音发音"><input className={CONTROL_CLASS} value={draft.accent ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, accent: event.target.value }))} disabled={!canEdit} placeholder="未设置，例如清晰咬字、轻微地域口音" /></Field>
               <Field label="情绪基调"><input className={CONTROL_CLASS} value={draft.emotion ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, emotion: event.target.value }))} disabled={!canEdit} placeholder="未设置，例如克制愤怒、温柔安抚" /></Field>
-              <Field label="表演备注" className="col-span-2"><textarea className={`${CONTROL_CLASS} h-20`} value={draft.performanceNotes ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, performanceNotes: event.target.value }))} disabled={!canEdit} placeholder="未设置，填写无法归类的导演表演提示" /></Field>
+              <Field label="表演备注" className="min-[1200px]:col-span-2"><textarea className={`${CONTROL_CLASS} h-20`} value={draft.performanceNotes ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, performanceNotes: event.target.value }))} disabled={!canEdit} placeholder="未设置，填写无法归类的导演表演提示" /></Field>
             </div>
           </div>
 
-          <Field label="导演备注（兼容旧字段）"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.directorNotes ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, directorNotes: event.target.value }))} disabled={!canEdit} placeholder="旧配置仍会作为表演备注进入 prompt" /></Field>
-          <Field label="示例上下文"><textarea className={`${CONTROL_CLASS} h-28`} value={draft.sampleContext ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, sampleContext: event.target.value }))} disabled={!canEdit} placeholder="未设置" /></Field>
+          <Field label="导演备注（兼容旧字段）"><textarea className={`${CONTROL_CLASS} h-28 [@media(max-height:760px)]:h-20`} value={draft.directorNotes ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, directorNotes: event.target.value }))} disabled={!canEdit} placeholder="旧配置仍会作为表演备注进入 prompt" /></Field>
+          <Field label="示例上下文"><textarea className={`${CONTROL_CLASS} h-28 [@media(max-height:760px)]:h-20`} value={draft.sampleContext ?? ""} onChange={(event) => setDraft((prev) => ({ ...prev, sampleContext: event.target.value }))} disabled={!canEdit} placeholder="未设置" /></Field>
 
-          <div className="col-span-2 border border-border-subtle rounded-md bg-bg-sunken p-3">
+          <div className="min-[1200px]:col-span-2 border border-border-subtle rounded-md bg-bg-sunken p-3">
             <div className="flex items-center justify-between mb-3">
               <span className="text-sm font-semibold">说话者</span>
               <button className="text-xs text-accent disabled:text-text-tertiary flex items-center gap-1" onClick={addSpeaker} disabled={!canEdit || (draft.speakers ?? []).length >= 2}><Plus size={12} /> 添加说话者</button>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 min-[1200px]:grid-cols-2 gap-3">
               {(draft.speakers ?? []).map((speaker) => (
                 <div key={speaker.id} className="border border-border rounded-md bg-bg-base p-3 flex flex-col gap-2">
                   <div className="flex items-center justify-between text-xs font-semibold"><span>{displaySpeakerLabel(speaker.label)}</span>{speaker.id !== "a" && <button className="text-error disabled:text-text-tertiary" onClick={() => removeSpeaker(speaker.id)} disabled={!canEdit}>移除</button>}</div>

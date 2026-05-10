@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import type { ReactNode } from "react";
 import { useLocation } from "react-router";
 import { ChevronRight } from "lucide-react";
 
@@ -8,7 +9,7 @@ interface HealthStatus {
   version: string;
 }
 
-export function TopBar() {
+export function TopBar({ agentPanelSlot }: { agentPanelSlot?: ReactNode }) {
   const location = useLocation();
   const [health, setHealth] = useState<HealthStatus | null>(null);
 
@@ -90,8 +91,9 @@ export function TopBar() {
         <h2 className="text-lg font-semibold">{title}</h2>
       </div>
 
-      <div className="flex-1 flex items-center justify-end gap-4">
-        <div className="flex items-center gap-2 text-sm text-text-tertiary">
+      <div className="flex-1 flex items-center justify-end gap-3 min-w-0">
+        {agentPanelSlot}
+        <div className="hidden min-[960px]:flex items-center gap-2 text-sm text-text-tertiary whitespace-nowrap">
           <div className={`w-2 h-2 rounded-full ${statusColor} ${statusShadow}`} />
           {statusText}
         </div>

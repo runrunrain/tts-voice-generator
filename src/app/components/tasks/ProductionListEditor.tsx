@@ -182,13 +182,13 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
   }
 
   return (
-    <section className="h-full min-h-[560px] flex flex-col border border-border-subtle bg-bg-surface relative">
-      <header className="shrink-0 px-4 py-3 border-b border-border-subtle bg-bg-sunken/60 flex items-center justify-between gap-4">
-        <div className="min-w-0">
+    <section className="h-full min-h-0 min-w-0 overflow-hidden flex flex-col border border-border-subtle bg-bg-surface relative">
+      <header className="shrink-0 px-4 py-3 [@media(max-height:760px)]:py-2 border-b border-border-subtle bg-bg-sunken/60 flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0 flex-1">
           <div className="text-sm font-semibold">生产列表编辑器</div>
           <div className="text-[10px] text-text-tertiary font-mono">v{list?.version ?? "--"} · {draftLines.length} 行 · Ctrl+S 保存 · expectedVersion 写入</div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <button className="px-3 py-1.5 rounded border border-border text-xs hover:bg-bg-hover disabled:opacity-50 flex items-center gap-1" onClick={() => void runGeneration("eligible")} disabled={saving || generating || !list}><Play size={13} /> 全部待生成</button>
           <button className="px-3 py-1.5 rounded border border-accent/40 text-accent text-xs hover:bg-accent-muted disabled:opacity-50 flex items-center gap-1" onClick={() => void runGeneration("selection")} disabled={saving || generating || !list || selectedIds.length === 0}><Play size={13} /> 生成选中</button>
           <button className="px-3 py-1.5 rounded border border-border text-xs hover:bg-bg-hover disabled:opacity-50 flex items-center gap-1" onClick={() => void refresh()} disabled={saving || validating || generating}><RefreshCw size={13} /> 刷新</button>
@@ -205,8 +205,8 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
         />
       )}
 
-      <div className="shrink-0 px-4 py-2 border-b border-border-subtle bg-bg-base flex items-center justify-between gap-4 text-[10px]">
-        <div className="flex items-center gap-3">
+      <div className="shrink-0 px-4 py-2 [@media(max-height:760px)]:py-1.5 border-b border-border-subtle bg-bg-base flex flex-wrap items-center justify-between gap-3 text-[10px]">
+        <div className="flex flex-wrap items-center gap-3">
           <span className="text-success">valid {Math.max(0, draftLines.length - validationSummary.errorCount - validationSummary.warningCount)}</span>
           <span className="text-warning">warning {validationSummary.warningCount}</span>
           <span className="text-error">error {validationSummary.errorCount}</span>
@@ -216,13 +216,13 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
       </div>
 
       {generationResult && <GenerationResultSummary result={generationResult} />}
-      {showP1 && list && <div className="shrink-0 max-h-[360px] overflow-auto border-b border-border-subtle"><ProductionListP1Panel taskId={taskId} currentVersion={list.version} disabled={saving || generating} onChanged={refresh} /></div>}
+      {showP1 && list && <div className="shrink-0 max-h-[min(32vh,360px)] overflow-auto border-b border-border-subtle"><ProductionListP1Panel taskId={taskId} currentVersion={list.version} disabled={saving || generating} onChanged={refresh} /></div>}
 
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 min-h-0 min-w-0 overflow-auto overscroll-contain">
         {draftLines.length === 0 ? (
           <PanelState icon={<Plus size={18} />} title="暂无生产行" hint="点击新增行创建第一条语音台词，或在右侧 Agent 面板执行 Normalize。" />
         ) : (
-          <table className="w-full min-w-[1360px] border-collapse text-xs">
+          <table className="w-full min-w-[1120px] min-[1200px]:min-w-[1240px] min-[1440px]:min-w-[1360px] border-collapse text-xs">
             <thead className="sticky top-0 z-10 bg-bg-sunken text-text-tertiary border-b border-border-subtle">
               <tr>
                 <Th className="w-16"><label className="flex items-center gap-2"><input type="checkbox" className="accent-accent" checked={allSelected} onChange={toggleAll} disabled={saving || generating} /> #</label></Th>
@@ -342,7 +342,7 @@ function ProductionRow({ line, index, voices, directorProfiles, profileBindingMa
         <Td><ShortInput value={line.moduleName ?? ""} onChange={(value) => onChange({ moduleName: value })} disabled={disabled || rowLocked} placeholder="未分组" /></Td>
         <Td><ShortInput value={line.title ?? ""} onChange={(value) => onChange({ title: value })} disabled={disabled || rowLocked} placeholder={line.transcript.slice(0, 18) || "标题"} /></Td>
         <Td><ShortInput value={line.speakerLabel ?? ""} onChange={(value) => onChange({ speakerLabel: value })} disabled={disabled || rowLocked} placeholder="Narrator" /></Td>
-        <Td><div className="truncate text-text-secondary max-w-[420px]" title={line.transcript}>{line.transcript || <span className="text-text-tertiary">待填写台词</span>}</div><div className={`mt-1 text-[10px] ${charCount > MAX_TRANSCRIPT_CHARS ? "text-warning" : "text-text-tertiary"}`}>{charCount}/{MAX_TRANSCRIPT_CHARS} 字符</div></Td>
+        <Td><div className="truncate text-text-secondary max-w-[280px] min-[1200px]:max-w-[360px] min-[1440px]:max-w-[420px]" title={line.transcript}>{line.transcript || <span className="text-text-tertiary">待填写台词</span>}</div><div className={`mt-1 text-[10px] ${charCount > MAX_TRANSCRIPT_CHARS ? "text-warning" : "text-text-tertiary"}`}>{charCount}/{MAX_TRANSCRIPT_CHARS} 字符</div></Td>
         <Td><LineStyleSummary value={line.style} /></Td>
         <Td><select className="w-full h-8 bg-bg-base border border-border rounded px-2 text-xs outline-none focus:border-border-focus" value={line.voice} onChange={(event) => onChange({ voice: event.target.value })} disabled={disabled || rowLocked}>{voices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}</select></Td>
         <Td><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${currentProfileId ? "bg-success" : "bg-error"}`} /><span className="truncate" title={currentProfile?.name ?? "未绑定"}>{currentProfile?.name ?? "未绑定"}</span></div></Td>
@@ -392,8 +392,8 @@ function LineDetailPanel({ line, voices, directorProfiles, profileBindingMap, is
   const sharedBinding = currentProfileId ? profileBindingMap.get(currentProfileId) ?? null : null;
   const editDisabled = disabled || rowLocked;
   return (
-    <div className="p-4 border-l-[3px] border-l-accent bg-[linear-gradient(90deg,rgba(201,148,74,0.06),transparent_28%),var(--color-bg-base)]">
-      <div className="grid grid-cols-[minmax(420px,1.3fr)_minmax(320px,0.7fr)] gap-4">
+    <div className="min-w-0 p-4 [@media(max-height:760px)]:p-3 border-l-[3px] border-l-accent bg-[linear-gradient(90deg,rgba(201,148,74,0.06),transparent_28%),var(--color-bg-base)]">
+      <div className="grid min-w-0 grid-cols-1 min-[1200px]:grid-cols-[minmax(360px,1.3fr)_minmax(280px,0.7fr)] min-[1440px]:grid-cols-[minmax(420px,1.3fr)_minmax(320px,0.7fr)] gap-4">
         <section className="grid grid-cols-2 gap-3 content-start">
           <Field label="语音文本" className="col-span-2"><textarea className={`${CONTROL_CLASS} h-28`} value={line.transcript} onChange={(event) => onChange({ transcript: event.target.value })} disabled={editDisabled} /></Field>
           <Field label="模块"><input className={CONTROL_CLASS} value={line.moduleName ?? ""} onChange={(event) => onChange({ moduleName: event.target.value })} disabled={editDisabled} /></Field>
@@ -464,16 +464,16 @@ function BulkActionBar({ selectedCount, directorProfiles, voices, bulkProfileId,
   onClear: () => void;
 }) {
   return (
-    <footer className="shrink-0 min-h-12 px-4 py-2 border-t border-border-subtle bg-bg-sunken flex flex-wrap items-center gap-2 text-xs">
+    <footer className="shrink-0 max-h-24 min-h-12 overflow-y-auto px-4 py-2 border-t border-border-subtle bg-bg-sunken flex flex-wrap items-center gap-2 text-xs">
       <span className="mr-2 text-text-secondary">已选 {selectedCount} 条</span>
-      <select className="h-8 bg-bg-base border border-border rounded px-2 text-xs" value={bulkProfileId} onChange={(event) => onProfileChange(event.target.value)} disabled={disabled || directorProfiles.length === 0}><option value="">选择导演配置</option>{directorProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select>
+      <select className="h-8 min-w-0 max-w-[220px] bg-bg-base border border-border rounded px-2 text-xs" value={bulkProfileId} onChange={(event) => onProfileChange(event.target.value)} disabled={disabled || directorProfiles.length === 0}><option value="">选择导演配置</option>{directorProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select>
       <button className="px-3 h-8 rounded border border-border hover:bg-bg-hover disabled:opacity-50" onClick={onBindProfile} disabled={disabled || !bulkProfileId}>批量绑定导演</button>
-      <select className="h-8 bg-bg-base border border-border rounded px-2 text-xs" value={bulkVoice} onChange={(event) => onVoiceChange(event.target.value)} disabled={disabled}>{voices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}</select>
+      <select className="h-8 min-w-0 max-w-[180px] bg-bg-base border border-border rounded px-2 text-xs" value={bulkVoice} onChange={(event) => onVoiceChange(event.target.value)} disabled={disabled}>{voices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}</select>
       <button className="px-3 h-8 rounded border border-border hover:bg-bg-hover disabled:opacity-50" onClick={onBindVoice} disabled={disabled || !bulkVoice}>批量修改音色</button>
       <button className="px-3 h-8 rounded border border-accent/40 text-accent hover:bg-accent-muted disabled:opacity-50 flex items-center gap-1" onClick={onGenerate} disabled={disabled || generating}>{generating ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />} 批量提交生成</button>
       <button className="px-3 h-8 rounded border border-error/30 text-error hover:bg-error-muted disabled:opacity-50" onClick={onDelete} disabled={disabled}>批量删除</button>
       <button className="px-3 h-8 rounded border border-border hover:bg-bg-hover disabled:opacity-50" onClick={onClear} disabled={selectedCount === 0}>清除选择</button>
-      <span className="ml-auto text-[10px] text-text-tertiary">批量绑定/改音色/删除仅修改 draft；保存时使用 expectedVersion。</span>
+      <span className="ml-auto min-w-[220px] text-[10px] text-text-tertiary">批量绑定/改音色/删除仅修改 draft；保存时使用 expectedVersion。</span>
     </footer>
   );
 }
@@ -706,7 +706,7 @@ function buildProfileBindingMap(lines: VoiceLine[]) {
 }
 
 function ProductionListSkeleton() {
-  return <section className="h-full min-h-[560px] border border-border-subtle bg-bg-surface p-4"><div className="h-9 w-56 bg-bg-sunken animate-pulse border border-border-subtle" /><div className="mt-4 space-y-2">{Array.from({ length: 10 }).map((_, index) => <div key={index} className="h-12 bg-bg-sunken/80 border border-border-subtle animate-pulse" />)}</div></section>;
+  return <section className="h-full min-h-0 min-w-0 overflow-hidden border border-border-subtle bg-bg-surface p-4"><div className="h-9 w-56 bg-bg-sunken animate-pulse border border-border-subtle" /><div className="mt-4 space-y-2 overflow-hidden">{Array.from({ length: 10 }).map((_, index) => <div key={index} className="h-12 bg-bg-sunken/80 border border-border-subtle animate-pulse" />)}</div></section>;
 }
 
 function GenerationResultSummary({ result }: { result: { requestedCount: number; succeededCount: number; failedCount: number; skippedCount: number } }) {

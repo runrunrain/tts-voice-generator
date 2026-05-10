@@ -107,20 +107,20 @@ export function AgentAutomationPanel({
   const activeRun = runs.find((run) => run.status === "running" || run.status === "queued");
 
   return (
-    <section className="h-full min-h-0 flex flex-col bg-bg-elevated text-xs">
-      <div className="shrink-0 border-b border-border-subtle p-3 flex flex-col gap-3">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 font-semibold text-text-primary"><Bot size={15} /> 自动化 Inspector</div>
+    <section className="h-full min-h-0 min-w-0 overflow-hidden flex flex-col bg-bg-elevated text-xs">
+      <div className="shrink-0 min-w-0 border-b border-border-subtle p-3 flex flex-col gap-3">
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <div className="min-w-0 flex items-center gap-2 font-semibold text-text-primary"><Bot size={15} className="shrink-0" /> <span className="truncate">自动化 Inspector</span></div>
           <button className="px-2 py-1 rounded border border-border text-[10px] hover:bg-bg-hover flex items-center gap-1 disabled:opacity-50" onClick={() => { refreshButtons(); refreshSessions(); refreshRuns(); }} disabled={loading || running}><RefreshCw size={11} /> 刷新</button>
         </div>
-        <div className="grid grid-cols-3 gap-1.5 text-[10px] text-text-tertiary font-mono">
+        <div className="grid min-w-0 grid-cols-3 gap-1.5 text-[10px] text-text-tertiary font-mono">
           <Metric label="版本" value={productionVersion ? `v${productionVersion}` : "--"} />
           <Metric label="选中" value={`${selectedLineIds.length}`} />
           <Metric label="校验" value={`${validationSummary?.errorCount ?? 0}/${validationSummary?.warningCount ?? 0}`} />
         </div>
       </div>
 
-      <div className="shrink-0 border-b border-border-subtle p-3 flex flex-col gap-2">
+      <div className="shrink-0 min-w-0 border-b border-border-subtle p-3 flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2 text-[10px] text-text-tertiary">
           <span>自动化会话</span>
           <span className="px-1.5 py-0.5 rounded border border-accent/20 bg-accent-muted text-accent">automation</span>
@@ -134,7 +134,7 @@ export function AgentAutomationPanel({
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto p-3 flex flex-col gap-3">
+      <div className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden p-3 flex flex-col gap-3">
         {loading && <Banner tone="info" icon={<Loader2 size={14} className="animate-spin" />} text="正在探测 OpenCode 能力" />}
         {error && <Banner tone="error" icon={<AlertCircle size={14} />} text={`OpenCode 或 Agent API 返回错误：${error}`} />}
         {cancelWarning && <Banner tone="warning" icon={<ShieldAlert size={14} />} text={`取消不可用：${cancelWarning}`} />}
@@ -192,13 +192,13 @@ export function AgentAutomationPanel({
 }
 
 function ActionGroup({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
-  return <section className="border-t border-border-subtle pt-3 first:border-t-0 first:pt-0"><div className="mb-2"><div className="text-xs font-semibold text-text-primary">{title}</div><div className="text-[10px] text-text-tertiary">{description}</div></div><div className="flex flex-col gap-2">{children}</div></section>;
+  return <section className="min-w-0 border-t border-border-subtle pt-3 first:border-t-0 first:pt-0"><div className="mb-2 min-w-0"><div className="text-xs font-semibold text-text-primary">{title}</div><div className="text-[10px] text-text-tertiary">{description}</div></div><div className="flex min-w-0 flex-col gap-2">{children}</div></section>;
 }
 
 function InspectorButton({ title, description, disabled, disabledReason, busy, onClick, primary }: { title: string; description: string; disabled: boolean; disabledReason?: string; busy: boolean; onClick: () => void; primary?: boolean }) {
   return (
-    <button className={`w-full text-left p-3 border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${primary ? "border-accent/40 bg-accent-muted hover:bg-accent-muted/80" : "border-border bg-bg-surface hover:bg-bg-hover"}`} onClick={onClick} disabled={disabled} title={disabledReason}>
-      <div className="flex items-center justify-between gap-2"><span className="font-semibold text-text-primary">{title}</span>{busy ? <Loader2 size={14} className="animate-spin text-accent" /> : <Wand2 size={14} className="text-accent" />}</div>
+    <button className={`w-full min-w-0 text-left p-3 border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${primary ? "border-accent/40 bg-accent-muted hover:bg-accent-muted/80" : "border-border bg-bg-surface hover:bg-bg-hover"}`} onClick={onClick} disabled={disabled} title={disabledReason}>
+      <div className="flex min-w-0 items-center justify-between gap-2"><span className="min-w-0 truncate font-semibold text-text-primary">{title}</span>{busy ? <Loader2 size={14} className="shrink-0 animate-spin text-accent" /> : <Wand2 size={14} className="shrink-0 text-accent" />}</div>
       <p className="mt-1 text-[10px] leading-4 text-text-secondary">{description}</p>
       {disabledReason && <p className="mt-1 text-[10px] text-warning">{disabledReason}</p>}
     </button>
@@ -283,7 +283,7 @@ function NormalizeProgressCard({ progress, transientError }: { progress: Normali
 }
 
 function StatusBlock({ icon, title, lines }: { icon: React.ReactNode; title: string; lines: string[] }) { return <div className="border border-border-subtle bg-bg-surface p-2"><div className="flex items-center gap-2 font-semibold text-text-primary">{icon}<span>{title}</span></div><div className="mt-1 space-y-0.5 text-[10px] text-text-secondary">{lines.map((line) => <div key={line}>{line}</div>)}</div></div>; }
-function Metric({ label, value }: { label: string; value: string }) { return <div className="border border-border-subtle bg-bg-sunken px-2 py-1"><div>{label}</div><div className="text-text-secondary">{value}</div></div>; }
+function Metric({ label, value }: { label: string; value: string }) { return <div className="min-w-0 border border-border-subtle bg-bg-sunken px-2 py-1"><div>{label}</div><div className="truncate text-text-secondary">{value}</div></div>; }
 function UnavailableLine({ text }: { text: string }) { return <div className="border border-border-subtle bg-bg-surface p-3 text-[10px] text-text-tertiary leading-4">{text}</div>; }
 function Banner({ tone, icon, text }: { tone: "info" | "warning" | "error" | "success"; icon: React.ReactNode; text: string }) { const cls = tone === "error" ? "bg-error-muted border-error/20 text-error" : tone === "warning" ? "bg-warning-muted border-warning/20 text-warning" : tone === "success" ? "bg-success-muted border-success/20 text-success" : "bg-accent-muted border-accent/20 text-accent"; return <div className={`px-3 py-2 border text-[10px] flex items-start gap-2 leading-4 ${cls}`}>{icon}<span>{text}</span></div>; }
 function formatDuration(ms: number) { const totalSeconds = Math.max(0, Math.round(ms / 1000)); const minutes = Math.floor(totalSeconds / 60); const seconds = totalSeconds % 60; return minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, "0")}s` : `${seconds}s`; }

@@ -88,21 +88,23 @@ export function TaskWorkspacePage() {
   }
 
   return (
-    <div className="h-full flex flex-col bg-bg-base relative">
+    <div className="h-full min-h-0 min-w-0 overflow-hidden flex flex-col bg-bg-base relative">
       <TaskHeader taskId={taskId} title={task?.title ?? "任务工作台"} status={task?.status ?? "draft"} updatedAt={task?.updatedAt} onRefresh={refresh} />
 
-      <div className="h-11 shrink-0 border-b border-border-subtle bg-bg-sunken px-6 flex items-center gap-2">
+      <div className="h-11 [@media(max-height:760px)]:h-10 shrink-0 border-b border-border-subtle bg-bg-sunken px-6 [@media(max-height:760px)]:px-4 flex items-center gap-2 overflow-x-auto overflow-y-hidden">
         {TABS.map((item) => {
           const Icon = item.icon;
             return <button key={item.key} className={`h-8 px-3 rounded-md text-xs border flex items-center gap-2 transition-colors ${tab === item.key ? "border-accent/40 bg-accent-muted text-accent" : "border-border text-text-secondary hover:bg-bg-hover"}`} onClick={() => setWorkspaceTab(item.key)}><Icon size={14} /> {item.label}</button>;
         })}
       </div>
 
-      <main className="flex-1 overflow-hidden p-5">
-        {tab === "documents" && <RequirementDocsPanel taskId={taskId} />}
-        {tab === "production" && <ProductionListEditorView taskId={taskId} controller={production} directorProfiles={profiles} selectedLineIds={selectedLineIds} onSelectedLineIdsChange={setSelectedLineIds} />}
-        {tab === "directors" && <DirectorProfilesPanel taskId={taskId} profiles={profiles} productionLines={production.draftLines} loading={profilesLoading} loadError={profilesError} onProfilesChange={setProfiles} onReload={loadProfiles} />}
-        {tab === "audit" && <AuditUnavailableState />}
+      <main className="flex-1 min-h-0 min-w-0 overflow-hidden p-5 [@media(max-height:760px)]:p-3">
+        <div className="h-full min-h-0 min-w-0 overflow-hidden">
+          {tab === "documents" && <RequirementDocsPanel taskId={taskId} />}
+          {tab === "production" && <ProductionListEditorView taskId={taskId} controller={production} directorProfiles={profiles} selectedLineIds={selectedLineIds} onSelectedLineIdsChange={setSelectedLineIds} />}
+          {tab === "directors" && <DirectorProfilesPanel taskId={taskId} profiles={profiles} productionLines={production.draftLines} loading={profilesLoading} loadError={profilesError} onProfilesChange={setProfiles} onReload={loadProfiles} />}
+          {tab === "audit" && <AuditUnavailableState />}
+        </div>
       </main>
     </div>
   );
@@ -130,7 +132,7 @@ function AuditUnavailableState() {
 
 function TaskHeader({ taskId, title, status, updatedAt, onRefresh }: { taskId: string; title: string; status: string; updatedAt?: string; onRefresh: () => void }) {
   return (
-    <header className="shrink-0 px-6 py-4 border-b border-border-subtle bg-[linear-gradient(90deg,rgba(201,148,74,0.12),transparent_42%),var(--color-bg-base)]">
+    <header className="shrink-0 px-6 [@media(max-height:760px)]:px-4 py-4 [@media(max-height:760px)]:py-2 border-b border-border-subtle bg-[linear-gradient(90deg,rgba(201,148,74,0.12),transparent_42%),var(--color-bg-base)]">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-xs text-text-tertiary"><Link to="/tasks" className="hover:text-accent">任务</Link><span>/</span><span className="font-mono truncate">{taskId}</span></div>

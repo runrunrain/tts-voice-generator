@@ -23,9 +23,9 @@ export function RightPanel({ isOpen, onClose }: RightPanelProps) {
   if (!isOpen) return null;
 
   return (
-    <div className="w-full h-full flex flex-col">
-      <div className="h-12 px-4 flex items-center justify-between border-b border-border-subtle shrink-0">
-        <h3 className="font-semibold text-sm">
+    <div className="w-full h-full min-w-0 min-h-0 flex flex-col overflow-hidden">
+      <div className="h-12 min-w-0 px-4 flex items-center justify-between gap-3 border-b border-border-subtle shrink-0">
+        <h3 className="min-w-0 truncate font-semibold text-sm">
           {isTaskWorkspace ? "Agent 自动化"
             : location.pathname.includes("/voices") ? "音色详情"
             : location.pathname.includes("/history") ? "记录预览"
@@ -34,13 +34,14 @@ export function RightPanel({ isOpen, onClose }: RightPanelProps) {
         </h3>
         <button
           onClick={onClose}
-          className="p-1 rounded-md text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
+          className="shrink-0 p-1 rounded-md text-text-tertiary hover:text-text-primary hover:bg-bg-hover transition-colors"
+          aria-label="关闭 Agent 面板"
         >
           <X size={16} />
         </button>
       </div>
 
-      <div className={`flex-1 overflow-y-auto ${isTaskWorkspace ? "p-0" : "p-5"}`}>
+      <div className={`flex-1 min-w-0 min-h-0 ${isTaskWorkspace ? "overflow-hidden p-0" : "overflow-y-auto overflow-x-hidden p-5"}`}>
         <PanelContent path={location.pathname} />
       </div>
     </div>

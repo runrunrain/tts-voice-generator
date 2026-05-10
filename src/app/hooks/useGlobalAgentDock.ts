@@ -96,7 +96,10 @@ export function useGlobalAgentDock(options: UseGlobalAgentDockOptions = {}) {
     setPhase("sending");
     try {
       const activeSession = await ensureSession();
-      const result = await taskApi.sendChatMessage(activeSession.id, content);
+      const result = await taskApi.sendChatMessage(activeSession.id, content, {
+        pagePath: context.pagePath,
+        title: `Dock chat - ${context.pageLabel}`,
+      });
       if (result.messages.length > 0) {
         setMessages(result.messages);
       } else {
@@ -109,7 +112,7 @@ export function useGlobalAgentDock(options: UseGlobalAgentDockOptions = {}) {
       setError(err instanceof Error ? err.message : "Agent Chat 发送失败");
       setPhase("error");
     }
-  }, [draft, ensureSession, loadMessages, phase, session?.id]);
+  }, [context.pageLabel, context.pagePath, draft, ensureSession, loadMessages, phase, session?.id]);
 
   return {
     isOpen,

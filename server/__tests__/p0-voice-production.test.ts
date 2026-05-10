@@ -77,7 +77,7 @@ import productionListRoutes from "../src/routes/production-list.js";
 import directorProfilesRoutes from "../src/routes/director-profiles.js";
 import agentButtonsRoutes from "../src/routes/agent-buttons.js";
 import agentChatRoutes from "../src/routes/agent-chat.js";
-import { productionListVersion, voiceLine, agentButtonPreset } from "../src/db/schema-extended.js";
+import { productionListVersion, voiceLine, agentButtonPreset, opencodeSession, agentChatSession } from "../src/db/schema-extended.js";
 import {
   VoiceLineSchema,
   ProductionListSchema,
@@ -98,6 +98,7 @@ import {
   fallbackNormalize,
   applyFallbackTransform,
   checkOpenCodeAvailability,
+  runOpenCodeChat,
   _setSpawnRunner,
   _resetSpawnRunner,
   _setExecRunner,
@@ -428,6 +429,36 @@ describe("OpenCode Runner", () => {
     expect(() => applyFallbackTransform("unknown", "text", {})).toThrow("Unknown button transform type");
   });
 
+  it("runOpenCodeChat rejects taskId path traversal before spawning", async () => {
+    let spawned = false;
+    _setSpawnRunner(async () => {
+      spawned = true;
+      return { stdout: "", stderr: "" };
+    });
+
+    try {
+      const invalidTaskIds = [
+        "../db",
+        "tasks/other",
+        "/tmp/other-task",
+        "c0a8012e-1111-4111-8111-123456789abc/child",
+        "c0a8012e-1111-4111-8111-123456789abc\\child",
+        " c0a8012e-1111-4111-8111-123456789abc ",
+      ];
+
+      for (const taskId of invalidTaskIds) {
+        await expect(runOpenCodeChat({
+          sessionId: crypto.randomUUID(),
+          taskId,
+          userMessage: "hello",
+        })).rejects.toThrow("Invalid chat taskId");
+      }
+      expect(spawned).toBe(false);
+    } finally {
+      _resetSpawnRunner();
+    }
+  });
+
   it("checkOpenCodeAvailability returns result (likely unavailable in test env)", async () => {
     const result = await checkOpenCodeAvailability();
     expect(result).toHaveProperty("available");
@@ -445,6 +476,11 @@ describe("API Routes - Tasks", () => {
     if (fs.existsSync(testState.dbFilePath)) fs.unlinkSync(testState.dbFilePath);
     initSchema();
     app = createApp();
+  });
+
+  afterEach(() => {
+    _resetSpawnRunner();
+    _resetExecRunner();
   });
 
   afterAll(() => {
@@ -488,6 +524,182 @@ describe("API Routes - Tasks", () => {
     expect(getBody.task.id).toBe(task.id);
   });
 
+  it("returns real task statistics from latest production version", async () => {
+    const createRes = await req(app, "/api/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Stats Test" }),
+    });
+    const { task } = await jsonRes(createRes);
+
+    await req(app, `/api/tasks/${task.id}/documents/paste`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fileName: "a.txt", content: "A" }),
+    });
+    await req(app, `/api/tasks/${task.id}/documents/paste`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fileName: "b.txt", content: "B" }),
+    });
+
+    const speakers = [{ id: "narrator", label: "Narrator", voice: "Zephyr" }];
+    await req(app, `/api/tasks/${task.id}/production-list`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        expectedVersion: 0,
+        speakers,
+        lines: [
+          { id: "v1-l1", order: 0, speaker: "narrator", text: "Line 1", voice: "Zephyr" },
+          { id: "v1-l2", order: 1, speaker: "narrator", text: "Line 2", voice: "Zephyr" },
+        ],
+      }),
+    });
+    await req(app, `/api/tasks/${task.id}/production-list`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        expectedVersion: 1,
+        speakers,
+        lines: [
+          { id: "v2-l1", order: 0, speaker: "narrator", text: "Line 1", voice: "Zephyr", generationStatus: "succeeded" },
+          { id: "v2-l2", order: 1, speaker: "narrator", text: "Line 2", voice: "Zephyr", generationStatus: "failed" },
+          { id: "v2-l3", order: 2, speaker: "narrator", text: "Line 3", voice: "Zephyr" },
+        ],
+      }),
+    });
+
+    const listRes = await req(app, "/api/tasks");
+    expect(listRes.status).toBe(200);
+    const listBody = await jsonRes(listRes);
+    const listedTask = listBody.tasks.find((entry: any) => entry.id === task.id);
+    expect(listedTask.documentCount).toBe(2);
+    expect(listedTask.productionVersionCount).toBe(2);
+    expect(listedTask.latestProductionVersion).toBe(2);
+    expect(listedTask.latestLineCount).toBe(3);
+    expect(listedTask.lineCount).toBe(3);
+    expect(listedTask.generatedLineCount).toBe(1);
+    expect(listedTask.failedLineCount).toBe(1);
+    expect(listedTask.status).toBe("failed");
+    expect(listedTask.rawStatus).toBe("draft");
+    expect(listedTask.statusReason).toBe("failed_lines_present");
+
+    const getRes = await req(app, `/api/tasks/${task.id}`);
+    const getBody = await jsonRes(getRes);
+    expect(getBody.task.documentCount).toBe(2);
+    expect(getBody.task.productionVersionCount).toBe(2);
+    expect(getBody.task.latestProductionVersion).toBe(2);
+    expect(getBody.task.latestLineCount).toBe(3);
+    expect(getBody.task.lineCount).toBe(3);
+    expect(getBody.task.status).toBe("failed");
+  });
+
+  it("derives task status from real stats and filters by normalized status query", async () => {
+    async function createTask(title: string) {
+      const createRes = await req(app, "/api/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      expect(createRes.status).toBe(201);
+      const { task } = await jsonRes(createRes);
+      return task;
+    }
+
+    async function putList(taskId: string, statuses: string[]) {
+      const res = await req(app, `/api/tasks/${taskId}/production-list`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expectedVersion: 0,
+          speakers: [{ id: "narrator", label: "Narrator", voice: "Zephyr" }],
+          lines: statuses.map((generationStatus, index) => ({
+            id: `line-${taskId}-${index}`,
+            order: index,
+            speaker: "narrator",
+            text: `Line ${index + 1}`,
+            voice: "Zephyr",
+            generationStatus,
+          })),
+        }),
+      });
+      expect(res.status).toBe(200);
+    }
+
+    const draft = await createTask("Status Draft");
+    const docsReady = await createTask("Status Docs Ready");
+    await req(app, `/api/tasks/${docsReady.id}/documents/paste`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fileName: "requirements.md", content: "Need voice lines" }),
+    });
+
+    const productionReady = await createTask("Status Production Ready");
+    await putList(productionReady.id, ["draft", "draft"]);
+
+    const running = await createTask("Status Running");
+    await putList(running.id, ["succeeded", "draft"]);
+
+    const completed = await createTask("Status Completed");
+    await putList(completed.id, ["succeeded"]);
+
+    const failed = await createTask("Status Failed");
+    await putList(failed.id, ["succeeded", "failed"]);
+
+    const blocked = await createTask("Status Blocked");
+    await req(app, `/api/tasks/${blocked.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "blocked" }),
+    });
+
+    const listRes = await req(app, "/api/tasks");
+    expect(listRes.status).toBe(200);
+    const listBody = await jsonRes(listRes);
+    const byId = new Map(listBody.tasks.map((entry: any) => [entry.id, entry]));
+
+    expect(byId.get(draft.id).status).toBe("draft");
+    expect(byId.get(draft.id).statusReason).toBe("empty_task");
+    expect(byId.get(docsReady.id).status).toBe("ready");
+    expect(byId.get(docsReady.id).statusReason).toBe("documents_ready");
+    expect(byId.get(productionReady.id).status).toBe("ready");
+    expect(byId.get(productionReady.id).statusReason).toBe("production_list_ready");
+    expect(byId.get(running.id).status).toBe("running");
+    expect(byId.get(running.id).statusReason).toBe("partial_generation_succeeded");
+    expect(byId.get(completed.id).status).toBe("completed");
+    expect(byId.get(completed.id).statusReason).toBe("all_lines_succeeded");
+    expect(byId.get(failed.id).status).toBe("failed");
+    expect(byId.get(failed.id).statusReason).toBe("failed_lines_present");
+    expect(byId.get(blocked.id).status).toBe("blocked");
+    expect(byId.get(blocked.id).statusReason).toBe("raw_blocked");
+    expect(byId.get(running.id).rawStatus).toBe("draft");
+    expect(byId.get(running.id).generatedLineCount).toBe(1);
+    expect(byId.get(running.id).failedLineCount).toBe(0);
+
+    const runningRes = await req(app, "/api/tasks?status=running");
+    expect(runningRes.status).toBe(200);
+    const runningBody = await jsonRes(runningRes);
+    expect(runningBody.tasks.map((entry: any) => entry.id)).toEqual([running.id]);
+    expect(runningBody.tasks.every((entry: any) => entry.status === "running")).toBe(true);
+
+    const inProgressRes = await req(app, "/api/tasks?status=in_progress");
+    expect(inProgressRes.status).toBe(200);
+    const inProgressBody = await jsonRes(inProgressRes);
+    expect(inProgressBody.tasks.map((entry: any) => entry.id)).toEqual([running.id]);
+
+    const readyRes = await req(app, "/api/tasks?status=ready");
+    expect(readyRes.status).toBe(200);
+    const readyBody = await jsonRes(readyRes);
+    expect(new Set(readyBody.tasks.map((entry: any) => entry.id))).toEqual(new Set([docsReady.id, productionReady.id]));
+    expect(readyBody.tasks.every((entry: any) => entry.status === "ready")).toBe(true);
+
+    const invalidRes = await req(app, "/api/tasks?status=unknown");
+    expect(invalidRes.status).toBe(400);
+    const invalidBody = await jsonRes(invalidRes);
+    expect(invalidBody.error.code).toBe("VALIDATION_ERROR");
+  });
+
   it("returns 404 for non-existent task", async () => {
     const res = await req(app, "/api/tasks/nonexistent-id");
     expect(res.status).toBe(404);
@@ -509,7 +721,9 @@ describe("API Routes - Tasks", () => {
     expect(patchRes.status).toBe(200);
     const patchBody = await jsonRes(patchRes);
     expect(patchBody.task.title).toBe("After");
-    expect(patchBody.task.status).toBe("in_progress");
+    expect(patchBody.task.status).toBe("running");
+    expect(patchBody.task.rawStatus).toBe("in_progress");
+    expect(patchBody.task.statusReason).toBe("raw_status_fallback");
   });
 
   it("rejects invalid task creation", async () => {
@@ -1988,17 +2202,42 @@ describe("API Routes - Chat Sessions", () => {
     }
   });
 
-  it("creates chat session and sends messages", async () => {
+  it("creates chat session and returns real OpenCode output when available", async () => {
+    let capturedArgs: string[] = [];
+    let capturedOptions: Record<string, unknown> = {};
+    _setExecRunner(async (_file, args) => {
+      if (args[0] === "--version") return { stdout: "opencode 1.0.0", stderr: "" };
+      if (args[0] === "providers" && args[1] === "list") return { stdout: "1 credentials", stderr: "" };
+      return { stdout: "", stderr: "" };
+    });
+    _setSpawnRunner(async (_file, args, options) => {
+      capturedArgs = args;
+      capturedOptions = options;
+      return {
+        stdout: JSON.stringify({ type: "text", part: { text: "真实执行输出" } }) + "\n",
+        stderr: "",
+      };
+    });
+
+    const createTaskRes = await req(app, "/api/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Chat Task Scope" }),
+    });
+    expect(createTaskRes.status).toBe(201);
+    const { task } = await jsonRes(createTaskRes);
+
     // Create session
     const createRes = await req(app, "/api/agent/chat/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionType: "chat" }),
+      body: JSON.stringify({ sessionType: "chat", taskId: task.id, metadata: { pagePath: "/tasks", title: "Task overview" } }),
     });
     expect(createRes.status).toBe(201);
     const { session } = await jsonRes(createRes);
     expect(session.id).toBeTruthy();
     expect(session.status).toBe("active");
+    expect(session.taskId).toBe(task.id);
 
     // Post message
     const msgRes = await req(app, `/api/agent/chat/sessions/${session.id}/messages`, {
@@ -2010,12 +2249,183 @@ describe("API Routes - Chat Sessions", () => {
     const msgBody = await jsonRes(msgRes);
     expect(msgBody.messages.length).toBeGreaterThanOrEqual(2); // user + assistant
 
-    // Check assistant response does NOT claim external execution
     const assistantMsg = msgBody.messages.find((m: any) => m.role === "assistant");
     expect(assistantMsg).toBeTruthy();
-    // Should mention OpenCode unavailable or processing, not claim external ops
-    expect(typeof assistantMsg.content).toBe("string");
-    expect(assistantMsg.content.length).toBeGreaterThan(0);
+    expect(assistantMsg.content).toBe("真实执行输出");
+    expect(assistantMsg.content).not.toContain("Full CLI integration is pending");
+    expect(assistantMsg.metadata.runStatus ?? assistantMsg.metadata.status).toBe("succeeded");
+    expect(msgBody.run.status).toBe("succeeded");
+    expect(capturedArgs).toContain("--format");
+    expect(capturedArgs).toContain("--dir");
+    const expectedCwd = path.join(testState.tmpDir, "tasks", task.id);
+    expect(capturedArgs).toContain(expectedCwd);
+    expect(capturedArgs[capturedArgs.length - 1]).toContain("- pagePath: /tasks");
+    expect(capturedArgs[capturedArgs.length - 1]).not.toContain("pagePath: unknown");
+    expect(String(capturedOptions.cwd)).toBe(expectedCwd);
+    expect((capturedOptions.env as Record<string, string | undefined>).OPENROUTER_API_KEY).toBeUndefined();
+  });
+
+  it("rejects invalid or non-existent chat taskId before creating sessions", async () => {
+    const invalidTaskIds = [
+      "",
+      "   ",
+      "../db",
+      "tasks/other",
+      "/tmp/other-task",
+      "c0a8012e-1111-4111-8111-123456789abc/child",
+      "c0a8012e-1111-4111-8111-123456789abc\\child",
+    ];
+
+    for (const taskId of invalidTaskIds) {
+      const res = await req(app, "/api/agent/chat/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionType: "chat", taskId }),
+      });
+      expect(res.status).toBe(400);
+      const body = await jsonRes(res);
+      expect(body.error.code).toBe("INVALID_TASK_ID");
+    }
+
+    for (const taskId of invalidTaskIds) {
+      const res = await req(app, "/api/opencode/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionType: "automation", taskId }),
+      });
+      expect(res.status).toBe(400);
+      const body = await jsonRes(res);
+      expect(body.error.code).toBe("INVALID_TASK_ID");
+    }
+
+    const nullChatTaskRes = await req(app, "/api/agent/chat/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionType: "chat", taskId: null }),
+    });
+    expect(nullChatTaskRes.status).toBe(201);
+    const nullChatTaskBody = await jsonRes(nullChatTaskRes);
+    expect(nullChatTaskBody.session.taskId).toBeNull();
+
+    const nullOpenCodeTaskRes = await req(app, "/api/opencode/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionType: "automation", taskId: null }),
+    });
+    expect(nullOpenCodeTaskRes.status).toBe(201);
+    const nullOpenCodeTaskBody = await jsonRes(nullOpenCodeTaskRes);
+    expect(nullOpenCodeTaskBody.session.taskId).toBeNull();
+
+    const missingTaskId = crypto.randomUUID();
+    const missingRes = await req(app, "/api/agent/chat/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionType: "chat", taskId: missingTaskId }),
+    });
+    expect(missingRes.status).toBe(404);
+    const missingBody = await jsonRes(missingRes);
+    expect(missingBody.error.code).toBe("TASK_NOT_FOUND");
+  });
+
+  it("rejects historical chat sessions with empty taskId before sending messages", async () => {
+    let spawned = false;
+    _setSpawnRunner(async () => {
+      spawned = true;
+      return { stdout: "", stderr: "" };
+    });
+
+    const db = getDb();
+    const now = new Date();
+    for (const taskId of ["", "   "]) {
+      const opencodeSessionId = crypto.randomUUID();
+      const chatSessionId = crypto.randomUUID();
+      db.insert(opencodeSession).values({
+        id: opencodeSessionId,
+        sessionType: "chat",
+        status: "active",
+        metadataJson: "{}",
+        taskId,
+        createdAt: now,
+      }).run();
+      db.insert(agentChatSession).values({
+        id: chatSessionId,
+        opencodeSessionId,
+        taskId,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      }).run();
+
+      const msgRes = await req(app, `/api/agent/chat/sessions/${chatSessionId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "user", content: "Hello agent" }),
+      });
+      expect(msgRes.status).toBe(400);
+      const msgBody = await jsonRes(msgRes);
+      expect(msgBody.error.code).toBe("INVALID_TASK_ID");
+    }
+
+    expect(spawned).toBe(false);
+  });
+
+  it("persists readable OpenCode failure without leaking secrets", async () => {
+    _setExecRunner(async (_file, args) => {
+      if (args[0] === "--version") return { stdout: "opencode 1.0.0", stderr: "" };
+      if (args[0] === "providers" && args[1] === "list") return { stdout: "1 credentials", stderr: "" };
+      return { stdout: "", stderr: "" };
+    });
+    _setSpawnRunner(async () => {
+      throw new Error("boom sk-1234567890 token=secret-token-value");
+    });
+
+    const createRes = await req(app, "/api/agent/chat/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionType: "chat" }),
+    });
+    const { session } = await jsonRes(createRes);
+    const msgRes = await req(app, `/api/agent/chat/sessions/${session.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role: "user", content: "Hello agent" }),
+    });
+
+    expect(msgRes.status).toBe(200);
+    const msgBody = await jsonRes(msgRes);
+    const assistantMsg = msgBody.messages.find((m: any) => m.role === "assistant");
+    expect(assistantMsg.content).toContain("OpenCode execution failed");
+    expect(assistantMsg.content).not.toContain("sk-1234567890");
+    expect(assistantMsg.content).not.toContain("secret-token-value");
+    expect(assistantMsg.content).not.toContain("Full CLI integration is pending");
+    expect(msgBody.run.status).toBe("failed");
+    expect(msgBody.run.error.code).toBe("OPENCODE_FAILED");
+  });
+
+  it("returns real unavailable reason when OpenCode cannot run", async () => {
+    _setExecRunner(async () => {
+      throw new Error("opencode missing sk-1234567890");
+    });
+
+    const createRes = await req(app, "/api/agent/chat/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionType: "chat" }),
+    });
+    const { session } = await jsonRes(createRes);
+    const msgRes = await req(app, `/api/agent/chat/sessions/${session.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role: "user", content: "Hello agent" }),
+    });
+
+    expect(msgRes.status).toBe(200);
+    const msgBody = await jsonRes(msgRes);
+    const assistantMsg = msgBody.messages.find((m: any) => m.role === "assistant");
+    expect(assistantMsg.content).toContain("OpenCode is unavailable");
+    expect(assistantMsg.content).not.toContain("sk-1234567890");
+    expect(assistantMsg.content).not.toContain("Full CLI integration is pending");
+    expect(msgBody.run.status).toBe("unavailable");
   });
 
   it("session isolation: automation sessions are separate from chat", async () => {

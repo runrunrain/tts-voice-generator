@@ -27,6 +27,7 @@ export function TasksPage() {
   const [createError, setCreateError] = useState<string | null>(null);
 
   const filtered = tasks.filter((task) => {
+    if (statusFilter !== "all" && task.status !== statusFilter) return false;
     const keyword = query.trim().toLowerCase();
     if (!keyword) return true;
     return task.title.toLowerCase().includes(keyword) || (task.description ?? "").toLowerCase().includes(keyword);
@@ -122,7 +123,7 @@ function TaskRow({ task }: { task: Task }) {
 }
 
 function StatusBadge({ status }: { status: TaskStatus }) {
-  const tone = status === "failed" || status === "blocked" ? "text-error bg-error-muted border-error/20" : status === "completed" ? "text-success bg-success-muted border-success/20" : status === "running" ? "text-accent bg-accent-muted border-accent/20" : "text-text-secondary bg-bg-sunken border-border";
+  const tone = status === "failed" || status === "blocked" ? "text-error bg-error-muted border-error/20" : status === "completed" ? "text-success bg-success-muted border-success/20" : status === "running" ? "text-accent bg-accent-muted border-accent/20" : status === "ready" ? "text-warning bg-warning-muted border-warning/20" : "text-text-secondary bg-bg-sunken border-border";
   return <span className={`px-2 py-0.5 rounded border text-[10px] ${tone}`}>{STATUS_LABEL[status]}</span>;
 }
 

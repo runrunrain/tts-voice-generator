@@ -952,12 +952,20 @@ function mapTask(raw: unknown): Task {
     title: asString(t.title, "未命名任务"),
     description: asNullableString(t.description),
     status: mapTaskStatus(t.status),
+    rawStatus: asNullableString(t.rawStatus),
+    statusReason: asNullableString(t.statusReason),
     owner: asNullableString(t.owner),
     createdAt: asString(t.createdAt, new Date().toISOString()),
     updatedAt: asString(t.updatedAt, asString(t.createdAt, new Date().toISOString())),
     version: asNumber(t.version, 0),
     documentCount: asNumber(t.documentCount, undefined as unknown as number),
     lineCount: asNumber(t.lineCount, undefined as unknown as number),
+    activeDocumentCount: asNumber(t.activeDocumentCount, 0),
+    productionVersionCount: asNumber(t.productionVersionCount, 0),
+    latestProductionVersion: typeof t.latestProductionVersion === "number" ? t.latestProductionVersion : null,
+    latestLineCount: asNumber(t.latestLineCount, 0),
+    generatedLineCount: asNumber(t.generatedLineCount, 0),
+    failedLineCount: asNumber(t.failedLineCount, 0),
     lastRunStatus: (typeof t.lastRunStatus === "string" ? t.lastRunStatus : null) as Task["lastRunStatus"],
     documents: Array.isArray(t.documents) ? t.documents.map(mapRequirementDocument) : undefined,
   };
@@ -2040,10 +2048,10 @@ export const taskApi = {
     return { messages: messages.map(mapAgentChatMessage) };
   },
 
-  async sendChatMessage(sessionId: string, content: string) {
+  async sendChatMessage(sessionId: string, content: string, metadata?: { pagePath?: string; title?: string }) {
     const data = await apiFetch<unknown>(`/api/agent/chat/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: "POST",
-      body: JSON.stringify({ role: "user", content }),
+      body: JSON.stringify({ role: "user", content, metadata: metadata ?? {} }),
     });
     if (isRecord(data) && Array.isArray(data.messages)) {
       return { messages: data.messages.map(mapAgentChatMessage) };

@@ -14,6 +14,7 @@ import { z } from "zod";
 import { eq, and, desc } from "drizzle-orm";
 import { getDb } from "../db/index.js";
 import {
+  voiceTask,
   opencodeSession,
   agentChatSession,
   agentChatMessage,
@@ -23,9 +24,10 @@ import {
   CreateOpenCodeSessionSchema,
   ChatMessageSchema,
 } from "../domain/validators.js";
-import { checkOpenCodeAvailability, sanitizeError } from "../services/opencode-runner.js";
+import { checkOpenCodeAvailability, isValidChatTaskIdPathSegment, runOpenCodeChat, sanitizeError } from "../services/opencode-runner.js";
 
 const app = new Hono();
+const MAX_CHAT_CONTENT_BYTES = 8 * 1024;
 
 function apiError(c: any, requestId: string, status: number, code: string, message: string, category: string, retryable = false, metadata?: unknown) {
   return c.json({ ok: false, requestId, error: { code, message, category, retryable, metadata } }, status);
@@ -44,6 +46,32 @@ function auditLog(entityType: string, entityId: string, operation: string, actor
       createdAt: new Date(),
     }).run();
   } catch { /* non-critical */ }
+}
+
+function parseMetadataJson(raw: string | null | undefined): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function metadataString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function validateChatTaskIdOrError(c: any, db: ReturnType<typeof getDb>, requestId: string, taskId?: string | null) {
+  if (taskId === undefined || taskId === null) return null;
+  if (!isValidChatTaskIdPathSegment(taskId)) {
+    return apiError(c, requestId, 400, "INVALID_TASK_ID", "Chat taskId must be a UUID path segment without '/' or '\\'.", "validation");
+  }
+  const task = db.select().from(voiceTask).where(eq(voiceTask.id, taskId)).get();
+  if (!task) {
+    return apiError(c, requestId, 404, "TASK_NOT_FOUND", `Task "${taskId}" not found.`, "validation");
+  }
+  return null;
 }
 
 // ─── GET /api/opencode/sessions ────────────────────────────────────────────────
@@ -113,6 +141,9 @@ app.post("/api/opencode/sessions", async (c) => {
   const now = new Date();
   const db = getDb();
 
+  const taskIdError = validateChatTaskIdOrError(c, db, requestId, taskId);
+  if (taskIdError) return taskIdError;
+
   db.insert(opencodeSession).values({
     id,
     sessionType,
@@ -154,7 +185,7 @@ app.post("/api/agent/chat/sessions", async (c) => {
   const chatSessionSchema = z.object({
     sessionType: z.enum(["automation", "chat"]).optional().default("chat"),
     metadata: z.record(z.unknown()).optional().default({}),
-    taskId: z.string().optional(),
+    taskId: z.string().nullable().optional(),
   });
   const parsed = chatSessionSchema.safeParse(body);
 
@@ -169,6 +200,9 @@ app.post("/api/agent/chat/sessions", async (c) => {
   const chatSessionId = uuidv4();
   const now = new Date();
   const db = getDb();
+
+  const taskIdError = validateChatTaskIdOrError(c, db, requestId, taskId);
+  if (taskIdError) return taskIdError;
 
   db.insert(opencodeSession).values({
     id: opencodeSessionId,
@@ -251,6 +285,9 @@ app.post("/api/agent/chat/sessions/:sessionId/messages", async (c) => {
     return apiError(c, requestId, 409, "SESSION_CLOSED", `Chat session "${sessionId}" is not active.`, "validation");
   }
 
+  const taskIdError = validateChatTaskIdOrError(c, db, requestId, session.taskId);
+  if (taskIdError) return taskIdError;
+
   let body: unknown;
   try {
     body = await c.req.json();
@@ -264,6 +301,14 @@ app.post("/api/agent/chat/sessions/:sessionId/messages", async (c) => {
   }
 
   const { role, content, metadata } = parsed.data;
+  if (Buffer.byteLength(content, "utf8") > MAX_CHAT_CONTENT_BYTES) {
+    return apiError(c, requestId, 400, "VALIDATION_ERROR", `Chat message exceeds maximum size of ${MAX_CHAT_CONTENT_BYTES} bytes.`, "validation");
+  }
+  const linkedOpencodeSession = session.opencodeSessionId
+    ? db.select().from(opencodeSession).where(eq(opencodeSession.id, session.opencodeSessionId)).get()
+    : null;
+  const sessionMetadata = parseMetadataJson(linkedOpencodeSession?.metadataJson);
+  const pagePath = metadataString(metadata.pagePath) ?? metadataString(sessionMetadata.pagePath);
   const userMsgId = uuidv4();
   const now = new Date();
 
@@ -279,35 +324,68 @@ app.post("/api/agent/chat/sessions/:sessionId/messages", async (c) => {
 
   auditLog("chat_message", userMsgId, "create", "user", { sessionId, role }, requestId);
 
-  // Generate assistant response
-  // P0 non-streaming: If OpenCode not available, return explanatory message
-  // that does NOT claim to have executed external operations
+  // Generate assistant response. Runner failures are conversation results, not
+  // HTTP failures, so the assistant message is persisted with real status/error
+  // metadata and returned to the UI.
   const availability = await checkOpenCodeAvailability();
   let assistantContent: string;
+  let runSummary: Record<string, unknown> | undefined;
 
   if (role === "user") {
     if (!availability.available) {
-      assistantContent = "OpenCode CLI is not available. I can help you with local operations only. " +
-        "Please configure OpenCode CLI for full agent capabilities. " +
-        "In the meantime, you can use the normalize-requirements endpoint and button actions for deterministic transforms.";
+      const safeReason = sanitizeError(availability.error || "OpenCode CLI is not available or has no configured AI provider credentials.");
+      assistantContent = `OpenCode is unavailable, so this chat message was not executed by the CLI. Reason: ${safeReason}`;
+      runSummary = {
+        runId: uuidv4(),
+        runner: "opencode",
+        status: "unavailable",
+        durationMs: 0,
+        timeoutMs: 0,
+        outputTruncated: false,
+        error: {
+          code: "OPENCODE_UNAVAILABLE",
+          message: safeReason,
+          retryable: true,
+        },
+      };
     } else {
-      // OpenCode is available - would integrate with CLI here
-      // P0: acknowledge and indicate what would happen
-      assistantContent = `Received your message. Processing via OpenCode session (${session.opencodeSessionId}). ` +
-        `Full CLI integration is pending. Your message has been recorded.`;
+      const chatRun = await runOpenCodeChat({
+        sessionId,
+        opencodeSessionId: session.opencodeSessionId,
+        taskId: session.taskId,
+        pagePath,
+        userMessage: content,
+      });
+      assistantContent = chatRun.output;
+      runSummary = {
+        runId: chatRun.runId,
+        runner: chatRun.runner,
+        status: chatRun.status,
+        durationMs: chatRun.durationMs,
+        timeoutMs: chatRun.timeoutMs,
+        outputTruncated: chatRun.outputTruncated,
+        parserMode: chatRun.parserMode,
+        error: chatRun.error,
+      };
     }
 
     const assistantMsgId = uuidv4();
+    const assistantMetadata = {
+      opencodeAvailable: availability.available,
+      opencodeVersion: availability.version,
+      runner: "opencode",
+      ...(runSummary ?? {}),
+    };
     db.insert(agentChatMessage).values({
       id: assistantMsgId,
       sessionId,
       role: "assistant",
       content: assistantContent,
-      metadataJson: JSON.stringify({ opencodeAvailable: availability.available }),
+      metadataJson: JSON.stringify(assistantMetadata),
       createdAt: new Date(),
     }).run();
 
-    auditLog("chat_message", assistantMsgId, "create", "agent", { sessionId, opencodeAvailable: availability.available }, requestId);
+    auditLog("chat_message", assistantMsgId, "create", "agent", { sessionId, opencodeAvailable: availability.available, run: runSummary }, requestId);
   }
 
   // Return all messages in the session
@@ -319,6 +397,7 @@ app.post("/api/agent/chat/sessions/:sessionId/messages", async (c) => {
   return c.json({
     ok: true,
     requestId,
+    ...(runSummary ? { run: runSummary } : {}),
     messages: messages.map((m) => ({
       id: m.id,
       sessionId: m.sessionId,

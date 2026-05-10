@@ -174,6 +174,8 @@ export interface Task {
   id: string;
   title: string;
   status: TaskStatus;
+  rawStatus?: string | null;
+  statusReason?: string | null;
   description?: string | null;
   owner?: string | null;
   createdAt: string;
@@ -181,6 +183,12 @@ export interface Task {
   version: number;
   documentCount?: number;
   lineCount?: number;
+  activeDocumentCount?: number;
+  productionVersionCount?: number;
+  latestProductionVersion?: number | null;
+  latestLineCount?: number;
+  generatedLineCount?: number;
+  failedLineCount?: number;
   lastRunStatus?: AgentRunStatus | null;
   documents?: RequirementDocument[];
 }

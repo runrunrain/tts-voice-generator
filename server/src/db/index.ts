@@ -323,6 +323,22 @@ export function initSchema() {
     ON production_list_version(task_id, version)
   `);
 
+  // Task list/detail statistics query indexes. These are intentionally
+  // idempotent and backward-compatible for existing local databases.
+  rawDb.exec(`
+    CREATE INDEX IF NOT EXISTS requirement_document_task_id_idx
+    ON requirement_document(task_id);
+
+    CREATE INDEX IF NOT EXISTS production_list_version_task_id_idx
+    ON production_list_version(task_id);
+
+    CREATE INDEX IF NOT EXISTS voice_line_version_id_idx
+    ON voice_line(version_id);
+
+    CREATE INDEX IF NOT EXISTS voice_line_task_id_idx
+    ON voice_line(task_id);
+  `);
+
   // Voice line director binding + generation tracking (P2-phase1 schema extension)
   // All new columns allow NULL or have safe defaults for backward compatibility.
   addColumnIfMissing(rawDb, "voice_line", "line_id", "TEXT");
