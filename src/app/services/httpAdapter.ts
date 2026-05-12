@@ -2,7 +2,7 @@
  * HTTP Service Adapter
  *
  * Real implementation of TtsServiceAdapter that communicates with the
- * backend Hono API server. Replaces demoAdapter for production use.
+ * backend Hono API server for production use.
  *
  * Every method calls the actual /api/* endpoints and maps responses
  * to the existing type definitions.
@@ -82,6 +82,46 @@ export class ApiError extends Error {
   }
 }
 
+type DesktopBridge = {
+  getApiHeaders: () => Promise<{ "X-TTS-Desktop-Token": string }>;
+};
+
+declare global {
+  interface Window {
+    ttsDesktop?: DesktopBridge;
+  }
+}
+
+function isSameOriginApiPath(resource: string): boolean {
+  return resource.startsWith("/api/") || resource === "/api";
+}
+
+async function getDesktopHeadersForPath(resource: string): Promise<Record<string, string>> {
+  if (typeof window === "undefined" || !window.ttsDesktop || !isSameOriginApiPath(resource)) {
+    return {};
+  }
+  return window.ttsDesktop.getApiHeaders();
+}
+
+function mergeHeaders(...headersList: Array<HeadersInit | undefined>): Headers {
+  const merged = new Headers();
+  for (const headers of headersList) {
+    if (!headers) continue;
+    new Headers(headers).forEach((value, key) => {
+      merged.set(key, value);
+    });
+  }
+  return merged;
+}
+
+export async function apiRequest(resource: string, init?: RequestInit): Promise<Response> {
+  const desktopHeaders = await getDesktopHeadersForPath(resource);
+  return fetch(resource, {
+    ...init,
+    headers: mergeHeaders(init?.headers, desktopHeaders),
+  });
+}
+
 async function readResponseBody(response: Response): Promise<unknown> {
   const text = await response.text();
   if (!text) return null;
@@ -104,12 +144,9 @@ function errorMessageFromBody(status: number, body: unknown): string {
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
+  const response = await apiRequest(path, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...init?.headers,
-    },
+    headers: mergeHeaders({ "Content-Type": "application/json" }, init?.headers),
   });
 
   if (!response.ok) {
@@ -537,7 +574,7 @@ export const httpAdapter: TtsServiceAdapter = {
 
   async assemblePrompt(req: AssemblePromptRequest): Promise<AssemblePromptResponse> {
     try {
-      const response = await fetch("/api/prompts/assemble", {
+      const response = await apiRequest("/api/prompts/assemble", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -839,7 +876,7 @@ function adaptAudioDir(val: unknown, pathAlias?: string): Diagnostics["audioDir"
 }
 
 export async function getDiagnostics(): Promise<Diagnostics> {
-  const response = await fetch("/api/diagnostics");
+  const response = await apiRequest("/api/diagnostics");
 
   if (!response.ok) {
     const label = response.status === 404
@@ -1823,7 +1860,7 @@ export const taskApi = {
   },
 
   async exportProductionList(taskId: string, format: ProductionListExportFormat): Promise<ProductionListExportResult> {
-    const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/production-list/export?format=${encodeURIComponent(format)}`);
+    const response = await apiRequest(`/api/tasks/${encodeURIComponent(taskId)}/production-list/export?format=${encodeURIComponent(format)}`);
     if (!response.ok) {
       const body = await readResponseBody(response);
       throw new ApiError(response.status, errorMessageFromBody(response.status, body), body);

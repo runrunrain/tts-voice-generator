@@ -3,6 +3,9 @@ node_modules/
 
 # Build output
 dist/
+dist-electron/
+dist-desktop/
+release/
 
 # Data directory (database + audio files)
 data/

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useAppState } from "../state/AppContext";
+import { apiRequest } from "../services/httpAdapter";
 
 interface HealthInfo {
   ok: boolean;
@@ -11,10 +12,13 @@ interface HealthInfo {
 export function BottomBar() {
   const { historyRecords } = useAppState();
   const [health, setHealth] = useState<HealthInfo | null>(null);
+  const displayHost = typeof window !== "undefined" && window.location?.host
+    ? window.location.host
+    : "localhost";
 
   useEffect(() => {
     const fetchHealth = () => {
-      fetch("/api/health")
+      apiRequest("/api/health")
         .then((res) => res.json())
         .then((data) => {
           setHealth({
@@ -48,7 +52,7 @@ export function BottomBar() {
     <div className="h-full px-4 flex items-center justify-between text-[11px] text-text-tertiary">
       <div className="flex items-center gap-4">
         <span className="hover:text-text-secondary cursor-pointer transition-colors">
-          127.0.0.1:5173
+          {displayHost}
         </span>
         <span className="flex items-center gap-1.5">
           <div className={`w-1.5 h-1.5 rounded-full ${statusDot}`} />

@@ -27,7 +27,7 @@ import type {
   AssemblePhase,
   AssembleResult,
 } from "../types";
-import { httpAdapter } from "../services/httpAdapter";
+import { apiRequest, httpAdapter } from "../services/httpAdapter";
 import { getOpenRouterKeyDisplayValue, shouldSendOpenRouterApiKey } from "../services/settingsKeyStatus";
 
 // ─── Context Value ───────────────────────────────────────────────────────────
@@ -248,7 +248,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   // Load settings from backend on mount
   useEffect(() => {
-    fetch("/api/settings")
+    apiRequest("/api/settings")
       .then((res) => res.json())
       .then((data) => {
         setSettings((prev) => ({
@@ -298,7 +298,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     let res: Response;
     try {
-      res = await fetch("/api/settings", {
+      res = await apiRequest("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -331,7 +331,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
 
     // Re-fetch authoritative settings from backend after save
-    const freshRes = await fetch("/api/settings");
+    const freshRes = await apiRequest("/api/settings");
     if (freshRes.ok) {
       const data = await freshRes.json();
       setSettings((prev) => ({
@@ -373,7 +373,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const rotateLocalPluginToken = useCallback(async (): Promise<string | null> => {
     let res: Response;
     try {
-      res = await fetch("/api/settings", {
+      res = await apiRequest("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ localPluginTokenAction: "rotate" }),
@@ -388,7 +388,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     const data = await res.json();
     // Re-fetch settings to update fingerprint
-    const freshRes = await fetch("/api/settings");
+    const freshRes = await apiRequest("/api/settings");
     if (freshRes.ok) {
       const fresh = await freshRes.json();
       setSettings((prev) => ({
@@ -410,7 +410,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const clearLocalPluginToken = useCallback(async (): Promise<void> => {
     let res: Response;
     try {
-      res = await fetch("/api/settings", {
+      res = await apiRequest("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ localPluginTokenAction: "clear" }),
@@ -424,7 +424,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
 
     // Re-fetch settings to update state
-    const freshRes = await fetch("/api/settings");
+    const freshRes = await apiRequest("/api/settings");
     if (freshRes.ok) {
       const fresh = await freshRes.json();
       setSettings((prev) => ({

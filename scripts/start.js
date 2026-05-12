@@ -47,8 +47,35 @@ const SERVER_ENTRY = path.join(SERVER_DIR, "src", "index.ts");
 // Configuration
 // ---------------------------------------------------------------------------
 
-const FRONTEND_PORT = 5173;
-const BACKEND_PORT = 3001;
+const DEFAULT_FRONTEND_PORT = 5173;
+const DEFAULT_BACKEND_PORT = 3001;
+const MIN_PORT = 1;
+const MAX_PORT = 65535;
+
+function parsePortEnv(name, defaultPort) {
+  const rawValue = process.env[name];
+  if (rawValue === undefined || rawValue.trim() === "") {
+    return defaultPort;
+  }
+
+  const parsed = Number.parseInt(rawValue, 10);
+  if (
+    !Number.isInteger(parsed) ||
+    String(parsed) !== rawValue.trim() ||
+    parsed < MIN_PORT ||
+    parsed > MAX_PORT
+  ) {
+    console.warn(
+      `[start] Ignoring invalid ${name}=${JSON.stringify(rawValue)}; using ${defaultPort}.`
+    );
+    return defaultPort;
+  }
+
+  return parsed;
+}
+
+const FRONTEND_PORT = parsePortEnv("FRONTEND_PORT", DEFAULT_FRONTEND_PORT);
+const BACKEND_PORT = parsePortEnv("BACKEND_PORT", DEFAULT_BACKEND_PORT);
 const FRONTEND_URL = `http://localhost:${FRONTEND_PORT}`;
 const BACKEND_URL = `http://localhost:${BACKEND_PORT}`;
 const BACKEND_HEALTH_URL = `${BACKEND_URL}/api/health`;
@@ -236,7 +263,7 @@ function prefixLines(tag, colour, data) {
 
 function launch(name, command, args, opts = {}) {
   const colour = opts.colour || C.cyan;
-  const env = { ...process.env };
+  const env = { ...process.env, ...(opts.env || {}) };
 
   // Force coloured output from child processes
   env.FORCE_COLOR = "1";
@@ -352,6 +379,10 @@ async function smokeTest() {
   launch("backend", process.execPath, [TSX_CLI, "watch", SERVER_ENTRY], {
     colour: C.green,
     cwd: PROJECT_ROOT,
+    env: {
+      BACKEND_PORT: String(BACKEND_PORT),
+      PORT: String(BACKEND_PORT),
+    },
     shell: false,
   });
 
@@ -361,11 +392,20 @@ async function smokeTest() {
   console.log(
     `${C.cyan}[frontend]${C.reset} Starting via 'npm run dev'`
   );
-  launch("frontend", npmCmd, ["run", "dev"], {
-    colour: C.cyan,
-    cwd: PROJECT_ROOT,
-    shell: isWin,
-  });
+  launch(
+    "frontend",
+    npmCmd,
+    ["run", "dev", "--", "--port", String(FRONTEND_PORT)],
+    {
+      colour: C.cyan,
+      cwd: PROJECT_ROOT,
+      env: {
+        FRONTEND_PORT: String(FRONTEND_PORT),
+        BACKEND_PORT: String(BACKEND_PORT),
+      },
+      shell: isWin,
+    }
+  );
 
   console.log("");
 
@@ -491,6 +531,10 @@ async function main() {
   launch("backend", process.execPath, [TSX_CLI, "watch", SERVER_ENTRY], {
     colour: C.green,
     cwd: PROJECT_ROOT,
+    env: {
+      BACKEND_PORT: String(BACKEND_PORT),
+      PORT: String(BACKEND_PORT),
+    },
     shell: false,
   });
 
@@ -500,11 +544,20 @@ async function main() {
   console.log(
     `${C.cyan}[frontend]${C.reset} Starting Vite dev server on ${FRONTEND_URL}`
   );
-  launch("frontend", npmCmd, ["run", "dev"], {
-    colour: C.cyan,
-    cwd: PROJECT_ROOT,
-    shell: isWin,
-  });
+  launch(
+    "frontend",
+    npmCmd,
+    ["run", "dev", "--", "--port", String(FRONTEND_PORT)],
+    {
+      colour: C.cyan,
+      cwd: PROJECT_ROOT,
+      env: {
+        FRONTEND_PORT: String(FRONTEND_PORT),
+        BACKEND_PORT: String(BACKEND_PORT),
+      },
+      shell: isWin,
+    }
+  );
 
   console.log("");
 

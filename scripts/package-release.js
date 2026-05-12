@@ -336,13 +336,6 @@ async function main() {
     log("info", "  scripts/start.js");
   }
 
-  // -- index.html (root shell) --
-  const indexHtmlSrc = path.join(PROJECT_ROOT, "index.html");
-  if (fs.existsSync(indexHtmlSrc)) {
-    allCopiedFiles.push(copyFile(indexHtmlSrc, STAGING_DIR, "index.html"));
-    log("info", "  index.html");
-  }
-
   // -- postcss.config.mjs (build reference) --
   const postcssSrc = path.join(PROJECT_ROOT, "postcss.config.mjs");
   if (fs.existsSync(postcssSrc)) {

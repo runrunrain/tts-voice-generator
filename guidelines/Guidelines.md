@@ -11,7 +11,7 @@ This document defines coding standards, architectural conventions, and quality g
 - **UI Components**: Radix UI primitives wrapped in `src/app/components/ui/`. MUI for complex components (icons, data tables). shadcn/ui pattern for component composition.
 - **State Management**: React Context (`AppContext.tsx`) for global state. Keep context providers minimal -- only store truly global data. Component-local state via `useState`/`useReducer` for everything else.
 - **Routing**: react-router 7. All routes defined in `src/app/routes.tsx`.
-- **API Adapters**: `src/app/services/` contains `httpAdapter.ts` (real API) and `demoAdapter.ts` (demo/offline mode). The demo adapter must only be used for UI development without a backend -- remove or disable in production builds.
+- **API Adapters**: `src/app/services/` uses `httpAdapter.ts` for real backend API calls. Keep frontend data flows wired to the Hono API; do not add demo/offline adapters to production code paths.
 - **File Organization**: Page components in `src/app/pages/`. Reusable shared components in `src/app/components/`. Keep files under 300 lines. Split large components into sub-components.
 
 ### Backend (`server/`)

@@ -154,6 +154,18 @@ npm run server:start     # Starts the production server on port 3001
 
 In production, the Hono server serves the built React SPA from `dist/` alongside all API routes. No separate frontend server is needed.
 
+### Desktop Packaging
+
+The Electron desktop app embeds the built Hono server and serves the SPA through a loopback-only HTTP endpoint. Packaged desktop mode binds the API to `127.0.0.1`, stores the SQLite database and generated audio under the OS user data directory, and protects `/api/*` requests with a per-session `X-TTS-Desktop-Token` header injected by the preload bridge.
+
+```bash
+npm run electron:build          # build Electron main/preload into dist-electron/
+npm run desktop:package:mac     # build the current macOS arch dmg
+npm run desktop:dist:win:x64    # run on Windows x64 to build NSIS installer
+```
+
+Platform wrapper scripts are also available: `scripts/build-desktop.sh` on macOS and `scripts/build-desktop.bat` on Windows. Desktop artifacts are written to `release/desktop/<platform>-<arch>/`; each target uses an independent `dist-desktop/app-<platform>-<arch>/` staging directory and rebuilds `better-sqlite3` against the installed Electron version.
+
 ## Environment Variables
 
 All variables are defined in `server/src/config/env.ts`:

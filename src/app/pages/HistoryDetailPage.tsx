@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { Link, useParams } from "react-router";
 import { Play, Download, Copy, ChevronLeft, Loader2, AlertCircle } from "lucide-react";
 import { useAppState } from "../state/AppContext";
+import { apiRequest } from "../services/httpAdapter";
 
 interface JobDetail {
   job: {
@@ -120,7 +121,7 @@ export function HistoryDetailPage() {
     if (!jobId) return;
     setLoading(true);
     setError(null);
-    fetch(`/api/jobs/${jobId}`)
+    apiRequest(`/api/jobs/${jobId}`)
       .then((res) => {
         if (!res.ok) throw new Error(`Job not found (${res.status})`);
         return res.json();

@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { Eye, EyeOff, RefreshCw, Loader2, Shield, Copy, Check, Trash2, AlertTriangle, ChevronDown, ChevronRight, Activity, Database, FolderOpen, Route, Clock, Bot, FileAudio } from "lucide-react";
 import { useAppState } from "../state/AppContext";
-import { getDiagnostics } from "../services/httpAdapter";
+import { apiRequest, getDiagnostics } from "../services/httpAdapter";
 import { hasSavedOpenRouterKey, isSuccessfulSettingsConnection } from "../services/settingsKeyStatus";
 import type { AppSettings, AudioFormat, ConnectionStatus, AgentAuthMode, Diagnostics, DiagnosticsPhase, AudioDirInfo } from "../types";
 
@@ -117,7 +117,7 @@ export function SettingsPage() {
         setApiKeyMasked(true);
       } else {
         try {
-          const res = await fetch("/api/settings");
+          const res = await apiRequest("/api/settings");
           const data = await res.json();
           setApiKeyMasked(!!data.hasOpenRouterApiKey || hasSavedOpenRouterKey(data.keyMask) || hasSavedOpenRouterKey(data.openRouterApiKey));
         } catch {
@@ -146,7 +146,7 @@ export function SettingsPage() {
     setConnectionMessage("正在通过 OpenRouter 音频生成认证端点测试当前 Key...");
     setConnectionErrorCode(null);
     try {
-      const res = await fetch("/api/settings/test", { method: "POST" });
+      const res = await apiRequest("/api/settings/test", { method: "POST" });
       const data = await res.json() as SettingsConnectionTestResponse;
       if (data.error === "MISSING_API_KEY" || data.errorCode === "MISSING_API_KEY") {
         setConnectionStatus("failed");

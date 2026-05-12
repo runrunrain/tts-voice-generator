@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import type { ReactNode } from "react";
 import { useLocation } from "react-router";
 import { ChevronRight } from "lucide-react";
+import { apiRequest } from "../services/httpAdapter";
 
 interface HealthStatus {
   ok: boolean;
@@ -14,7 +15,7 @@ export function TopBar({ agentPanelSlot }: { agentPanelSlot?: ReactNode }) {
   const [health, setHealth] = useState<HealthStatus | null>(null);
 
   useEffect(() => {
-    fetch("/api/health")
+    apiRequest("/api/health")
       .then((res) => res.json())
       .then((data) => {
         setHealth({
