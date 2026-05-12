@@ -398,8 +398,18 @@ describe("generateProductionListSchemaSnapshot", () => {
       expect(overrideFields).toContain(field);
     }
     expect(lineStyle?.description).toContain("Line-level performance");
-    expect(JSON.stringify(snapshot)).toContain("Transcript/text must contain only spoken words");
+    expect(JSON.stringify(snapshot)).toContain("所有导演配置值必须使用简体中文");
+    expect(JSON.stringify(snapshot)).toContain("不要把这些指导塞进 transcript");
     expect(JSON.stringify(snapshot)).toContain("Do not invent inline audio tags");
+  });
+
+  it("requires generated director profile values to be Chinese", () => {
+    const snapshot = generateProductionListSchemaSnapshot();
+    const serialized = JSON.stringify(snapshot);
+    expect(serialized).toContain("中文导演配置");
+    expect(serialized).toContain("必须使用简体中文");
+    expect(snapshot.examples.validLine.speakerLabel).toBe("旁白");
+    expect(snapshot.examples.validSpeaker.label).toBe("旁白");
   });
 
   it("does not contain any secret or key values", () => {
@@ -450,7 +460,7 @@ describe("writeInstructionMarkdown", () => {
     expect(content).toContain("Max 2 speakers");
     expect(content).toContain("Focus on dialogue");
     expect(content).toContain("My Task");
-    expect(content).toContain("Safety");
+    expect(content).toContain("## 安全");
     // No API key patterns
     expect(content).not.toMatch(/api[_-]?key\s*[=:]/i);
   });
@@ -469,10 +479,11 @@ describe("writeInstructionMarkdown", () => {
     });
 
     const content = fs.readFileSync(paths.instructionPath, "utf-8");
-    expect(content).toContain("style, pacing, accent, emotion, and performanceNotes");
-    expect(content).toContain("Keep every line transcript/text clean");
-    expect(content).toContain("Do not invent unsupported inline audio tags");
-    expect(content).toContain("Preserve line.style");
+    expect(content).toContain("style、pacing、accent、emotion、performanceNotes");
+    expect(content).toContain("每行 transcript/text 必须保持干净");
+    expect(content).toContain("不要发明不支持的内联音频标签");
+    expect(content).toContain("当 line.style 会改变该行表演时必须保留");
+    expect(content).toContain("所有导演配置值必须使用简体中文");
   });
 });
 
@@ -924,7 +935,8 @@ describe("runBundleOpenCodeNormalize", () => {
     });
 
     // Prompt should be captured correctly
-    expect(capturedPrompt).toContain("You are a voice production assistant");
+    expect(capturedPrompt).toContain("你是中文语音生产助理");
+    expect(capturedPrompt).toContain("所有导演配置字段必须使用简体中文");
     // Prompt should reference paths, not content
     expect(capturedPrompt).toContain(paths.requestPath);
     expect(capturedPrompt).toContain(paths.draftPath);
@@ -1012,7 +1024,7 @@ describe("runBundleOpenCodeNormalize", () => {
 
     // Prompt text must NOT appear in file values
     const promptText = capturedArgs.find(
-      (a) => typeof a === "string" && a.includes("You are a voice production assistant"),
+      (a) => typeof a === "string" && a.includes("你是中文语音生产助理"),
     );
     expect(promptText).toBeTruthy();
     expect(fileValues).not.toContain(promptText);

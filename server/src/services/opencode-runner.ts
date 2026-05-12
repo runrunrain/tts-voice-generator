@@ -20,6 +20,7 @@ import { homedir } from "node:os";
 import crypto from "node:crypto";
 import type { VoiceLine } from "../domain/validators.js";
 import { env } from "../config/env.js";
+import { formatVoiceSelectionGuideForPrompt, inferVoiceForTextContext } from "../utils/voice.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -112,6 +113,10 @@ function spawnOpenCodeRun(
 
     timeoutTimer = setTimeout(() => {
       if (settled) return;
+      if (isDraftReady()) {
+        resolveAfterDraftReady();
+        return;
+      }
       settled = true;
       child.kill("SIGTERM");
       forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 1500);
@@ -1046,6 +1051,7 @@ function extractVoiceMetadata(line: string): { kind: VoiceMetadata["kind"]; text
 }
 
 function sanitizeSpeakerId(label: string): string {
+  if (label.trim().toLowerCase() === "narrator" || label.trim() === "旁白") return "narrator";
   const asciiSlug = label
     .normalize("NFKD")
     .toLowerCase()
@@ -1057,12 +1063,7 @@ function sanitizeSpeakerId(label: string): string {
 }
 
 function inferVoiceFromMetadata(metadataText: string, speakerLabel: string): string {
-  const source = `${metadataText} ${speakerLabel}`.toLowerCase();
-  if (/(女|女性|少女|姑娘|girl|female|woman)/i.test(source)) return "Kore";
-  if (/(中老年|老年|低沉|稳重|权威|训诫|elder|old|senior|deep)/i.test(source)) return "Charon";
-  if (/(青年|年轻|少年|快|尖刻|活泼|young|fast|sharp)/i.test(source)) return "Puck";
-  if (/(温润|舒缓|文气|隐士|沉稳|gentle|calm|soft)/i.test(source)) return "Zephyr";
-  return "Zephyr";
+  return inferVoiceForTextContext(metadataText, speakerLabel);
 }
 
 function registerSpeaker(speakerMap: Map<string, FallbackSpeaker>, speakerLabel: string, voice: string): FallbackSpeaker {
@@ -1404,7 +1405,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
         }
 
         // Extract speaker from column mapping if available
-        let speakerLabel = "Narrator";
+        let speakerLabel = "旁白";
         if (block.columnMapping.speaker !== null && block.columnMapping.speaker < cells.length) {
           const speakerCell = cells[block.columnMapping.speaker].trim();
           if (speakerCell && hasSemanticContent(speakerCell)) {
@@ -1497,7 +1498,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
         speakerLabel = speakerMatch[1];
         text = speakerMatch[2].trim();
       } else {
-        speakerLabel = activeVoiceMetadata?.inferredSpeakerLabel ?? "Narrator";
+        speakerLabel = activeVoiceMetadata?.inferredSpeakerLabel ?? "旁白";
         text = stripTranscriptFieldLabel(trimmed).text;
       }
 
@@ -1607,18 +1608,27 @@ export async function runOpenCodeNormalize(
   ).join("\n\n");
 
   const prompt = [
-    "You are a voice production assistant. Given the following requirement documents,",
-    "generate a Prompt-Structured Production List v2 as JSON with this exact structure:",
+    "你是中文语音生产助理。根据以下需求文档，生成 Prompt-Structured Production List v2 JSON。",
+    "所有导演配置字段必须使用简体中文：promptProfiles[].name/description/audioProfile/scene/directorNotes/sampleContext/style/pacing/accent/emotion/performanceNotes 以及 speakers[].style。字段名和 Gemini voice 枚举保持英文。",
+    "请参考此结构；不要照抄示例中的英文表达，实际输出的导演配置必须是中文：",
     '{"schemaVersion":"tts.production-list.v2","promptProfiles":[{"id":"profile_young_noble","name":"Young noble role","audioProfile":"young to middle-aged male noble voice, composed and slightly arrogant","scene":"NPC single-line production from role sections","directorNotes":"legacy compatibility notes only","style":"restrained noble delivery with slight arrogance","pacing":"measured pace with short confident pauses","accent":"clear ancient-Chinese diction when supported by source","emotion":"restrained pride","performanceNotes":"Keep delivery natural and do not read metadata labels.","sampleContext":"Lines under the 世家大族 role section with 声线 metadata","speakers":[{"id":"young_noble","label":"世家大族/门阀子弟/年轻名士","voice":"Puck","style":"从容、轻慢、略带傲气"}],"reusePolicy":"many-lines"},{"id":"profile_elder_scholar","name":"Elder scholar role","audioProfile":"older authoritative male voice, deep and steady","scene":"NPC single-line production from role sections","directorNotes":"legacy compatibility notes only","style":"authoritative elder-scholar instruction","pacing":"slow confident pace","accent":"","emotion":"calm authority","performanceNotes":"Prioritize intelligibility and dignity.","sampleContext":"Lines under the 族老/经学大儒 role section with 声线 metadata","speakers":[{"id":"elder_scholar","label":"族老/经学大儒","voice":"Charon","style":"低沉稳重、训诫感"}],"reusePolicy":"many-lines"}],"lines":[{"id":"<uuid>","order":0,"speaker":"young_noble","speakerLabel":"世家大族/门阀子弟/年轻名士","transcript":"<clean spoken line text only>","text":"<clean spoken line text only>","promptProfileId":"profile_young_noble","directorProfileId":"profile_young_noble","voice":"Puck","style":"line-specific delivery override only when needed","notes":"","status":"pending","model":"google/gemini-3.1-flash-tts-preview","responseFormat":"wav","generationStatus":"draft"}],"speakers":[{"id":"young_noble","label":"世家大族/门阀子弟/年轻名士","voice":"Puck","style":"从容、轻慢、略带傲气"},{"id":"elder_scholar","label":"族老/经学大儒","voice":"Charon","style":"低沉稳重、训诫感"}]}',
     "",
-    "Rules:",
+    "规则：",
+    "Voice selection guide:",
+    formatVoiceSelectionGuideForPrompt(),
+    "音色选择规则：",
+    "- 导演配置内容必须为简体中文；不要输出英文句子作为 audioProfile、scene、directorNotes、sampleContext、style、pacing、accent、emotion 或 performanceNotes。",
+    "- Choose line.voice and promptProfiles[].speakers[].voice from the guide by matching role, age, gender, emotional intensity, scene, and transcript semantics.",
+    "- Do not blindly use Zephyr for all lines. Zephyr is only a neutral bright fallback when role and transcript provide no better signal.",
+    "- If source metadata says 声线/音色/角色, use it as strong evidence; if metadata is vague, infer from the actual line text and section title.",
+    "- High-energy battle/anger/urgent lines should prefer Fenrir or Alnilam; elder/authority/exposition should prefer Charon, Sadaltager, Rasalgethi, or Orus; young/playful lines should prefer Puck or Sadachbia; gentle/comforting lines should prefer Achernar or Vindemiatrix; casual street dialogue should prefer Zubenelgenubi or Aoede.",
     "- Split content by logical sentences or dialogue turns",
     "- Detect speaker prefixes like \"A:\", \"B:\", \"Speaker1:\" and map to speaker IDs",
     "- For Markdown role sections, derive speakerLabel, voice, and profile speakers from section titles plus 声线/音色/角色 metadata",
-    "- Multiple different source voices must not all be Narrator/Zephyr; voice names may be grouped, but speakerLabel/profile speakers must preserve role differences",
+    "- Multiple different source voices must not all be 旁白/Zephyr; voice names may be grouped, but speakerLabel/profile speakers must preserve role differences",
     "- Maximum 2 speakers per promptProfile; the full dataset may contain different speakers across different profiles",
-    "- Include non-empty promptProfiles with audioProfile, scene, directorNotes, sampleContext, and speakers",
-    "- For every promptProfile, extract concise style, pacing, accent, emotion, and performanceNotes fields for Gemini Director's Notes",
+    "- Include non-empty promptProfiles with Chinese audioProfile, scene, directorNotes, sampleContext, and speakers",
+    "- For every promptProfile, extract concise Chinese style, pacing, accent, emotion, and performanceNotes fields for Gemini Director's Notes",
     "- Keep transcript/text clean: only spoken words belong there; move Style:, Pacing:, Accent:, Emotion:, Director's Notes:, Performance Notes:, 音色:, 风格:, 情绪:, 语速: into style/promptOverride/profile fields",
     "- Preserve line.style when a specific line changes delivery; do not omit explicit style merely because it is optional",
     "- Do not invent unsupported inline audio tags and do not insert free-form tags into transcript",
@@ -1754,7 +1764,7 @@ export async function runOpenCodeNormalize(
 
     // Ensure at least one speaker exists
     if (speakerMap.size === 0) {
-      speakerMap.set("narrator", { id: "narrator", label: "Narrator", voice: "Zephyr", style: "" });
+      speakerMap.set("narrator", { id: "narrator", label: "旁白", voice: "Zephyr", style: "" });
     }
 
     // Preserve all aggregate speakers returned by the legacy runner. The v2
@@ -1867,9 +1877,10 @@ export async function runBundleOpenCodeNormalize(
   // OpenCode bind deterministic candidate lines to reusable prompt profiles
   // instead of reparsing Markdown and emitting repeated defaults for every line.
   const prompt = [
-    "You are a voice production assistant.",
+    "你是中文语音生产助理。",
     "",
-    "Your task: Read the normalize request file and write a compact Prompt-Structured v2 draft.",
+    "任务：读取 normalize request 文件，并写出紧凑的 Prompt-Structured v2 草稿。",
+    "语言硬约束：所有导演配置字段必须使用简体中文，包括 promptProfiles[].name、description、audioProfile、scene、directorNotes、sampleContext、style、pacing、accent、emotion、performanceNotes、speakers[].style。字段名、id、Gemini voice 名称和 model 名称保持英文枚举。",
     "",
     "Steps:",
     `1. Read the normalize request at: ${input.normalizeRequestPath}`,
@@ -1883,17 +1894,25 @@ export async function runBundleOpenCodeNormalize(
     "9. Generate a compact Prompt-Structured Production List v2 JSON with schemaVersion, promptProfiles, and lines.",
     `10. Write the result to: ${input.draftPath}`,
     "",
-    "Rules:",
+    "规则：",
+    "Voice selection guide:",
+    formatVoiceSelectionGuideForPrompt(),
+    "音色选择规则：",
+    "- 所有用户可见的导演配置值必须为简体中文；不要输出英文句子作为 audioProfile、scene、directorNotes、sampleContext、style、pacing、accent、emotion 或 performanceNotes。",
+    "- Choose line.voice and promptProfiles[].speakers[].voice from the guide by matching role, age, gender, emotional intensity, scene, and transcript semantics.",
+    "- Do not blindly preserve candidate voice when the transcript clearly calls for a different timbre; candidate voice is a hint, not a command, unless it came from explicit source voice metadata.",
+    "- Zephyr is only a neutral bright fallback when role, section title, source metadata, and transcript provide no better signal.",
+    "- High-energy battle/anger/urgent lines should prefer Fenrir or Alnilam; elder/authority/exposition should prefer Charon, Sadaltager, Rasalgethi, or Orus; young/playful lines should prefer Puck or Sadachbia; gentle/comforting lines should prefer Achernar or Vindemiatrix; casual street dialogue should prefer Zubenelgenubi or Aoede.",
     "- Output ONLY valid minified JSON to the draft path",
     "- Do NOT include markdown fences or explanations in the draft file",
     "- Do NOT pretty-print the JSON; write a single compact JSON object",
     "- schemaVersion MUST be \"tts.production-list.v2\"",
-    "- promptProfiles MUST be non-empty; every profile requires audioProfile, scene, directorNotes, sampleContext, and 1-2 speakers",
-    "- Every promptProfile should include concise style, pacing, accent, emotion, and performanceNotes fields derived from source role/voice/style metadata",
+    "- promptProfiles MUST be non-empty; every profile requires Chinese audioProfile, scene, directorNotes, sampleContext, and 1-2 speakers",
+    "- Every promptProfile should include concise Chinese style, pacing, accent, emotion, and performanceNotes fields derived from source role/voice/style metadata",
     "- Do NOT output placeholder profile fields such as TODO, TBD, N/A, 待补充, 暂无, 空, or 无",
     "- Reuse the same prompt profile for multiple lines when role, scene, and delivery style match",
     "- Derive line.speakerLabel, line.voice, and promptProfiles[].speakers from source section titles plus voiceMetadata entries such as 声线, 音色, 角色, 说话人, speaker, voice, character, and role",
-    "- Multiple different voiceMetadata roles must not all be emitted as Narrator/Zephyr; voice names may be grouped by available system voices, but speakerLabel and profile speakers must preserve role differences",
+    "- Multiple different voiceMetadata roles must not all be emitted as 旁白/Zephyr; voice names may be grouped by available system voices, but speakerLabel and profile speakers must preserve role differences",
     "- Each promptProfile's speakers must match the role and voice metadata of lines bound to that profile",
     "- Every line MUST include only required compact fields: id, order, speaker, transcript, promptProfileId, voice, plus optional speakerLabel and style when the source has line-specific delivery guidance",
     "- Do NOT repeat optional defaults on lines: omit text, model, responseFormat, status, generationStatus, notes, directorProfileId, and directorOverrideJson unless truly needed; preserve explicit style instead of dropping it",

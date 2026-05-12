@@ -81,7 +81,7 @@ export function resolveTtsFormat(
 /**
  * Check if a model string refers to a Gemini TTS model.
  */
-function isGeminiTtsModel(model: string): boolean {
+export function isGeminiTtsModel(model: string): boolean {
   const lower = model.toLowerCase();
   return (
     lower.includes("gemini") &&

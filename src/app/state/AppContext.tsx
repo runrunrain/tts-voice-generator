@@ -28,6 +28,7 @@ import type {
   AssembleResult,
 } from "../types";
 import { httpAdapter } from "../services/httpAdapter";
+import { getOpenRouterKeyDisplayValue, shouldSendOpenRouterApiKey } from "../services/settingsKeyStatus";
 
 // ─── Context Value ───────────────────────────────────────────────────────────
 
@@ -250,11 +251,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     fetch("/api/settings")
       .then((res) => res.json())
       .then((data) => {
-        // Handle both new format (hasOpenRouterApiKey/keyMask) and legacy format (openRouterApiKey)
-        const hasKey = data.hasOpenRouterApiKey || data.openRouterApiKey === "***configured***";
         setSettings((prev) => ({
           ...prev,
-          openRouterApiKey: hasKey ? (data.keyMask || data.openRouterApiKey || "***configured***") : "",
+          openRouterApiKey: getOpenRouterKeyDisplayValue(data),
           defaultModel: data.defaultModel || prev.defaultModel,
           defaultVoice: data.defaultVoice || prev.defaultVoice,
           defaultFormat: data.defaultFormat || prev.defaultFormat,
@@ -304,11 +303,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           // Send the actual key string only when provided by the user.
-          // Masked sentinel values ("***configured***") must be translated to
+          // Masked/sentinel values must be translated to
           // undefined so the backend doesn't overwrite the stored key.
-          openRouterApiKey: source.openRouterApiKey &&
-            source.openRouterApiKey !== "***configured***" &&
-            source.openRouterApiKey !== ""
+          openRouterApiKey: shouldSendOpenRouterApiKey(source.openRouterApiKey)
             ? source.openRouterApiKey
             : undefined,
           defaultModel: source.defaultModel,
@@ -337,10 +334,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const freshRes = await fetch("/api/settings");
     if (freshRes.ok) {
       const data = await freshRes.json();
-      const hasKey = data.hasOpenRouterApiKey || data.openRouterApiKey === "***configured***";
       setSettings((prev) => ({
         ...prev,
-        openRouterApiKey: hasKey ? (data.keyMask || data.openRouterApiKey || "***configured***") : "",
+        openRouterApiKey: getOpenRouterKeyDisplayValue(data),
         defaultModel: data.defaultModel || prev.defaultModel,
         defaultVoice: data.defaultVoice || prev.defaultVoice,
         defaultFormat: data.defaultFormat || prev.defaultFormat,

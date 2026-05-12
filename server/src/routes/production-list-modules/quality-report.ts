@@ -132,10 +132,11 @@ export function buildQualityReportMetrics(
   metrics.longText = {
     threshold: longTextThreshold,
     count: longTextLines.length,
-    details: longTextLines.map((l) => ({ lineId: l.id, length: l.text.length })),
+    details: longTextLines.map((l) => ({ lineId: l.lineId ?? l.id, length: l.text.length })),
   };
   for (const line of longTextLines) {
-    issues.push({ severity: "warning", code: "LONG_TEXT", message: `Line "${line.id}" text is ${line.text.length} chars (threshold: ${longTextThreshold})`, lineId: line.id });
+    const lineId = line.lineId ?? line.id;
+    issues.push({ severity: "warning", code: "LONG_TEXT", message: `Line "${lineId}" text is ${line.text.length} chars (threshold: ${longTextThreshold})`, lineId });
   }
 
   const statusCounts: Record<string, number> = {};

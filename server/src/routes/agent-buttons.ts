@@ -67,6 +67,7 @@ import {
   writeSchemaSnapshot,
 } from "../services/schema-exporter.js";
 import { validateProductionList, type ValidationReport } from "../domain/validators.js";
+import { getVoiceDisplayNameZh } from "../utils/voice.js";
 
 const app = new Hono();
 
@@ -98,25 +99,117 @@ function auditLog(entityType: string, entityId: string, operation: string, actor
   } catch { /* non-critical */ }
 }
 
-function normalizePromptProfile(profile: PromptProfile): PromptProfile {
+const DIRECTOR_PROFILE_REQUIRED_FIELDS = ["audioProfile", "scene", "directorNotes", "sampleContext"] as const;
+const DIRECTOR_PROFILE_STYLE_FIELDS = ["style", "pacing", "accent", "emotion", "performanceNotes"] as const;
+
+function cjkCount(value: string): number {
+  return value.match(/[\u3400-\u4dbf\u4e00-\u9fff]/g)?.length ?? 0;
+}
+
+function latinCount(value: string): number {
+  return value.match(/[A-Za-z]/g)?.length ?? 0;
+}
+
+function needsChineseDirectorRewrite(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return true;
+  const cjk = cjkCount(trimmed);
+  const latin = latinCount(trimmed);
+  return cjk === 0 || latin > cjk * 2;
+}
+
+function normalizeSpeakerLabel(label: string): string {
+  return label.trim().toLowerCase() === "narrator" ? "旁白" : label.trim();
+}
+
+function profileChineseContext(profile: PromptProfile): { roleLabel: string; voice: string; voiceZh: string; speakerStyle: string } {
+  const primarySpeaker = profile.speakers[0];
+  const rawRoleLabel = primarySpeaker?.label?.trim() || profile.name.trim() || "旁白";
+  const roleLabel = normalizeSpeakerLabel(rawRoleLabel) || "旁白";
+  const voice = primarySpeaker?.voice?.trim() || "Zephyr";
   return {
+    roleLabel,
+    voice,
+    voiceZh: getVoiceDisplayNameZh(voice),
+    speakerStyle: primarySpeaker?.style?.trim() || "",
+  };
+}
+
+function chineseDirectorFallback(
+  profile: PromptProfile,
+  field: typeof DIRECTOR_PROFILE_REQUIRED_FIELDS[number] | typeof DIRECTOR_PROFILE_STYLE_FIELDS[number] | "name" | "description" | "speakerStyle",
+): string {
+  const context = profileChineseContext(profile);
+  const role = context.roleLabel;
+  const voiceLabel = `${context.voiceZh}（${context.voice}）`;
+  switch (field) {
+    case "name":
+      return `${role}导演配置`;
+    case "description":
+      return `${role}相关台词的中文导演配置。`;
+    case "audioProfile":
+      return `${role}使用${voiceLabel}音色，突出角色身份、年龄感、音色质感与台词语气。`;
+    case "scene":
+      return `用于${role}相关台词的语音生产场景，结合原始段落、角色关系和当前对白语境。`;
+    case "directorNotes":
+      return "按中文语境自然表演，保持台词清晰，不朗读字段名、注释或元数据。";
+    case "sampleContext":
+      return `这些台词来自${role}相关段落，需延续原文角色设定和上下文情绪。`;
+    case "style":
+      return context.speakerStyle && !needsChineseDirectorRewrite(context.speakerStyle)
+        ? context.speakerStyle
+        : `${role}的整体表演风格应贴合角色身份与台词含义。`;
+    case "pacing":
+      return "节奏自然清晰，按句意停顿，重要信息前后略作留白。";
+    case "accent":
+      return "以清晰标准的中文咬字为主；除非原文指定，不额外添加口音。";
+    case "emotion":
+      return "情绪基调根据台词语义和角色关系自然变化。";
+    case "performanceNotes":
+      return "避免朗读导演字段、标签或元数据，只输出台词正文。";
+    case "speakerStyle":
+      return `${role}身份明确，中文表达自然清晰。`;
+  }
+}
+
+function ensureChineseDirectorText(
+  profile: PromptProfile,
+  field: Parameters<typeof chineseDirectorFallback>[1],
+  value: unknown,
+): string {
+  const text = typeof value === "string" ? value.trim() : "";
+  return needsChineseDirectorRewrite(text) ? chineseDirectorFallback(profile, field) : text;
+}
+
+function normalizePromptProfile(profile: PromptProfile): PromptProfile {
+  const normalized: PromptProfile = {
     ...profile,
     id: profile.id.trim(),
-    name: profile.name.trim(),
-    description: typeof profile.description === "string" ? profile.description : "",
-    audioProfile: profile.audioProfile.trim(),
-    scene: profile.scene.trim(),
-    directorNotes: profile.directorNotes.trim(),
-    sampleContext: profile.sampleContext.trim(),
+    name: ensureChineseDirectorText(profile, "name", profile.name),
+    description: typeof profile.description === "string" && profile.description.trim()
+      ? ensureChineseDirectorText(profile, "description", profile.description)
+      : chineseDirectorFallback(profile, "description"),
+    audioProfile: ensureChineseDirectorText(profile, "audioProfile", profile.audioProfile),
+    scene: ensureChineseDirectorText(profile, "scene", profile.scene),
+    directorNotes: ensureChineseDirectorText(profile, "directorNotes", profile.directorNotes),
+    sampleContext: ensureChineseDirectorText(profile, "sampleContext", profile.sampleContext),
     speakers: profile.speakers.map((speaker) => ({
       ...speaker,
       id: speaker.id.trim(),
-      label: speaker.label.trim(),
+      label: normalizeSpeakerLabel(speaker.label),
       name: typeof speaker.name === "string" ? speaker.name : undefined,
       voice: speaker.voice.trim(),
-      style: typeof speaker.style === "string" ? speaker.style : "",
+      style: typeof speaker.style === "string" && speaker.style.trim()
+        ? ensureChineseDirectorText(profile, "speakerStyle", speaker.style)
+        : "",
     })),
   };
+
+  for (const field of DIRECTOR_PROFILE_STYLE_FIELDS) {
+    normalized[field] = ensureChineseDirectorText(normalized, field, profile[field]);
+  }
+
+  return normalized;
 }
 
 function profileStorageName(taskId: string, profile: PromptProfile): string {
@@ -203,6 +296,50 @@ function getNormalizeSyncWaitMs(configuredTimeoutMs: number): number {
   const envWaitMs = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_NORMALIZE_SYNC_WAIT_MS;
   const configured = Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0 ? configuredTimeoutMs : envWaitMs;
   return Math.max(1, Math.min(envWaitMs, configured));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getTimeoutDraftRecoveryWaitMs(): number {
+  const raw = Number.parseInt(process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS ?? "", 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 5_000;
+}
+
+function getTimeoutDraftRecoveryWindowMs(): number {
+  const rawWindow = Number.parseInt(process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WINDOW_MS ?? "", 10);
+  if (Number.isFinite(rawWindow) && rawWindow >= 0) return rawWindow;
+
+  // Backward-compatible test/operator escape hatch: setting the historical
+  // immediate wait to 0 means "do not keep timeout runs pending" unless the new
+  // async window is explicitly configured.
+  const rawImmediateWait = Number.parseInt(process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS ?? "", 10);
+  if (Number.isFinite(rawImmediateWait) && rawImmediateWait === 0) return 0;
+
+  return 120_000;
+}
+
+function buildTimeoutRecoveryBasis(timeoutBasis: Record<string, unknown>, recoveryWindowMs = getTimeoutDraftRecoveryWindowMs()): Record<string, unknown> {
+  const now = new Date();
+  return {
+    ...timeoutBasis,
+    lateDraftRecovery: true,
+    lateDraftRecoveryWindowMs: recoveryWindowMs,
+    lateDraftRecoveryStartedAt: now.toISOString(),
+    lateDraftRecoveryDeadlineAt: new Date(now.getTime() + recoveryWindowMs).toISOString(),
+  };
+}
+
+async function waitForDraftAfterTimeout(draftPath: string, waitMs = getTimeoutDraftRecoveryWaitMs(), intervalMs = 250): Promise<NormalizeDraft | null> {
+  if (waitMs <= 0) return readNormalizeDraft(draftPath);
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    const draft = readNormalizeDraft(draftPath);
+    if (draft !== null) return draft;
+    await sleep(Math.min(Math.max(50, intervalMs), Math.max(1, deadline - Date.now())));
+  }
+  return readNormalizeDraft(draftPath);
 }
 
 function buildNormalizeStillRunningResponse(options: {
@@ -568,7 +705,7 @@ function refreshOrTerminalizeProgress(
 
   const updatedAtMs = Date.parse(progress.updatedAt);
   const updatedAgeMs = Number.isFinite(updatedAtMs) ? nowMs - updatedAtMs : Number.POSITIVE_INFINITY;
-  const appearsStaleAfterRestart = !isActiveInThisProcess && updatedAgeMs > NORMALIZE_PROGRESS_STALE_GRACE_MS;
+  const appearsStaleAfterRestart = progress.stage !== "timeout_recovery" && !isActiveInThisProcess && updatedAgeMs > NORMALIZE_PROGRESS_STALE_GRACE_MS;
 
   return {
     ...progress,
@@ -581,6 +718,150 @@ function refreshOrTerminalizeProgress(
   };
 }
 
+function normalizeRunHasTimeoutFailure(progress: NormalizeRunProgress): boolean {
+  const code = progress.error?.code ?? "";
+  const message = `${progress.error?.message ?? ""} ${progress.message ?? ""}`;
+  return code.includes("TIMEOUT") || /timed out|timeout/i.test(message);
+}
+
+function shouldAttemptLateDraftRecovery(taskId: string, paths: RunPaths, progress: NormalizeRunProgress): boolean {
+  const draftState = getDraftProgressState(paths.draftPath);
+  if (!draftState.exists || !draftState.parseable) return false;
+  if (progress.stage === "completed") return false;
+  if (progress.stage === "timeout_recovery") return true;
+  if (progress.stage === "failed") return normalizeRunHasTimeoutFailure(progress);
+
+  const activeRun = activeNormalizeRuns.get(taskId);
+  const isActiveInThisProcess = activeRun?.runId === progress.runId;
+  const updatedAtMs = Date.parse(progress.updatedAt);
+  const updatedAgeMs = Number.isFinite(updatedAtMs) ? Date.now() - updatedAtMs : Number.POSITIVE_INFINITY;
+  return !isActiveInThisProcess && updatedAgeMs > NORMALIZE_PROGRESS_STALE_GRACE_MS;
+}
+
+function timeoutRecoveryDeadlineMs(progress: NormalizeRunProgress): number | null {
+  const explicitDeadline = progress.timeoutBasis?.lateDraftRecoveryDeadlineAt;
+  if (typeof explicitDeadline === "string") {
+    const ms = Date.parse(explicitDeadline);
+    if (Number.isFinite(ms)) return ms;
+  }
+
+  if (progress.stage !== "timeout_recovery") return null;
+  const startedAtMs = Date.parse(progress.startedAt);
+  if (!Number.isFinite(startedAtMs)) return Date.now();
+  const windowMs = typeof progress.timeoutBasis?.lateDraftRecoveryWindowMs === "number"
+    ? Math.max(0, progress.timeoutBasis.lateDraftRecoveryWindowMs)
+    : getTimeoutDraftRecoveryWindowMs();
+  return startedAtMs + Math.max(0, progress.timeoutMs) + windowMs;
+}
+
+function shouldFinalizeExpiredTimeoutRecovery(paths: RunPaths, progress: NormalizeRunProgress): boolean {
+  if (progress.stage !== "timeout_recovery") return false;
+  const draftState = getDraftProgressState(paths.draftPath);
+  if (draftState.exists && draftState.parseable) return false;
+  const deadlineMs = timeoutRecoveryDeadlineMs(progress);
+  return deadlineMs !== null && Date.now() >= deadlineMs;
+}
+
+function finalizeExpiredTimeoutRecovery(options: {
+  taskId: string;
+  runId: string;
+  paths: RunPaths;
+  progress: NormalizeRunProgress;
+}): NormalizeRunProgress {
+  const { taskId, runId, paths, progress } = options;
+  const message = "OpenCode Agent normalize timed out, and no recoverable draft appeared before the recovery window expired. No version created.";
+  writeCommitResult(paths.commitResultPath, {
+    committed: false,
+    error: `OPENCODE_NORMALIZE_TIMEOUT: ${message}`,
+    runId,
+    taskId,
+    committedAt: new Date().toISOString(),
+  });
+  mergeRunProgress(paths, {
+    stage: "failed",
+    message,
+    runner: { status: "timeout" },
+    error: {
+      code: "OPENCODE_NORMALIZE_TIMEOUT",
+      message,
+      httpStatus: 504,
+      recoverability: "retryable",
+    },
+  });
+  return readRunProgress(paths.progressPath) ?? progress;
+}
+
+function recoverOrExpireTimeoutProgress(options: {
+  c: any;
+  db: ReturnType<typeof getDb>;
+  requestId: string;
+  taskId: string;
+  runId: string;
+  paths: RunPaths;
+  progress: NormalizeRunProgress;
+  reason: string;
+}): NormalizeRunProgress {
+  const { c, db, requestId, taskId, runId, paths, progress, reason } = options;
+  if (shouldAttemptLateDraftRecovery(taskId, paths, progress)) {
+    return attemptLateDraftRecoveryFromArtifacts({ c, db, requestId, taskId, runId, paths, progress, reason });
+  }
+  if (shouldFinalizeExpiredTimeoutRecovery(paths, progress)) {
+    return finalizeExpiredTimeoutRecovery({ taskId, runId, paths, progress });
+  }
+  return progress;
+}
+
+function attemptLateDraftRecoveryFromArtifacts(options: {
+  c: any;
+  db: ReturnType<typeof getDb>;
+  requestId: string;
+  taskId: string;
+  runId: string;
+  paths: RunPaths;
+  progress: NormalizeRunProgress;
+  reason: string;
+}): NormalizeRunProgress {
+  const { c, db, requestId, taskId, runId, paths, progress, reason } = options;
+  const bundle = readJsonFile<Record<string, unknown>>(paths.requestPath);
+  const currentState = bundle && typeof bundle.currentState === "object" && bundle.currentState !== null
+    ? bundle.currentState as Record<string, unknown>
+    : {};
+  const currentVersionAtStart = typeof currentState.expectedVersion === "number" ? currentState.expectedVersion : 0;
+  const normalizeStartTime = Number.isFinite(Date.parse(progress.startedAt)) ? Date.parse(progress.startedAt) : Date.now() - progress.elapsedMs;
+
+  finalizeBundleNormalizeDraft({
+    c,
+    db,
+    requestId,
+    taskId,
+    runId,
+    paths,
+    draft: readNormalizeDraft(paths.draftPath),
+    productionMetadata: {
+      method: "opencode-bundle-run",
+      durationMs: Math.max(0, Date.now() - normalizeStartTime),
+      stdoutSummary: "(Recovered from late draft during normalize progress polling)",
+      timeoutBasis: progress.timeoutBasis,
+    },
+    warnings: [],
+    currentVersionAtStart,
+    configuredTimeoutMs: progress.timeoutMs,
+    normalizeStartTime,
+    candidateLineCount: progress.candidateLineCount,
+    voiceMetadataCount: typeof progress.candidateQualitySummary === "object" && progress.candidateQualitySummary !== null && typeof (progress.candidateQualitySummary as Record<string, unknown>).voiceMetadataCount === "number"
+      ? (progress.candidateQualitySummary as Record<string, unknown>).voiceMetadataCount as number
+      : 0,
+    progressPaths: paths,
+    recovery: {
+      code: "OPENCODE_LATE_DRAFT_RECOVERY",
+      message: "OpenCode timed out or lost process ownership after writing a parseable draft; server recovered and committed it from progress polling.",
+      reason,
+    },
+  });
+
+  return readRunProgress(paths.progressPath) ?? progress;
+}
+
 function findActiveNormalizeRun(taskId: string): { runId: string; progressUrl: string } | null {
   const activeRun = activeNormalizeRuns.get(taskId);
   if (activeRun) {
@@ -590,7 +871,17 @@ function findActiveNormalizeRun(taskId: string): { runId: string; progressUrl: s
       if (!progress) {
         activeNormalizeRuns.delete(taskId);
       } else {
-        const refreshed = refreshOrTerminalizeProgress(taskId, paths, progress);
+        let refreshed = refreshOrTerminalizeProgress(taskId, paths, progress);
+        refreshed = recoverOrExpireTimeoutProgress({
+          c: responseContext(),
+          db: getDb(),
+          requestId: uuidv4(),
+          taskId,
+          runId: activeRun.runId,
+          paths,
+          progress: refreshed,
+          reason: "active run lookup detected a parseable late draft",
+        });
         if (isTerminalNormalizeStage(refreshed.stage)) {
           activeNormalizeRuns.delete(taskId);
         } else {
@@ -603,7 +894,17 @@ function findActiveNormalizeRun(taskId: string): { runId: string; progressUrl: s
   }
 
   for (const run of listNormalizeRunProgress(taskId)) {
-    const refreshed = refreshOrTerminalizeProgress(taskId, run.paths, run.progress);
+    let refreshed = refreshOrTerminalizeProgress(taskId, run.paths, run.progress);
+    refreshed = recoverOrExpireTimeoutProgress({
+      c: responseContext(),
+      db: getDb(),
+      requestId: uuidv4(),
+      taskId,
+      runId: run.runId,
+      paths: run.paths,
+      progress: refreshed,
+      reason: "run list detected a parseable late draft",
+    });
     if (!isTerminalNormalizeStage(refreshed.stage)) {
       const recovered = { runId: run.runId, progressUrl: progressUrlFor(taskId, run.runId) };
       activeNormalizeRuns.set(taskId, recovered);
@@ -851,10 +1152,10 @@ function finalizeBundleNormalizeDraft(options: {
   }
 
   if (!businessQuality.passed) {
-    const errorMessage = "Agent draft passed schema validation but failed production-list business quality gate. No version created.";
+    const errorMessage = "生产列表草稿质量门失败：Agent 生成的生产列表草稿已通过 schema 校验，但未通过业务质量检查；未创建新的生产列表版本，也未触发 TTS 音频生成。";
     writeCommitResult(paths.commitResultPath, {
       committed: false,
-      error: `PRODUCTION_LIST_QUALITY_GATE_FAILED: ${businessQuality.blockingIssueCount} blocking issue(s). No normalization applied.`,
+      error: `PRODUCTION_LIST_QUALITY_GATE_FAILED: ${businessQuality.blockingIssueCount} blocking issue(s). 未创建新的生产列表版本，未触发 TTS 音频生成。`,
       runId,
       taskId,
       committedAt: new Date().toISOString(),
@@ -925,17 +1226,20 @@ function finalizeBundleNormalizeDraft(options: {
     const profile = profileById.get(rawLine.promptProfileId);
     const promptSpeaker = profile?.speakers.find((speaker) => speaker.id === rawLine.speaker);
     const promptOverride = rawLine.promptOverride ?? null;
+    const rawLineStyle = typeof rawLine.style === "string" ? rawLine.style.trim() : "";
     lines.push({
       id: rawLine.id,
       order: rawLine.order,
       moduleName: rawLine.moduleName ?? null,
       title: rawLine.title ?? null,
       speaker: rawLine.speaker,
-      speakerLabel: rawLine.speakerLabel ?? promptSpeaker?.label ?? rawLine.speaker,
+      speakerLabel: normalizeSpeakerLabel(rawLine.speakerLabel ?? promptSpeaker?.label ?? rawLine.speaker),
       transcript: rawLine.transcript,
       text: rawLine.transcript,
       voice: rawLine.voice || promptSpeaker?.voice || "Zephyr",
-      style: typeof rawLine.style === "string" ? rawLine.style : "",
+      style: rawLineStyle && profile && needsChineseDirectorRewrite(rawLineStyle)
+        ? chineseDirectorFallback(profile, "style")
+        : rawLineStyle,
       notes: typeof rawLine.notes === "string" ? rawLine.notes : "",
       status: "pending",
       model: rawLine.model ?? "google/gemini-3.1-flash-tts-preview",
@@ -1065,6 +1369,7 @@ function finalizeBundleNormalizeDraft(options: {
       quality: qualityProgressSummary(businessQuality),
       runner: { status: "completed" },
       result: { versionId, lineCount: lines.length },
+      error: undefined,
     });
   }
 
@@ -1416,7 +1721,7 @@ app.post("/api/tasks/:taskId/agent/normalize-requirements", async (c) => {
       const errorCode = isTimeout ? "OPENCODE_NORMALIZE_TIMEOUT" : "OPENCODE_BUNDLE_RUN_FAILED";
 
       if (isTimeout) {
-        const recoveryDraft = readNormalizeDraft(paths.draftPath);
+        const recoveryDraft = await waitForDraftAfterTimeout(paths.draftPath);
         if (recoveryDraft !== null) {
           return finalizeBundleNormalizeDraft({
             c: activeContext,
@@ -1445,6 +1750,30 @@ app.post("/api/tasks/:taskId/agent/normalize-requirements", async (c) => {
               reason: failReason,
             },
           });
+        }
+
+        const recoveryWindowMs = getTimeoutDraftRecoveryWindowMs();
+        if (recoveryWindowMs > 0) {
+          const recoveryTimeoutBasis = buildTimeoutRecoveryBasis(timeoutBasis, recoveryWindowMs);
+          const recoveryMessage = "OpenCode Agent normalize 已超过进程等待预算；继续轮询以等待可能稍后写入的 draft artifact。";
+          mergeRunProgress(progressPaths, {
+            stage: "timeout_recovery",
+            message: recoveryMessage,
+            candidateLineCount: candidateLineCountForRun,
+            timeoutBasis: recoveryTimeoutBasis,
+            runner: { status: "timeout" },
+          });
+
+          return activeContext.json(buildNormalizeStillRunningResponse({
+            requestId,
+            runId,
+            taskId,
+            configuredTimeoutMs,
+            timeoutBasis: recoveryTimeoutBasis,
+            stage: "timeout_recovery",
+            elapsedMs,
+            message: recoveryMessage,
+          }), 202);
         }
       }
 
@@ -1638,7 +1967,17 @@ app.get("/api/tasks/:taskId/agent/normalize-runs/:runId/progress", async (c) => 
       return apiError(c, requestId, 404, "NORMALIZE_PROGRESS_NOT_FOUND", "Normalize run progress artifact was not found.", "not_found");
     }
 
-    const refreshedProgress = refreshOrTerminalizeProgress(taskId, paths, progress);
+    let refreshedProgress = refreshOrTerminalizeProgress(taskId, paths, progress);
+    refreshedProgress = recoverOrExpireTimeoutProgress({
+      c,
+      db: getDb(),
+      requestId,
+      taskId,
+      runId,
+      paths,
+      progress: refreshedProgress,
+      reason: "progress endpoint detected a parseable late draft",
+    });
     if (isTerminalNormalizeStage(refreshedProgress.stage)) {
       releaseActiveNormalizeRun(taskId, runId);
     }
@@ -1676,7 +2015,18 @@ app.get("/api/tasks/:taskId/agent/runs", (c) => {
   const runs: AgentRunSummary[] = [];
   if (!kind || kind === "normalize") {
     for (const run of listNormalizeRunProgress(taskId)) {
-      runs.push(summarizeNormalizeRun(taskId, run.runId, run.paths, refreshOrTerminalizeProgress(taskId, run.paths, run.progress)));
+      let refreshed = refreshOrTerminalizeProgress(taskId, run.paths, run.progress);
+      refreshed = recoverOrExpireTimeoutProgress({
+        c: responseContext(),
+        db,
+        requestId,
+        taskId,
+        runId: run.runId,
+        paths: run.paths,
+        progress: refreshed,
+        reason: "runs endpoint detected a parseable late draft",
+      });
+      runs.push(summarizeNormalizeRun(taskId, run.runId, run.paths, refreshed));
     }
   }
   if (!kind || kind === "button") {

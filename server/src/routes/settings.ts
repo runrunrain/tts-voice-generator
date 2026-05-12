@@ -12,7 +12,7 @@ import { settings } from "../db/schema.js";
 import { eq } from "drizzle-orm";
 import { encryptApiKey, decryptApiKey, maskApiKey } from "../config/env.js";
 import { isOpenRouterConfigured, requireApiKey } from "../services/key-resolver.js";
-import { OpenRouterProvider } from "../services/openrouter-provider.js";
+import { OpenRouterProvider, sanitizeText } from "../services/openrouter-provider.js";
 import { canonicalizeVoice } from "../utils/voice.js";
 import { normalizeFormat, type AudioFormat } from "../utils/audio-format.js";
 import { fingerprintFromHash, generateLocalPluginToken } from "../services/agent-auth.js";
@@ -204,29 +204,55 @@ app.post("/api/settings/test", async (c) => {
   if (!isOpenRouterConfigured()) {
     return c.json({
       ok: false,
+      provider: "openrouter",
+      checkedEndpoint: "audio_speech",
       latencyMs: 0,
       modelAvailable: false,
+      authValid: false,
+      errorCode: "MISSING_API_KEY",
+      errorMessage: "OpenRouter API Key 未配置。",
+      actionMessage: "请先在 Settings 保存 OpenRouter API Key。",
       error: "MISSING_API_KEY",
     });
   }
 
   try {
     const apiKey = requireApiKey();
+    const db = getDb();
+    const row = db.select().from(settings).where(eq(settings.id, 1)).get();
     const provider = new OpenRouterProvider(apiKey);
-    const result = await provider.testConnection();
+    const defaultFormat = normalizeFormat(row?.defaultFormat ?? "wav");
+    const result = await provider.testConnection({
+      model: row?.defaultModel ?? "google/gemini-3.1-flash-tts-preview",
+      voice: canonicalizeVoice(row?.defaultVoice ?? "Zephyr"),
+      responseFormat: defaultFormat === "mp3" ? "mp3" : "pcm",
+    });
 
     return c.json({
       ok: result.ok,
+      provider: result.provider,
+      checkedEndpoint: result.checkedEndpoint,
       latencyMs: result.latencyMs,
-      modelAvailable: result.ok,
+      modelAvailable: result.modelAvailable,
+      authValid: result.authValid,
+      errorCode: result.errorCode,
+      errorMessage: result.errorMessage,
+      providerMessage: result.providerMessage,
+      actionMessage: result.actionMessage,
       error: result.error || null,
     });
   } catch (err) {
     return c.json({
       ok: false,
+      provider: "openrouter",
+      checkedEndpoint: "audio_speech",
       latencyMs: 0,
       modelAvailable: false,
-      error: err instanceof Error ? err.message : "Test connection failed",
+      authValid: false,
+      errorCode: "PROVIDER_UNAVAILABLE",
+      errorMessage: "OpenRouter 连接测试失败。",
+      actionMessage: "请稍后重试；如果持续失败，请检查网络连接或 OpenRouter 服务状态。",
+      error: err instanceof Error ? sanitizeText(err.message) : "Test connection failed",
     });
   }
 });

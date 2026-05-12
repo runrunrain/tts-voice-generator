@@ -3,6 +3,7 @@ import { AlertCircle, CheckCircle2, Copy, Loader2, Plus, RefreshCw, Save, Search
 import { taskApi } from "../../services/httpAdapter";
 import { useAppState } from "../../state/AppContext";
 import type { DirectorProfile, DirectorSpeakerProfile, VoiceLine } from "../../types";
+import { formatVoiceOptionLabel } from "../../utils/voiceDisplay";
 
 type Phase = "idle" | "loading" | "saving" | "success" | "error";
 
@@ -292,7 +293,7 @@ export function DirectorProfilesPanel({
                 <div key={speaker.id} className="border border-border rounded-md bg-bg-base p-3 flex flex-col gap-2">
                   <div className="flex items-center justify-between text-xs font-semibold"><span>{displaySpeakerLabel(speaker.label)}</span>{speaker.id !== "a" && <button className="text-error disabled:text-text-tertiary" onClick={() => removeSpeaker(speaker.id)} disabled={!canEdit}>移除</button>}</div>
                   <input className={CONTROL_CLASS} placeholder="角色名" value={speaker.name} onChange={(event) => updateSpeaker(speaker.id, { name: event.target.value })} disabled={!canEdit} />
-                  <select className={CONTROL_CLASS} value={speaker.voice} onChange={(event) => updateSpeaker(speaker.id, { voice: event.target.value })} disabled={!canEdit}>{voiceOptions.map((voice) => <option key={voice} value={voice}>{voice}</option>)}</select>
+                  <select className={CONTROL_CLASS} value={speaker.voice} onChange={(event) => updateSpeaker(speaker.id, { voice: event.target.value })} disabled={!canEdit}>{voiceOptions.map((voice) => <option key={voice} value={voice}>{formatVoiceOptionLabel(voice)}</option>)}</select>
                   <input className={CONTROL_CLASS} placeholder="角色风格，未设置则继承 profile" value={speaker.style ?? ""} onChange={(event) => updateSpeaker(speaker.id, { style: event.target.value })} disabled={!canEdit} />
                 </div>
               ))}

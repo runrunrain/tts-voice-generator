@@ -345,7 +345,7 @@ describe("OpenCode Runner", () => {
     expect(result.productionList.lines[0].text).toBe("Hello world");
     expect(result.productionList.lines[0].speaker).toBe("narrator");
     expect(result.productionList.speakers).toHaveLength(1);
-    expect(result.productionList.speakers[0].label).toBe("Narrator");
+    expect(result.productionList.speakers[0].label).toBe("旁白");
   });
 
   it("fallbackNormalize parses multi-speaker content", () => {
@@ -409,7 +409,7 @@ describe("OpenCode Runner", () => {
     });
     expect(result.candidateLines[1]).toMatchObject({
       speakerLabel: "士族女眷",
-      voice: "Kore",
+      voice: "Leda",
       voiceMetadataId: result.voiceMetadata[1].id,
     });
   });
@@ -1363,6 +1363,12 @@ describe("API Routes - Agent Buttons", () => {
       expect(body.runner).toBe("opencode");
       expect(body.productionList.schemaVersion).toBe("tts.production-list.v2");
       expect(body.productionList.promptProfiles).toHaveLength(1);
+      const profile = body.productionList.promptProfiles[0];
+      for (const field of ["name", "description", "audioProfile", "scene", "directorNotes", "sampleContext", "style", "pacing", "accent", "emotion", "performanceNotes"]) {
+        expect(profile[field]).toMatch(/[\u4e00-\u9fff]/);
+      }
+      expect(profile.speakers[0].label).toBe("旁白");
+      expect(body.productionList.lines[0].speakerLabel).toBe("旁白");
       expect(body.productionList.lines[0].promptProfileId).toBe("profile_agent_narrator");
       expect(body.productionList.lines[0].directorProfileId).toBe("profile_agent_narrator");
 
@@ -1475,6 +1481,8 @@ describe("API Routes - Agent Buttons", () => {
       expect(normRes.status).toBe(422);
       const body = await jsonRes(normRes);
       expect(body.error.code).toBe("PRODUCTION_LIST_QUALITY_GATE_FAILED");
+      expect(body.error.message).toContain("生产列表草稿质量门失败");
+      expect(body.error.message).toContain("未触发 TTS 音频生成");
       expect(body.qualityReport.blockingIssueCount).toBeGreaterThan(0);
       expect(body.qualityReport.issues.map((issue: any) => issue.code)).toContain("TRANSCRIPT_METADATA_SOURCE");
       await expectProductionListUnchanged(0);
@@ -1484,6 +1492,7 @@ describe("API Routes - Agent Buttons", () => {
       const progress = await jsonRes(progressRes);
       expect(progress.stage).toBe("failed");
       expect(progress.error.code).toBe("PRODUCTION_LIST_QUALITY_GATE_FAILED");
+      expect(progress.error.message).toContain("生产列表草稿质量门失败");
       expect(progress.quality.blockingIssueCount).toBeGreaterThan(0);
     } finally {
       _resetSpawnRunner();
@@ -1536,6 +1545,8 @@ describe("API Routes - Agent Buttons", () => {
       expect(normRes.status).toBe(422);
       const body = await jsonRes(normRes);
       expect(body.error.code).toBe("PRODUCTION_LIST_QUALITY_GATE_FAILED");
+      expect(body.error.message).toContain("生产列表草稿质量门失败");
+      expect(body.error.message).toContain("未触发 TTS 音频生成");
       expect(body.qualityReport.issues.map((issue: any) => issue.code)).toContain("ROLE_VOICE_COLLAPSE");
       await expectProductionListUnchanged(0);
     } finally {
@@ -1803,6 +1814,8 @@ describe("API Routes - Agent Buttons", () => {
   it("normalize-requirements async mode records failed progress when runner fails", async () => {
     await pasteDocument("Narrator: 异步失败台词");
     mockOpenCodeAvailable();
+    const originalRecoveryWaitMs = process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS;
+    process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS = "0";
     _setSpawnRunner(async () => {
       throw new Error("opencode run timed out after 60000ms");
     });
@@ -1820,6 +1833,8 @@ describe("API Routes - Agent Buttons", () => {
       expect(failedProgress.runner.status).toBe("timeout");
       await expectProductionListUnchanged(0);
     } finally {
+      if (originalRecoveryWaitMs === undefined) delete process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS;
+      else process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS = originalRecoveryWaitMs;
       _resetSpawnRunner();
       _resetExecRunner();
     }
@@ -1851,6 +1866,24 @@ describe("API Routes - Agent Buttons", () => {
     expect(getBody.productionList.schemaVersion).toBe("tts.production-list.v2");
     expect(getBody.productionList.promptProfiles).toHaveLength(1);
     expect(getBody.productionList.schemaVersion).not.toBe("1.0");
+  });
+
+  it("normalize-requirements waits briefly for a draft that appears right after timeout", async () => {
+    await pasteDocument("Narrator: delayed timeout recovery path");
+    mockOpenCodeAvailable();
+    _setSpawnRunner(async (_file, args) => {
+      const draftPath = extractDraftPathFromArgs(args);
+      setTimeout(() => writeValidV2Draft(draftPath, "超时后短暂延迟才落盘的草稿。"), 100);
+      throw new Error("opencode run timed out after 150000ms");
+    });
+
+    const normRes = await req(app, `/api/tasks/${taskId}/agent/normalize-requirements`, { method: "POST" });
+    expect(normRes.status).toBe(200);
+    const body = await jsonRes(normRes);
+    expect(body.ok).toBe(true);
+    expect(body.warnings.map((w: any) => w.code)).toContain("OPENCODE_PROCESS_TIMEOUT_AFTER_DRAFT");
+    expect(body.productionList.version).toBe(1);
+    expect(body.productionList.lines[0].transcript).toBe("超时后短暂延迟才落盘的草稿。");
   });
 
   it("normalize-requirements passes route-computed timeout to bundle runner", async () => {
@@ -1889,23 +1922,197 @@ describe("API Routes - Agent Buttons", () => {
   it("normalize-requirements returns 504 on OpenCode timeout and leaves version unchanged", async () => {
     await pasteDocument("Narrator: timeout path");
     mockOpenCodeAvailable();
+    const originalRecoveryWaitMs = process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS;
+    process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS = "0";
     _setSpawnRunner(async () => {
       throw new Error("opencode run timed out after 300000ms");
     });
 
-    const normRes = await req(app, `/api/tasks/${taskId}/agent/normalize-requirements`, { method: "POST" });
-    expect(normRes.status).toBe(504);
-    const body = await jsonRes(normRes);
-    expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("OPENCODE_NORMALIZE_TIMEOUT");
-    expect(body.runnerStatus.fallbackUsed).toBe(false);
-    const progressRes = await req(app, `/api/tasks/${taskId}/agent/normalize-runs/${body.runId}/progress`);
-    expect(progressRes.status).toBe(200);
-    const progress = await jsonRes(progressRes);
-    expect(progress.stage).toBe("failed");
-    expect(progress.error.code).toBe("OPENCODE_NORMALIZE_TIMEOUT");
-    expect(progress.timeoutMs).toBe(body.runnerStatus.timeoutMs);
-    await expectProductionListUnchanged(0);
+    try {
+      const normRes = await req(app, `/api/tasks/${taskId}/agent/normalize-requirements`, { method: "POST" });
+      expect(normRes.status).toBe(504);
+      const body = await jsonRes(normRes);
+      expect(body.ok).toBe(false);
+      expect(body.error.code).toBe("OPENCODE_NORMALIZE_TIMEOUT");
+      expect(body.runnerStatus.fallbackUsed).toBe(false);
+      const progressRes = await req(app, `/api/tasks/${taskId}/agent/normalize-runs/${body.runId}/progress`);
+      expect(progressRes.status).toBe(200);
+      const progress = await jsonRes(progressRes);
+      expect(progress.stage).toBe("failed");
+      expect(progress.error.code).toBe("OPENCODE_NORMALIZE_TIMEOUT");
+      expect(progress.timeoutMs).toBe(body.runnerStatus.timeoutMs);
+      await expectProductionListUnchanged(0);
+    } finally {
+      if (originalRecoveryWaitMs === undefined) delete process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS;
+      else process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS = originalRecoveryWaitMs;
+    }
+  });
+
+  it("normalize-requirements keeps timeout runs non-terminal while waiting for late draft recovery", async () => {
+    await pasteDocument("Narrator: timeout recovery window path");
+    mockOpenCodeAvailable();
+    const originalRecoveryWaitMs = process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS;
+    const originalRecoveryWindowMs = process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WINDOW_MS;
+    process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS = "0";
+    process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WINDOW_MS = "5000";
+    _setSpawnRunner(async (_file, args) => {
+      const draftPath = extractDraftPathFromArgs(args);
+      setTimeout(() => writeValidV2Draft(draftPath, "恢复窗口内落盘的迟到草稿。"), 80);
+      throw new Error("opencode run timed out after 150000ms");
+    });
+
+    try {
+      const normRes = await req(app, `/api/tasks/${taskId}/agent/normalize-requirements`, { method: "POST" });
+      expect(normRes.status).toBe(202);
+      const body = await jsonRes(normRes);
+      expect(body.ok).toBe(true);
+      expect(body.stage).toBe("timeout_recovery");
+      expect(body.progressUrl).toContain(body.runId);
+      expect(body.timeoutBasis.lateDraftRecovery).toBe(true);
+      expect(body.timeoutBasis.lateDraftRecoveryWindowMs).toBe(5000);
+      await expectProductionListUnchanged(0);
+
+      const pendingRes = await req(app, `/api/tasks/${taskId}/agent/normalize-runs/${body.runId}/progress`);
+      expect(pendingRes.status).toBe(200);
+      const pendingProgress = await jsonRes(pendingRes);
+      expect(pendingProgress.stage).toBe("timeout_recovery");
+      expect(pendingProgress.error).toBeUndefined();
+
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const completedRes = await req(app, `/api/tasks/${taskId}/agent/normalize-runs/${body.runId}/progress`);
+      expect(completedRes.status).toBe(200);
+      const completedProgress = await jsonRes(completedRes);
+      expect(completedProgress.stage).toBe("completed");
+      expect(completedProgress.error).toBeUndefined();
+
+      const getRes = await req(app, `/api/tasks/${taskId}/production-list`);
+      const getBody = await jsonRes(getRes);
+      expect(getBody.productionList.version).toBe(1);
+      expect(getBody.productionList.lines[0].transcript).toBe("恢复窗口内落盘的迟到草稿。");
+      expect(getBody.productionList.metadata.recoveryCode).toBe("OPENCODE_LATE_DRAFT_RECOVERY");
+    } finally {
+      if (originalRecoveryWaitMs === undefined) delete process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS;
+      else process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS = originalRecoveryWaitMs;
+      if (originalRecoveryWindowMs === undefined) delete process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WINDOW_MS;
+      else process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WINDOW_MS = originalRecoveryWindowMs;
+      _resetSpawnRunner();
+      _resetExecRunner();
+    }
+  });
+
+  it("normalize-requirements finalizes timeout_recovery as failed when recovery window expires without draft", async () => {
+    await pasteDocument("Narrator: expired timeout recovery path");
+    mockOpenCodeAvailable();
+    const originalRecoveryWaitMs = process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS;
+    const originalRecoveryWindowMs = process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WINDOW_MS;
+    process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS = "0";
+    process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WINDOW_MS = "1";
+    _setSpawnRunner(async () => {
+      throw new Error("opencode run timed out after 150000ms");
+    });
+
+    try {
+      const normRes = await req(app, `/api/tasks/${taskId}/agent/normalize-requirements`, { method: "POST" });
+      expect(normRes.status).toBe(202);
+      const body = await jsonRes(normRes);
+      expect(body.stage).toBe("timeout_recovery");
+      await expectProductionListUnchanged(0);
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const progressRes = await req(app, `/api/tasks/${taskId}/agent/normalize-runs/${body.runId}/progress`);
+      expect(progressRes.status).toBe(200);
+      const progress = await jsonRes(progressRes);
+      expect(progress.stage).toBe("failed");
+      expect(progress.runner.status).toBe("timeout");
+      expect(progress.error.code).toBe("OPENCODE_NORMALIZE_TIMEOUT");
+      expect(progress.message).toContain("no recoverable draft appeared");
+      await expectProductionListUnchanged(0);
+    } finally {
+      if (originalRecoveryWaitMs === undefined) delete process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS;
+      else process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS = originalRecoveryWaitMs;
+      if (originalRecoveryWindowMs === undefined) delete process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WINDOW_MS;
+      else process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WINDOW_MS = originalRecoveryWindowMs;
+      _resetSpawnRunner();
+      _resetExecRunner();
+    }
+  });
+
+  it("normalize-requirements recovers a late draft from the progress endpoint after timeout failure", async () => {
+    await pasteDocument("Narrator: late progress recovery path");
+    mockOpenCodeAvailable();
+    const originalRecoveryWaitMs = process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS;
+    process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS = "0";
+    _setSpawnRunner(async (_file, args) => {
+      const draftPath = extractDraftPathFromArgs(args);
+      setTimeout(() => writeValidV2Draft(draftPath, "进度轮询恢复的迟到草稿。"), 80);
+      throw new Error("opencode run timed out after 150000ms");
+    });
+
+    try {
+      const normRes = await req(app, `/api/tasks/${taskId}/agent/normalize-requirements`, { method: "POST" });
+      expect(normRes.status).toBe(504);
+      const body = await jsonRes(normRes);
+      expect(body.error.code).toBe("OPENCODE_NORMALIZE_TIMEOUT");
+      await expectProductionListUnchanged(0);
+
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const progressRes = await req(app, `/api/tasks/${taskId}/agent/normalize-runs/${body.runId}/progress`);
+      expect(progressRes.status).toBe(200);
+      const progress = await jsonRes(progressRes);
+      expect(progress.stage).toBe("completed");
+      expect(progress.error).toBeUndefined();
+      expect(progress.result.lineCount).toBe(1);
+      expect(progress.message).toBe("Normalize 完成，生产列表已更新");
+
+      const getRes = await req(app, `/api/tasks/${taskId}/production-list`);
+      const getBody = await jsonRes(getRes);
+      expect(getBody.productionList.version).toBe(1);
+      expect(getBody.productionList.lines[0].transcript).toBe("进度轮询恢复的迟到草稿。");
+      expect(getBody.productionList.metadata.recoveryCode).toBe("OPENCODE_LATE_DRAFT_RECOVERY");
+    } finally {
+      if (originalRecoveryWaitMs === undefined) delete process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS;
+      else process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS = originalRecoveryWaitMs;
+      _resetSpawnRunner();
+      _resetExecRunner();
+    }
+  });
+
+  it("normalize-requirements recovers a late draft when listing normalize runs", async () => {
+    await pasteDocument("Narrator: late runs endpoint recovery path");
+    mockOpenCodeAvailable();
+    const originalRecoveryWaitMs = process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS;
+    process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS = "0";
+    _setSpawnRunner(async (_file, args) => {
+      const draftPath = extractDraftPathFromArgs(args);
+      setTimeout(() => writeValidV2Draft(draftPath, "运行列表恢复的迟到草稿。"), 80);
+      throw new Error("opencode run timed out after 150000ms");
+    });
+
+    try {
+      const normRes = await req(app, `/api/tasks/${taskId}/agent/normalize-requirements`, { method: "POST" });
+      expect(normRes.status).toBe(504);
+      const body = await jsonRes(normRes);
+      await expectProductionListUnchanged(0);
+
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const runsRes = await req(app, `/api/tasks/${taskId}/agent/runs?kind=normalize`);
+      expect(runsRes.status).toBe(200);
+      const runsBody = await jsonRes(runsRes);
+      const recoveredRun = runsBody.runs.find((run: any) => run.runId === body.runId);
+      expect(recoveredRun.status).toBe("succeeded");
+      expect(recoveredRun.error).toBeNull();
+
+      const getRes = await req(app, `/api/tasks/${taskId}/production-list`);
+      const getBody = await jsonRes(getRes);
+      expect(getBody.productionList.version).toBe(1);
+      expect(getBody.productionList.lines[0].transcript).toBe("运行列表恢复的迟到草稿。");
+      expect(getBody.productionList.metadata.recoveryCode).toBe("OPENCODE_LATE_DRAFT_RECOVERY");
+    } finally {
+      if (originalRecoveryWaitMs === undefined) delete process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS;
+      else process.env.OPENCODE_TIMEOUT_DRAFT_RECOVERY_WAIT_MS = originalRecoveryWaitMs;
+      _resetSpawnRunner();
+      _resetExecRunner();
+    }
   });
 
   it("normalize-requirements returns 422 for invalid JSON draft and does not create fallback v1", async () => {

@@ -309,7 +309,8 @@ describe("Quality candidate extraction filtering", () => {
     expect(result.qualitySummary.skippedByReason.metadata_title).toBeGreaterThan(0);
     expect(result.qualitySummary.skippedByReason.metadata_scrape_time).toBeGreaterThan(0);
     expect(result.qualitySummary.skippedByReason.url_only).toBeGreaterThan(0);
-    expect(result.qualitySummary.skippedByReason.label_only).toBeGreaterThanOrEqual(3);
+    expect(result.qualitySummary.skippedByReason.label_only).toBeGreaterThanOrEqual(1);
+    expect(result.qualitySummary.skippedByReason.voice_metadata).toBeGreaterThanOrEqual(2);
   });
 });
 

@@ -7,7 +7,7 @@
  * - Key resolver: DB-first resolution
  */
 
-import { vi, describe, it, expect, beforeEach, afterAll } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { Hono } from "hono";
 import fs from "node:fs";
 import path from "node:path";
@@ -134,6 +134,10 @@ describe("Settings API", () => {
     if (testState.tmpDir && fs.existsSync(testState.tmpDir)) {
       fs.rmSync(testState.tmpDir, { recursive: true, force: true });
     }
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   // ── GET /api/settings ────────────────────────────────────────────────────
@@ -333,6 +337,79 @@ describe("Settings API", () => {
       const body = await res.json();
       expect(body.ok).toBe(false);
       expect(body.error).toBe("MISSING_API_KEY");
+      expect(body.authValid).toBe(false);
+      expect(body.checkedEndpoint).toBe("audio_speech");
+      expect(body.errorCode).toBe("MISSING_API_KEY");
+    });
+
+    it("does not report success when models is 200 but audio auth probe is 401", async () => {
+      const secret = "sk-invalid-settings-test-12345678";
+      await req(app, "/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ openRouterApiKey: secret }),
+      });
+
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({ data: [] }), { status: 200, headers: { "content-type": "application/json" } }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "User not found." } }), { status: 401, headers: { "content-type": "application/json" } }));
+      vi.stubGlobal("fetch", mockFetch);
+
+      const res = await req(app, "/api/settings/test", { method: "POST" });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      expect(body.ok).toBe(false);
+      expect(body.authValid).toBe(false);
+      expect(body.modelAvailable).toBe(true);
+      expect(body.checkedEndpoint).toBe("audio_speech");
+      expect(body.errorCode).toBe("INVALID_API_KEY");
+      expect(body.providerMessage).toBe("User not found.");
+      expect(body.actionMessage).toContain("Settings");
+      expect(JSON.stringify(body)).not.toContain(secret);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("maps audio auth probe 403 to INVALID_API_KEY without leaking the key", async () => {
+      const secret = "sk-forbidden-settings-test-12345678";
+      await req(app, "/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ openRouterApiKey: secret }),
+      });
+
+      vi.stubGlobal("fetch", vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({ data: [] }), { status: 200, headers: { "content-type": "application/json" } }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "Forbidden" } }), { status: 403, headers: { "content-type": "application/json" } })));
+
+      const res = await req(app, "/api/settings/test", { method: "POST" });
+      const body = await res.json();
+
+      expect(body.ok).toBe(false);
+      expect(body.authValid).toBe(false);
+      expect(body.errorCode).toBe("INVALID_API_KEY");
+      expect(JSON.stringify(body)).not.toContain(secret);
+    });
+
+    it("passes only when the audio auth probe returns audio", async () => {
+      await req(app, "/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ openRouterApiKey: "sk-valid-settings-test-12345678" }),
+      });
+
+      vi.stubGlobal("fetch", vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({ data: [] }), { status: 200, headers: { "content-type": "application/json" } }))
+        .mockResolvedValueOnce(new Response(new Uint8Array([0x00, 0x01]), { status: 200, headers: { "content-type": "audio/pcm" } })));
+
+      const res = await req(app, "/api/settings/test", { method: "POST" });
+      const body = await res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.authValid).toBe(true);
+      expect(body.modelAvailable).toBe(true);
+      expect(body.checkedEndpoint).toBe("audio_speech");
+      expect(body.error).toBeNull();
     });
   });
 

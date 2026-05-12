@@ -238,6 +238,8 @@ export function initSchema() {
       generation_status TEXT NOT NULL DEFAULT 'draft',
       related_job_id TEXT,
       related_asset_id INTEGER,
+      last_generation_signature TEXT,
+      last_generation_snapshot_json TEXT,
       generation_error_code TEXT,
       generation_error_message TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -347,6 +349,8 @@ export function initSchema() {
   addColumnIfMissing(rawDb, "voice_line", "generation_status", "TEXT NOT NULL DEFAULT 'draft'");
   addColumnIfMissing(rawDb, "voice_line", "related_job_id", "TEXT");
   addColumnIfMissing(rawDb, "voice_line", "related_asset_id", "INTEGER");
+  addColumnIfMissing(rawDb, "voice_line", "last_generation_signature", "TEXT");
+  addColumnIfMissing(rawDb, "voice_line", "last_generation_snapshot_json", "TEXT");
   addColumnIfMissing(rawDb, "voice_line", "updated_at", "INTEGER");
   // Generation error tracking fields (MIN-2)
   addColumnIfMissing(rawDb, "voice_line", "generation_error_code", "TEXT");

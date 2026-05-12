@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import { Search, Filter, Play, Loader2, AlertTriangle, AlertCircle, RefreshCw } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import type { VoiceStatus } from "../types";
+import { formatVoiceCompactLabel, getVoiceDisplayMeta, voiceMatchesQuery } from "../utils/voiceDisplay";
 
 type TabFilter = "all" | "verified" | "candidate" | "custom" | "failed";
 
@@ -16,7 +17,7 @@ export function VoicesPage() {
 
   // Filter voices
   const filteredVoices = voices.filter((v) => {
-    if (searchQuery && !v.name.toLowerCase().includes(searchQuery.toLowerCase()) && !v.role.includes(searchQuery)) {
+    if (searchQuery && !voiceMatchesQuery(v, searchQuery)) {
       return false;
     }
     switch (activeTab) {
@@ -198,11 +199,12 @@ export function VoicesPage() {
               </div>
             ) : (
               <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">
-            {filteredVoices.map((v) => (
-              <div
-                key={v.name}
-                className={`p-3 rounded-lg border cursor-pointer transition-colors ${
-                  selectedVoice === v.name
+            {filteredVoices.map((v) => {
+              const displayMeta = getVoiceDisplayMeta(v.name);
+              return <div
+                 key={v.name}
+                 className={`p-3 rounded-lg border cursor-pointer transition-colors ${
+                   selectedVoice === v.name
                     ? "bg-accent-subtle border-accent/30"
                     : "bg-bg-surface border-border hover:border-border-subtle hover:bg-bg-hover"
                 }`}
@@ -213,7 +215,7 @@ export function VoicesPage() {
                     <div className={`w-2 h-2 rounded-full ${
                       v.status === "success" ? "bg-success" : v.status === "warning" ? "bg-warning" : "bg-error"
                     }`} />
-                    <span className="font-semibold text-text-primary">{v.name}</span>
+                    <span className="font-semibold text-text-primary">{formatVoiceCompactLabel(v.name)}</span>
                     {v.isDefault && (
                       <span className="px-1.5 py-0.5 rounded text-[10px] bg-bg-sunken text-text-secondary border border-border-subtle">
                         默认
@@ -225,8 +227,12 @@ export function VoicesPage() {
 
                 <div className="flex flex-col gap-1 text-[11px] text-text-secondary mb-3">
                   <div className="flex">
-                    <span className="w-12 text-text-tertiary">角色:</span>
-                    <span className="text-text-primary truncate">{v.role || "--"}</span>
+                    <span className="w-12 text-text-tertiary">声线:</span>
+                    <span className="text-text-primary truncate">{displayMeta.toneDescription || v.role || "--"}</span>
+                  </div>
+                  <div className="flex">
+                    <span className="w-12 text-text-tertiary">英文:</span>
+                    <span className="text-text-primary font-mono truncate">{v.name}</span>
                   </div>
                   <div className="flex">
                     <span className="w-12 text-text-tertiary">供应商:</span>
@@ -274,8 +280,8 @@ export function VoicesPage() {
                     </button>
                   </div>
                 </div>
-              </div>
-            ))}
+              </div>;
+            })}
               </div>
             )}
           </>

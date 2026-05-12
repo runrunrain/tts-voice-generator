@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import { ChevronDown, ChevronUp, Plus, Trash2, Loader2, AlertTriangle, AlertCircle, CheckCircle2, Copy, FileText, Zap } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import type { AudioFormat, SpeakerConfig, AssemblePromptRequest, AssemblePromptSuccess } from "../types";
+import { formatVoiceOptionLabel } from "../utils/voiceDisplay";
 
 const MAX_SPEAKERS = 2;
 
@@ -329,7 +330,7 @@ export function DirectorPage() {
                       value={speaker.voice}
                       onChange={(e) => updateSpeaker(speaker.id, "voice", e.target.value)}
                     >
-                      {voiceOptions.map((v) => <option key={v} value={v}>{v}</option>)}
+                      {voiceOptions.map((v) => <option key={v} value={v}>{formatVoiceOptionLabel(v)}</option>)}
                     </select>
                   </div>
                   <div className="flex items-center gap-2 text-sm">
@@ -388,7 +389,7 @@ export function DirectorPage() {
               onChange={(e) => setVoice(e.target.value)}
               disabled={assemblePhase === "loading"}
             >
-              {voiceOptions.map((v) => <option key={v} value={v}>{v}</option>)}
+              {voiceOptions.map((v) => <option key={v} value={v}>{formatVoiceOptionLabel(v)}</option>)}
             </select>
 
             <div className="flex items-center bg-bg-surface border border-border rounded-md overflow-hidden text-sm">

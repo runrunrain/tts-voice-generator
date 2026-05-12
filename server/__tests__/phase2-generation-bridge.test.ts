@@ -21,7 +21,7 @@ import path from "node:path";
 
 // ─── Mock env with isolated temp DB ──────────────────────────────────────────
 
-const testState = vi.hoisted(() => ({ tmpDir: "", dbFilePath: "", mockApiKeyConfigured: false, mockGenerateSuccess: false, lastGenerateRequest: null as any }));
+const testState = vi.hoisted(() => ({ tmpDir: "", dbFilePath: "", mockApiKeyConfigured: false, mockGenerateSuccess: false, lastGenerateRequest: null as any, generateCallCount: 0 }));
 
 vi.mock("../src/config/env.js", async () => {
   const nc = await import("node:crypto");
@@ -80,6 +80,7 @@ vi.mock("../src/services/key-resolver.js", () => ({
 vi.mock("../src/services/tts-generator.js", () => ({
   generateSpeech: (request: unknown) => {
     testState.lastGenerateRequest = request;
+    testState.generateCallCount += 1;
     if (testState.mockGenerateSuccess) {
       return Promise.resolve({
         status: 200,
@@ -252,6 +253,10 @@ describe("Phase 2: Generation Bridge", () => {
     _setExecRunner(async () => {
       throw new Error("opencode unavailable in test environment");
     });
+    testState.mockApiKeyConfigured = false;
+    testState.mockGenerateSuccess = false;
+    testState.lastGenerateRequest = null;
+    testState.generateCallCount = 0;
     app = createApp();
   });
 
@@ -344,6 +349,7 @@ describe("Phase 2: Generation Bridge", () => {
       expect(body.error.code).toBe("VERSION_CONFLICT");
       expect(body.error.metadata.expectedVersion).toBe(version + 99);
       expect(body.error.metadata.currentVersion).toBe(version);
+      expect(JSON.stringify(body)).not.toContain("PRODUCTION_LIST_QUALITY_GATE_FAILED");
     });
 
     it("returns 404 for non-existent lineIds", async () => {
@@ -357,6 +363,7 @@ describe("Phase 2: Generation Bridge", () => {
       const body = await jsonRes(res);
       expect(body.ok).toBe(false);
       expect(body.error.code).toBe("LINES_NOT_FOUND");
+      expect(JSON.stringify(body)).not.toContain("PRODUCTION_LIST_QUALITY_GATE_FAILED");
     });
 
     it("returns 400 for invalid JSON body", async () => {
@@ -388,6 +395,7 @@ describe("Phase 2: Generation Bridge", () => {
       const body = await jsonRes(res);
 
       expect(body.ok).toBe(true);
+      expect(JSON.stringify(body)).not.toContain("PRODUCTION_LIST_QUALITY_GATE_FAILED");
       expect(body.generation.taskId).toBe(taskId);
       expect(body.generation.version).toBe(version);
       expect(body.generation.requestedCount).toBe(1);
@@ -404,6 +412,52 @@ describe("Phase 2: Generation Bridge", () => {
       const db = getDb();
       const updatedLine = db.select().from(voiceLine).where(eq(voiceLine.lineId, lineIds[0])).get();
       expect(updatedLine?.generationStatus).toBe("failed");
+    });
+
+    it("accepts the locked user single-line generation contract without production-list quality gate", async () => {
+      const { taskId, lineIds, version } = await setupProductionList(app);
+      expect(lineIds.length).toBeGreaterThan(0);
+
+      const res = await req(app, `/api/tasks/${taskId}/production-list/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expectedVersion: version,
+          lineIds: [lineIds[0]],
+          skipCompleted: true,
+          source: "user",
+          confirm: true,
+        }),
+      });
+      const body = await jsonRes(res);
+
+      expect(body.ok).toBe(true);
+      expect(JSON.stringify(body)).not.toContain("PRODUCTION_LIST_QUALITY_GATE_FAILED");
+      expect(body.generation.version).toBe(version);
+      expect(body.generation.requestedCount).toBe(1);
+      expect(body.generation.results).toHaveLength(1);
+      expect(body.generation.results[0].lineId).toBe(lineIds[0]);
+      expect(body.generation.results[0].errorCode).toBe("MISSING_API_KEY");
+    });
+
+    it("keeps automated generation behind explicit confirmation and outside normalize quality gate", async () => {
+      const { taskId, lineIds, version } = await setupProductionList(app);
+
+      const res = await req(app, `/api/tasks/${taskId}/production-list/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expectedVersion: version,
+          lineIds: [lineIds[0]],
+          source: "agent",
+          confirm: false,
+        }),
+      });
+      const body = await jsonRes(res);
+
+      expect(res.status).toBe(403);
+      expect(body.error.code).toBe("COST_CONFIRMATION_REQUIRED");
+      expect(JSON.stringify(body)).not.toContain("PRODUCTION_LIST_QUALITY_GATE_FAILED");
     });
 
     it("handles multiple lines failing without API key", async () => {
@@ -555,6 +609,106 @@ describe("Phase 2: Generation Bridge", () => {
       expect(attempted).toBeDefined();
       expect(attempted.status).toBe("failed");
       expect(attempted.errorCode).toBe("MISSING_API_KEY");
+    });
+
+    it("skips unchanged succeeded lines with stored generation signature by default", async () => {
+      const { taskId, lineIds, version } = await setupProductionList(app);
+      testState.mockApiKeyConfigured = true;
+      testState.mockGenerateSuccess = true;
+
+      const firstRes = await req(app, `/api/tasks/${taskId}/production-list/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lineIds: [lineIds[0]], expectedVersion: version }),
+      });
+      const firstBody = await jsonRes(firstRes);
+      expect(firstBody.generation.succeededCount).toBe(1);
+
+      const db = getDb();
+      const generatedLine = db.select().from(voiceLine).where(eq(voiceLine.lineId, lineIds[0])).get();
+      expect(generatedLine?.generationStatus).toBe("succeeded");
+      expect(generatedLine?.lastGenerationSignature).toMatch(/^[a-f0-9]{64}$/);
+
+      testState.generateCallCount = 0;
+      const secondRes = await req(app, `/api/tasks/${taskId}/production-list/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lineIds: [lineIds[0]], expectedVersion: version, skipCompleted: true }),
+      });
+      const secondBody = await jsonRes(secondRes);
+
+      expect(secondBody.ok).toBe(true);
+      expect(secondBody.generation.succeededCount).toBe(0);
+      expect(secondBody.generation.skippedCount).toBe(1);
+      expect(secondBody.generation.results[0].status).toBe("skipped");
+      expect(secondBody.generation.results[0].errorMessage).toContain("signature is unchanged");
+      expect(testState.generateCallCount).toBe(0);
+    });
+
+    it("regenerates a succeeded line when transcript changes after the stored signature", async () => {
+      const { taskId, lineIds, version } = await setupProductionList(app);
+      testState.mockApiKeyConfigured = true;
+      testState.mockGenerateSuccess = true;
+
+      await req(app, `/api/tasks/${taskId}/production-list/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lineIds: [lineIds[0]], expectedVersion: version }),
+      });
+
+      const getRes = await req(app, `/api/tasks/${taskId}/production-list`);
+      const getBody = await jsonRes(getRes);
+      const currentLine = getBody.productionList.lines.find((line: any) => line.id === lineIds[0]);
+      expect(currentLine.lastGenerationSignature).toMatch(/^[a-f0-9]{64}$/);
+
+      const changedTranscript = "Changed transcript after director review";
+      const putBody = await putProductionList(app, taskId, [{
+        ...currentLine,
+        text: changedTranscript,
+        transcript: changedTranscript,
+      }], getBody.productionList.version, {
+        speakers: getBody.productionList.speakers,
+        promptProfiles: getBody.productionList.promptProfiles,
+        directorProfiles: getBody.productionList.directorProfiles,
+        metadata: getBody.productionList.metadata,
+      });
+
+      testState.generateCallCount = 0;
+      const regenRes = await req(app, `/api/tasks/${taskId}/production-list/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lineIds: [lineIds[0]], expectedVersion: putBody.productionList.version, skipCompleted: true }),
+      });
+      const regenBody = await jsonRes(regenRes);
+
+      expect(regenBody.ok).toBe(true);
+      expect(regenBody.generation.succeededCount).toBe(1);
+      expect(testState.generateCallCount).toBe(1);
+      expect(testState.lastGenerateRequest.directorSnapshot.transcript).toBe(changedTranscript);
+    });
+
+    it("forceRegenerate retries an unchanged succeeded line", async () => {
+      const { taskId, lineIds, version } = await setupProductionList(app);
+      testState.mockApiKeyConfigured = true;
+      testState.mockGenerateSuccess = true;
+
+      await req(app, `/api/tasks/${taskId}/production-list/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lineIds: [lineIds[0]], expectedVersion: version }),
+      });
+
+      testState.generateCallCount = 0;
+      const res = await req(app, `/api/tasks/${taskId}/production-list/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lineIds: [lineIds[0]], expectedVersion: version, skipCompleted: true, forceRegenerate: true }),
+      });
+      const body = await jsonRes(res);
+
+      expect(body.ok).toBe(true);
+      expect(body.generation.succeededCount).toBe(1);
+      expect(testState.generateCallCount).toBe(1);
     });
 
     // MIN-1: skip "pending" lines by default to align with frontend ACTIVE_STATUSES
@@ -723,14 +877,14 @@ describe("Phase 2: Generation Bridge", () => {
       expect(body.ok).toBe(true);
       expect(body.generation.succeededCount).toBe(1);
       expect(testState.lastGenerateRequest).toBeTruthy();
-      expect(testState.lastGenerateRequest.input).toContain("TTS the following script:");
-      expect(testState.lastGenerateRequest.input).toContain("# AUDIO PROFILE");
-      expect(testState.lastGenerateRequest.input).toContain("## THE SCENE");
-      expect(testState.lastGenerateRequest.input).toContain("### DIRECTOR'S NOTES");
-      expect(testState.lastGenerateRequest.input).toContain("Style:");
-      expect(testState.lastGenerateRequest.input).toContain("Pacing:");
-      expect(testState.lastGenerateRequest.input).toContain("### SAMPLE CONTEXT");
-      expect(testState.lastGenerateRequest.input).toContain("#### TRANSCRIPT");
+      expect(testState.lastGenerateRequest.input).toContain("请为以下脚本生成语音：");
+      expect(testState.lastGenerateRequest.input).toContain("# 音频档案");
+      expect(testState.lastGenerateRequest.input).toContain("## 场景");
+      expect(testState.lastGenerateRequest.input).toContain("### 导演备注");
+      expect(testState.lastGenerateRequest.input).toContain("风格：");
+      expect(testState.lastGenerateRequest.input).toContain("节奏：");
+      expect(testState.lastGenerateRequest.input).toContain("### 示例上下文");
+      expect(testState.lastGenerateRequest.input).toContain("#### 台词");
       expect(testState.lastGenerateRequest.directorSnapshot.transcript).toBeTruthy();
       expect(testState.lastGenerateRequest.input).toContain(testState.lastGenerateRequest.directorSnapshot.transcript);
     });

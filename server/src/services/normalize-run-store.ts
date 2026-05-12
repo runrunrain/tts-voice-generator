@@ -18,6 +18,7 @@ import crypto from "node:crypto";
 import { env } from "../config/env.js";
 import type { VoiceLine, Speaker } from "../domain/validators.js";
 import type { CandidateLine, VoiceMetadata } from "./opencode-runner.js";
+import { formatVoiceSelectionGuideForPrompt } from "../utils/voice.js";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -125,6 +126,7 @@ export type NormalizeRunStage =
   | "queued"
   | "preprocessing"
   | "opencode_running"
+  | "timeout_recovery"
   | "draft_detected"
   | "validating"
   | "committing"
@@ -397,6 +399,10 @@ export function writeCandidateLinesArtifact(candidateLinesPath: string, candidat
     generatedAt: new Date().toISOString(),
     count: candidateLines.length,
     voiceMetadataCount: voiceMetadata.length,
+    voiceSelectionGuide: {
+      policy: "Choose a Gemini voice by matching source metadata, role, scene, emotion, and transcript semantics. Candidate voice is a hint; explicit source voice metadata is stronger evidence.",
+      voices: formatVoiceSelectionGuideForPrompt(),
+    },
     candidateLines,
     voiceMetadata,
   });
@@ -450,47 +456,53 @@ export function writeNormalizeRequestBundle(bundle: NormalizeRequestBundle, requ
  */
 export function writeInstructionMarkdown(instructionPath: string, context: InstructionContext): void {
   const lines: string[] = [
-    `# Normalize Instructions`,
+    `# 标准化指令`,
     ``,
-    `## Task`,
-    `- Title: ${context.taskTitle}`,
-    `- Description: ${context.taskDescription}`,
-    `- Target Dataset: ${context.targetDatasetType}`,
-    `- Language: ${context.language}`,
+    `## 任务`,
+    `- 标题：${context.taskTitle}`,
+    `- 描述：${context.taskDescription}`,
+    `- 目标数据集：${context.targetDatasetType}`,
+    `- 输出语言：${context.language}`,
     ``,
-    `## Conversion Goal`,
-    `Convert the referenced requirement documents into a valid Prompt-Structured Production List v2.`,
+    `## 转换目标`,
+    `将引用的需求文档转换为合法的 Prompt-Structured Production List v2。`,
+    `所有导演配置值必须使用简体中文；字段名、id、Gemini voice 名称、model 名称保持英文枚举。`,
     ``,
-    `## Prompt-Structured Production List v2 Requirements`,
-    `- Output schemaVersion must be "tts.production-list.v2".`,
-    `- Output must contain top-level promptProfiles and lines arrays.`,
-    `- Each prompt profile must contain non-empty audioProfile, scene, directorNotes, sampleContext, and 1 to 2 speakers.`,
-    `- For every promptProfile, produce concise director-performance fields: style, pacing, accent, emotion, and performanceNotes.`,
-    `- style is the overall performance style; pacing is speed/rhythm/pause pattern; accent is pronunciation/diction and may be empty when unsupported; emotion is the baseline tone; performanceNotes contains residual delivery guidance.`,
-    `- Each line must contain transcript and promptProfileId; promptProfileId must reference an existing profile.`,
-    `- A profile may be reused by many lines when role, scene, and delivery style are shared.`,
-    `- Do not write placeholder prompt fields such as TODO, TBD, N/A, 待补充, 暂无, 空, or 无.`,
-    `- text is only a compatibility alias for transcript and must match transcript if present.`,
-    `- Derive line.speakerLabel, line.voice, and promptProfiles[].speakers from source section headings plus 声线/音色/角色/说话人/speaker/voice/character/role metadata.`,
-    `- Multiple distinct source roles or voice metadata sections must not collapse to all Narrator/Zephyr. Voice names may be reused by reasonable groups, but speakerLabel and profile speakers must preserve role differences.`,
-    `- Speaker limits are profile-scoped: each promptProfile may contain at most 2 speakers; the full dataset may contain different speakers across different profiles.`,
-    `- Each promptProfile's speakers must match the role and voice metadata of the lines bound to that profile.`,
-    `- Keep every line transcript/text clean: only words intended to be spoken belong there.`,
-    `- Move stage directions, mood labels, bracketed delivery hints, and labels such as Style:, Pacing:, Accent:, Emotion:, Director's Notes:, Performance Notes:, 音色:, 风格:, 情绪:, 语速: out of transcript/text into line.style or promptOverride.`,
-    `- Preserve line.style when it changes delivery for that line. Do not omit style merely because it is optional; avoid only repeated empty/default values.`,
-    `- Do not invent unsupported inline audio tags and do not insert free-form tags into transcript. Use natural-language style fields unless a future allowlist explicitly enables tags.`,
+    `## Prompt-Structured Production List v2 要求`,
+    `- 输出 schemaVersion 必须为 "tts.production-list.v2"。`,
+    `- 输出必须包含顶层 promptProfiles 和 lines 数组。`,
+    `- 每个 promptProfile 必须包含非空且为简体中文的 audioProfile、scene、directorNotes、sampleContext，以及 1 到 2 个 speakers。`,
+    `- 每个 promptProfile 都应生成简洁中文导演表演字段：style、pacing、accent、emotion、performanceNotes。`,
+    `- style 表示整体表演风格；pacing 表示速度、节奏和停顿；accent 表示发音/咬字要求；emotion 表示基础情绪；performanceNotes 保存其他表演指导。`,
+    `- 每行必须包含 transcript 和 promptProfileId；promptProfileId 必须引用已存在的 profile。`,
+    `- 当角色、场景和表演方式一致时，可以复用同一个 profile。`,
+    `- 不要写入 TODO、TBD、N/A、待补充、暂无、空、无 等占位字段。`,
+    `- text 只是 transcript 的兼容别名；如果出现，必须与 transcript trim 后一致。`,
+    `- 音色选择必须匹配真实台词和角色语境，不能只使用默认值。候选行 voice 是提示；原文明确的 声线/音色 元数据优先级更高。`,
+    `- 可用 Gemini 音色指南：`,
+    formatVoiceSelectionGuideForPrompt(),
+    `- 只有在角色、章节标题、源元数据和台词都没有更好信号时，才使用 Zephyr 作为中性明亮兜底音色。`,
+    `- 高能战斗/愤怒/紧急台词优先 Fenrir 或 Alnilam；长者/权威/讲解优先 Charon、Sadaltager、Rasalgethi 或 Orus；年轻/俏皮台词优先 Puck 或 Sadachbia；温柔/安抚台词优先 Achernar 或 Vindemiatrix；市井口语优先 Zubenelgenubi 或 Aoede。`,
+    `- 从源章节标题以及 声线/音色/角色/说话人/speaker/voice/character/role 元数据中推导 line.speakerLabel、line.voice 和 promptProfiles[].speakers。`,
+    `- 多个不同角色或音色元数据段不能全部塌缩为 旁白/Zephyr。音色名可以合理复用，但 speakerLabel 和 profile speakers 必须保留角色差异。`,
+    `- 说话人限制是 profile 级别：每个 promptProfile 最多 2 个 speakers；完整数据集可通过多个 profiles 承载不同角色。`,
+    `- 每个 promptProfile 的 speakers 必须匹配绑定到该 profile 的台词角色和音色元数据。`,
+    `- 每行 transcript/text 必须保持干净：只放真正要朗读的词句。`,
+    `- 将舞台说明、情绪标签、括号表演提示，以及 Style:, Pacing:, Accent:, Emotion:, Director's Notes:, Performance Notes:, 音色:, 风格:, 情绪:, 语速: 等标签移出 transcript/text，写入 line.style 或 promptOverride。`,
+    `- 当 line.style 会改变该行表演时必须保留；不要因为可选就删掉明确风格，只避免重复空值/默认值。`,
+    `- 不要发明不支持的内联音频标签，也不要把自由格式标签插入 transcript；请使用自然语言中文风格字段。`,
     ``,
-    `## Business Rules`,
+    `## 业务规则`,
     ...context.businessRules.map((rule, i) => `${i + 1}. ${rule}`),
     ``,
-    `## User Instructions`,
-    context.userInstruction || "(none provided)",
+    `## 用户指令`,
+    context.userInstruction || "（未提供）",
     ``,
-    `## Safety`,
-    `- Only read files listed in normalize-request.json safety.allowedReadPaths`,
-    `- Only write to the file listed in safety.allowedWritePaths`,
-    `- Never include API keys, tokens, or secrets in output`,
-    `- Output must be valid JSON conforming to production-list.schema.json`,
+    `## 安全`,
+    `- 只能读取 normalize-request.json 中 safety.allowedReadPaths 列出的文件。`,
+    `- 只能写入 safety.allowedWritePaths 中列出的文件。`,
+    `- 输出中绝不能包含 API keys、tokens 或 secrets。`,
+    `- 输出必须是符合 production-list.schema.json 的合法 JSON。`,
   ];
 
   const content = lines.join("\n");

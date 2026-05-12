@@ -8,7 +8,7 @@ import { OpenRouterProvider, sanitizeText } from "./openrouter-provider.js";
 import { acquireSlot, releaseSlot } from "./concurrency.js";
 import { canonicalizeVoice } from "../utils/voice.js";
 import { computeSha256, writeAudioFile } from "../utils/audio-fs.js";
-import { resolveTtsFormat, wrapPcm16LeToWav, type AudioFormat } from "../utils/audio-format.js";
+import { isGeminiTtsModel, resolveTtsFormat, wrapPcm16LeToWav, type AudioFormat } from "../utils/audio-format.js";
 
 export const GenerateSpeechSchema = z.object({
   model: z.string().min(1),
@@ -58,6 +58,7 @@ export async function generateSpeech(
 ): Promise<GenerateSpeechResult> {
   const canonicalVoice = canonicalizeVoice(req.voice);
   const formatPlan = resolveTtsFormat(req.model, req.responseFormat as AudioFormat);
+  const effectiveProviderOptions = buildEffectiveProviderOptions(req.model, canonicalVoice, req.providerOptions || undefined);
 
   if (!isOpenRouterConfigured()) {
     const jobId = uuidv4();
@@ -167,7 +168,7 @@ export async function generateSpeech(
     inputCharCount: req.input.length,
     status: "running",
     estimatedCost,
-    providerOptions: req.providerOptions ? JSON.stringify(req.providerOptions) : null,
+    providerOptions: effectiveProviderOptions ? JSON.stringify(effectiveProviderOptions) : null,
     directorSnapshot: req.directorSnapshot ? JSON.stringify(req.directorSnapshot) : null,
     source: sourceContext.source,
     agentConversationId: sourceContext.agentConversationId ?? null,
@@ -183,7 +184,7 @@ export async function generateSpeech(
       input: req.input,
       voice: canonicalVoice,
       responseFormat: formatPlan.upstreamFormat,
-      providerOptions: req.providerOptions || undefined,
+      providerOptions: effectiveProviderOptions,
     });
 
     if (result.ok) {
@@ -297,6 +298,50 @@ export async function generateSpeech(
       },
     };
   }
+}
+
+function buildEffectiveProviderOptions(
+  model: string,
+  canonicalVoice: string,
+  providerOptions?: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  if (!isGeminiTtsModel(model)) return providerOptions;
+
+  const base = providerOptions ? { ...providerOptions } : {};
+  const existingGenerationConfig = isPlainObject(base.generationConfig)
+    ? base.generationConfig as Record<string, unknown>
+    : {};
+  const existingSpeechConfig = isPlainObject(existingGenerationConfig.speechConfig)
+    ? existingGenerationConfig.speechConfig as Record<string, unknown>
+    : {};
+  const existingVoiceConfig = isPlainObject(existingSpeechConfig.voiceConfig)
+    ? existingSpeechConfig.voiceConfig as Record<string, unknown>
+    : {};
+  const existingPrebuiltVoiceConfig = isPlainObject(existingVoiceConfig.prebuiltVoiceConfig)
+    ? existingVoiceConfig.prebuiltVoiceConfig as Record<string, unknown>
+    : {};
+
+  return {
+    ...base,
+    generationConfig: {
+      ...existingGenerationConfig,
+      responseModalities: ["AUDIO"],
+      speechConfig: {
+        ...existingSpeechConfig,
+        voiceConfig: {
+          ...existingVoiceConfig,
+          prebuiltVoiceConfig: {
+            ...existingPrebuiltVoiceConfig,
+            voiceName: canonicalVoice,
+          },
+        },
+      },
+    },
+  };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 export function estimateCost(charCount: number): string {

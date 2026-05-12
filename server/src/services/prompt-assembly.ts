@@ -102,7 +102,7 @@ export function assemblePrompt(input: PromptAssemblyInput): PromptAssemblyResult
     if (usedLegacy) {
       warnings.push({
         code: "LEGACY_VOICE_ALIAS",
-        message: `Speaker "${s.label}" uses legacy voice alias "${s.voice}", canonicalized to "${canonicalVoice}".`,
+        message: `说话人“${s.label}”使用了旧音色别名“${s.voice}”，已规范为“${canonicalVoice}”。`,
         field: `speakers[${s.id}].voice`,
       });
     }
@@ -121,7 +121,7 @@ export function assemblePrompt(input: PromptAssemblyInput): PromptAssemblyResult
   if (!input.audioProfile.trim()) {
     warnings.push({
       code: "SUGGEST_AUDIO_PROFILE",
-      message: "Audio Profile is empty. Consider adding audio quality/style guidance for better results.",
+      message: "音频档案为空。建议补充音质、声线和角色身份说明，以获得更稳定的效果。",
       field: "audioProfile",
     });
   }
@@ -129,7 +129,7 @@ export function assemblePrompt(input: PromptAssemblyInput): PromptAssemblyResult
   if (!input.scene.trim()) {
     warnings.push({
       code: "SUGGEST_SCENE",
-      message: "Scene description is empty. Consider adding context about the setting or environment.",
+      message: "场景说明为空。建议补充空间、氛围和上下文信息。",
       field: "scene",
     });
   }
@@ -137,7 +137,7 @@ export function assemblePrompt(input: PromptAssemblyInput): PromptAssemblyResult
   if (!input.directorNotes.trim()) {
     warnings.push({
       code: "SUGGEST_DIRECTOR_NOTES",
-      message: "Director's Notes are empty. Consider adding pacing, emotion, or delivery instructions.",
+      message: "导演备注为空。建议补充节奏、情绪或表演方式。",
       field: "directorNotes",
     });
   }
@@ -145,7 +145,7 @@ export function assemblePrompt(input: PromptAssemblyInput): PromptAssemblyResult
   if (!input.style?.trim() || !input.pacing?.trim() || !input.emotion?.trim()) {
     warnings.push({
       code: "SUGGEST_STYLE_FIELDS",
-      message: "Style, pacing, and emotion are recommended for Gemini TTS director prompts.",
+      message: "建议为 Gemini TTS 导演提示补充风格、节奏和情绪字段。",
       field: "style,pacing,emotion",
     });
   }
@@ -213,43 +213,43 @@ function buildPromptText(params: {
   speakers: NormalizedSpeaker[];
 }): string {
   const primarySpeaker = params.speakers[0];
-  const audioProfileTitle = primarySpeaker?.label || "TTS Voice Profile";
+  const audioProfileTitle = primarySpeaker?.label || "TTS 声音配置";
   const voiceSummary = params.speakers.length > 0
     ? params.speakers.map((speaker) => {
       const namePart = speaker.name ? ` (${speaker.name})` : "";
-      const stylePart = speaker.style ? `, style: ${speaker.style}` : "";
+      const stylePart = speaker.style ? `，风格：${speaker.style}` : "";
       return `${speaker.label}${namePart}: ${speaker.voice}${stylePart}`;
     }).join("; ")
-    : "Use the requested OpenRouter/Gemini voice.";
+    : "使用请求中指定的 OpenRouter/Gemini 音色。";
   const style = mergePromptNotes(
     params.style,
     ...params.speakers.map((speaker) => speaker.style ? `${speaker.label}: ${speaker.style}` : ""),
-    params.lineStyle ? `Line Style Override: ${params.lineStyle}` : "",
-  ) || "Natural, clear delivery that fits the transcript.";
+    params.lineStyle ? `本行风格覆盖：${params.lineStyle}` : "",
+  ) || "自然、清晰，并贴合台词语义的表达。";
 
-  const performanceNotes = params.performanceNotes || "Keep all director metadata out of the spoken transcript.";
+  const performanceNotes = params.performanceNotes || "不要朗读任何导演元数据、字段名或标签，只输出台词正文。";
 
   return [
-    "TTS the following script:",
+    "请为以下脚本生成语音：",
     "",
-    `# AUDIO PROFILE: ${audioProfileTitle}`,
-    `Role/Identity: ${params.audioProfile.trim() || "General natural TTS narration."}`,
-    `Voice: ${voiceSummary}`,
+    `# 音频档案：${audioProfileTitle}`,
+    `角色/身份：${params.audioProfile.trim() || "通用、自然、清晰的中文旁白。"}`,
+    `音色：${voiceSummary}`,
     "",
-    "## THE SCENE",
-    params.scene.trim() || "No specific scene context provided.",
+    "## 场景",
+    params.scene.trim() || "未提供特定场景；按台词上下文自然处理。",
     "",
-    "### DIRECTOR'S NOTES",
-    `Style: ${style}`,
-    `Pacing: ${params.pacing.trim() || "Natural conversational pacing with clear pauses."}`,
-    `Accent: ${params.accent.trim() || "No specific accent requirement; prioritize clear natural diction."}`,
-    `Emotion: ${params.emotion.trim() || "Match the transcript context naturally."}`,
-    `Performance Notes: ${performanceNotes}`,
+    "### 导演备注",
+    `风格：${style}`,
+    `节奏：${params.pacing.trim() || "自然口语节奏，停顿清楚。"}`,
+    `口音/咬字：${params.accent.trim() || "无特定口音要求，优先清晰自然的中文咬字。"}`,
+    `情绪：${params.emotion.trim() || "根据台词上下文自然匹配情绪。"}`,
+    `表演备注：${performanceNotes}`,
     "",
-    "### SAMPLE CONTEXT",
-    params.sampleContext.trim() || "No additional sample context.",
+    "### 示例上下文",
+    params.sampleContext.trim() || "无额外示例上下文。",
     "",
-    "#### TRANSCRIPT",
+    "#### 台词",
     params.transcript.trim(),
   ].join("\n");
 }

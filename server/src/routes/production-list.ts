@@ -17,6 +17,7 @@
 import { Hono } from "hono";
 import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
+import crypto from "node:crypto";
 import { eq, and, desc } from "drizzle-orm";
 import { getDb } from "../db/index.js";
 import { directorProfile as dpTable } from "../db/schema-extended.js";
@@ -64,6 +65,18 @@ import {
 
 const app = new Hono();
 
+type VoiceLineRow = typeof voiceLine.$inferSelect;
+type PromptResolutionSuccess = Extract<ReturnType<typeof resolvePromptAssemblyInput>, { ok: true }>;
+
+type PreparedGeneration = {
+  artifactLine: Record<string, unknown>;
+  promptResolution: PromptResolutionSuccess;
+  assembledPrompt: ReturnType<typeof assemblePrompt>;
+  ttsRequest: GenerateSpeechRequest;
+  signature: string;
+  snapshotJson: string;
+};
+
 function apiError(c: any, requestId: string, status: number, code: string, message: string, category: string, retryable = false, metadata?: unknown) {
   return c.json({ ok: false, requestId, error: { code, message, category, retryable, metadata } }, status);
 }
@@ -85,6 +98,73 @@ function auditLog(entityType: string, entityId: string, operation: string, actor
       createdAt: new Date(),
     }).run();
   } catch { /* non-critical */ }
+}
+
+function stableStringify(value: unknown): string {
+  if (value === undefined) return "null";
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(",")}}`;
+}
+
+function sha256Hex(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function buildGenerationSnapshot(input: {
+  line: VoiceLineRow;
+  lineId: string;
+  artifactLine: Record<string, unknown>;
+  promptResolution: PromptResolutionSuccess;
+  assembledPrompt: ReturnType<typeof assemblePrompt>;
+  ttsRequest: GenerateSpeechRequest;
+}) {
+  const { line, lineId, artifactLine, promptResolution, assembledPrompt, ttsRequest } = input;
+  return {
+    schemaVersion: "tts.line-generation-snapshot.v1",
+    lineId,
+    transcript: line.text,
+    voice: line.voice,
+    model: ttsRequest.model,
+    responseFormat: ttsRequest.responseFormat,
+    promptProfileId: promptResolution.profileId,
+    directorProfileId: line.directorProfileId ?? null,
+    directorOverrideJson: line.directorOverrideJson ?? null,
+    promptOverride: artifactLine.promptOverride ?? null,
+    promptInput: promptResolution.input,
+    assembledPromptHash: sha256Hex(assembledPrompt.prompt),
+    directorSnapshot: assembledPrompt.normalized,
+  };
+}
+
+function prepareGenerationForLine(input: {
+  line: VoiceLineRow;
+  productionArtifact: { lines?: Array<Record<string, unknown>> } | null;
+  artifactProfiles: Array<Record<string, unknown>>;
+}): { ok: true; prepared: PreparedGeneration } | { ok: false; code: string; message: string } {
+  const { line, productionArtifact, artifactProfiles } = input;
+  const lineId = logicalLineId(line);
+  const artifactLine = productionArtifact?.lines?.find((al) => al?.id === lineId) ?? {};
+  const promptResolution = resolvePromptAssemblyInput(line, artifactLine, artifactProfiles as any);
+  if (!promptResolution.ok) {
+    return { ok: false, code: promptResolution.code, message: promptResolution.message };
+  }
+
+  const assembledPrompt = assemblePrompt(promptResolution.input);
+  const ttsRequest: GenerateSpeechRequest = {
+    model: typeof artifactLine.model === "string" ? artifactLine.model : "google/gemini-3.1-flash-tts-preview",
+    input: assembledPrompt.prompt,
+    voice: line.voice,
+    responseFormat: (artifactLine.responseFormat === "pcm" || artifactLine.responseFormat === "mp3" || artifactLine.responseFormat === "wav")
+      ? artifactLine.responseFormat
+      : "wav",
+    directorSnapshot: assembledPrompt.normalized,
+  };
+  const snapshot = buildGenerationSnapshot({ line, lineId, artifactLine, promptResolution, assembledPrompt, ttsRequest });
+  const signature = sha256Hex(stableStringify(snapshot));
+  const snapshotJson = JSON.stringify({ ...snapshot, signature });
+  return { ok: true, prepared: { artifactLine, promptResolution, assembledPrompt, ttsRequest, signature, snapshotJson } };
 }
 
 // ─── GET /api/tasks/:taskId/production-list ────────────────────────────────────
@@ -213,6 +293,8 @@ app.put("/api/tasks/:taskId/production-list", async (c) => {
       generationStatus: line.generationStatus ?? "draft",
       relatedJobId: line.relatedJobId ?? null,
       relatedAssetId: line.relatedAssetId ?? null,
+      lastGenerationSignature: line.lastGenerationSignature ?? null,
+      lastGenerationSnapshotJson: line.lastGenerationSnapshotJson ?? null,
       generationErrorCode: line.generationErrorCode ?? null,
       generationErrorMessage: line.generationErrorMessage ?? null,
       createdAt: now,
@@ -330,6 +412,8 @@ app.patch("/api/tasks/:taskId/production-list", async (c) => {
     generationStatus: line.generationStatus ?? (artifactLinesById.get(logicalLineId(line))?.generationStatus ?? "draft"),
     relatedJobId: line.relatedJobId ?? (artifactLinesById.get(logicalLineId(line))?.relatedJobId ?? null),
     relatedAssetId: line.relatedAssetId ?? (artifactLinesById.get(logicalLineId(line))?.relatedAssetId ?? null),
+    lastGenerationSignature: line.lastGenerationSignature ?? (artifactLinesById.get(logicalLineId(line))?.lastGenerationSignature ?? null),
+    lastGenerationSnapshotJson: line.lastGenerationSnapshotJson ?? (artifactLinesById.get(logicalLineId(line))?.lastGenerationSnapshotJson ?? null),
     generationErrorCode: line.generationErrorCode ?? (artifactLinesById.get(logicalLineId(line))?.generationErrorCode ?? null),
     generationErrorMessage: line.generationErrorMessage ?? (artifactLinesById.get(logicalLineId(line))?.generationErrorMessage ?? null),
   }));
@@ -397,6 +481,8 @@ app.patch("/api/tasks/:taskId/production-list", async (c) => {
       generationStatus: (line as any).generationStatus ?? "draft",
       relatedJobId: (line as any).relatedJobId ?? null,
       relatedAssetId: (line as any).relatedAssetId ?? null,
+      lastGenerationSignature: (line as any).lastGenerationSignature ?? null,
+      lastGenerationSnapshotJson: (line as any).lastGenerationSnapshotJson ?? null,
       generationErrorCode: (line as any).generationErrorCode ?? null,
       generationErrorMessage: (line as any).generationErrorMessage ?? null,
       createdAt: now,
@@ -569,7 +655,7 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
     return apiError(c, requestId, 400, "VALIDATION_ERROR", "Request validation failed.", "validation", false, { issues: parsed.error.flatten() });
   }
 
-  const { expectedVersion, lineIds, skipCompleted, source, confirm } = parsed.data;
+  const { expectedVersion, lineIds, skipCompleted, forceRegenerate, source, confirm } = parsed.data;
 
   // 2.5 Cost guard: non-user sources must explicitly confirm cost action
   if (source !== "user" && !confirm) {
@@ -639,11 +725,12 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
 
   // 6. Filter out ineligible lines
   const results: LineGenerationResult[] = [];
+  const preparedByLineId = new Map<string, PreparedGeneration>();
   const eligibleLines = targetLines.filter((line) => {
     const lineId = logicalLineId(line);
     const genStatus = (line.generationStatus ?? "draft") as LineGenerationStatus;
     // MIN-1: also skip "pending" to align with frontend ACTIVE_STATUSES = ["pending", "running"]
-    if (skipCompleted && (genStatus === "succeeded" || genStatus === "running" || genStatus === "pending")) {
+    if (genStatus === "running" || genStatus === "pending") {
       results.push({
         lineId,
         status: "skipped",
@@ -668,6 +755,36 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
         errorMessage: "Line has no voice configured",
       });
       return false;
+    }
+    const prepared = prepareGenerationForLine({
+      line,
+      productionArtifact: productionArtifact ?? null,
+      artifactProfiles: artifactProfiles as Array<Record<string, unknown>>,
+    });
+    if (prepared.ok) {
+      preparedByLineId.set(lineId, prepared.prepared);
+      if (skipCompleted && genStatus === "succeeded" && !forceRegenerate) {
+        if (!line.lastGenerationSignature) {
+          results.push({
+            lineId,
+            status: "skipped",
+            jobId: line.relatedJobId,
+            assetId: line.relatedAssetId,
+            errorMessage: "Line already succeeded and has no generation snapshot; select it explicitly to force regeneration",
+          });
+          return false;
+        }
+        if (line.lastGenerationSignature === prepared.prepared.signature) {
+          results.push({
+            lineId,
+            status: "skipped",
+            jobId: line.relatedJobId,
+            assetId: line.relatedAssetId,
+            errorMessage: "Line already succeeded and current content/director signature is unchanged",
+          });
+          return false;
+        }
+      }
     }
     return true;
   });
@@ -726,40 +843,50 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
       continue;
     }
 
-    // Build the TTS request from the line data
-    const artifactLine = productionArtifact?.lines?.find((al) => al?.id === lineId) ?? {};
+    let preparedGeneration = preparedByLineId.get(lineId);
+    if (!preparedGeneration) {
+      const preparedResult = prepareGenerationForLine({
+        line,
+        productionArtifact: productionArtifact ?? null,
+        artifactProfiles: artifactProfiles as Array<Record<string, unknown>>,
+      });
+      if (!preparedResult.ok) {
+        db.update(voiceLine).set({
+          generationStatus: "failed",
+          generationErrorCode: preparedResult.code,
+          generationErrorMessage: preparedResult.message,
+          updatedAt: new Date(),
+        }).where(eq(voiceLine.id, line.id)).run();
 
-    const promptResolution = resolvePromptAssemblyInput(line, artifactLine, artifactProfiles as any);
-    if (!promptResolution.ok) {
+        results.push({
+          lineId,
+          status: "failed",
+          errorCode: preparedResult.code,
+          errorMessage: preparedResult.message,
+        });
+        failedCount++;
+        continue;
+      }
+      preparedGeneration = preparedResult.prepared;
+    }
+    if (!preparedGeneration) {
       db.update(voiceLine).set({
         generationStatus: "failed",
-        generationErrorCode: promptResolution.code,
-        generationErrorMessage: promptResolution.message,
+        generationErrorCode: "INTERNAL_ERROR",
+        generationErrorMessage: "Generation preparation failed without details",
         updatedAt: new Date(),
       }).where(eq(voiceLine.id, line.id)).run();
 
       results.push({
         lineId,
         status: "failed",
-        errorCode: promptResolution.code,
-        errorMessage: promptResolution.message,
+        errorCode: "INTERNAL_ERROR",
+        errorMessage: "Generation preparation failed without details",
       });
       failedCount++;
       continue;
     }
-
-    const assembledPrompt = assemblePrompt(promptResolution.input);
-
-    const ttsRequest: GenerateSpeechRequest = {
-      model: typeof artifactLine.model === "string" ? artifactLine.model : "google/gemini-3.1-flash-tts-preview",
-      input: assembledPrompt.prompt,
-      voice: line.voice,
-      responseFormat: (artifactLine.responseFormat === "pcm" || artifactLine.responseFormat === "mp3" || artifactLine.responseFormat === "wav")
-        ? artifactLine.responseFormat
-        : "wav",
-    };
-
-    ttsRequest.directorSnapshot = assembledPrompt.normalized;
+    const ttsRequest = preparedGeneration.ttsRequest;
 
     try {
       const genResult = await generateSpeech(ttsRequest, uuidv4(), { source });
@@ -771,10 +898,24 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
           generationStatus: "succeeded",
           relatedJobId: typeof genBody.jobId === "string" ? genBody.jobId : null,
           relatedAssetId: typeof genBody.assetId === "number" ? genBody.assetId : null,
+          lastGenerationSignature: preparedGeneration.signature,
+          lastGenerationSnapshotJson: preparedGeneration.snapshotJson,
           generationErrorCode: null,
           generationErrorMessage: null,
           updatedAt: new Date(),
         }).where(eq(voiceLine.id, line.id)).run();
+
+        if (line.relatedJobId || line.relatedAssetId) {
+          auditLog("voice_line", lineId, "regenerate", source, {
+            taskId,
+            version: currentVersion,
+            previousJobId: line.relatedJobId ?? null,
+            previousAssetId: line.relatedAssetId ?? null,
+            nextJobId: typeof genBody.jobId === "string" ? genBody.jobId : null,
+            nextAssetId: typeof genBody.assetId === "number" ? genBody.assetId : null,
+            lastGenerationSignature: preparedGeneration.signature,
+          }, requestId);
+        }
 
         results.push({
           lineId,

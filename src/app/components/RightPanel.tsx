@@ -5,6 +5,7 @@ import { useAppState } from "../state/AppContext";
 import type { VoiceProfile } from "../types";
 import { AgentAutomationPanel } from "./tasks/AgentAutomationPanel";
 import { useTaskWorkspaceUi } from "../context/TaskWorkspaceUiContext";
+import { formatVoiceCompactLabel, formatVoiceOptionLabel, getVoiceDisplayMeta } from "../utils/voiceDisplay";
 
 function displaySpeakerLabel(label: string): string {
   const match = label.match(/^Speaker\s+([A-Z])$/i);
@@ -238,7 +239,7 @@ function GenerateOutputPanel() {
         <div className="flex flex-col gap-2 text-sm bg-bg-sunken p-4 rounded-md border border-border-subtle">
           <div className="flex justify-between">
             <span className="text-text-tertiary">音色</span>
-            <span className="text-text-primary">{generateResult.voice}</span>
+            <span className="text-text-primary">{formatVoiceCompactLabel(generateResult.voice)}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-text-tertiary">格式</span>
@@ -491,7 +492,7 @@ function VoicesDetailPanel() {
         }}
       >
         {voices.map((v) => (
-          <option key={v.name} value={v.name}>{v.name}</option>
+          <option key={v.name} value={v.name}>{formatVoiceOptionLabel(v.name, v.role)}</option>
         ))}
       </select>
 
@@ -501,7 +502,7 @@ function VoicesDetailPanel() {
         </div>
         <div>
           <div className="flex items-center gap-2">
-            <h2 className="text-lg font-semibold">{selectedVoice.name}</h2>
+            <h2 className="text-lg font-semibold">{formatVoiceCompactLabel(selectedVoice.name)}</h2>
             {selectedVoice.isDefault && (
               <span className="px-1.5 py-0.5 text-[10px] rounded bg-bg-surface border border-border text-text-secondary">默认</span>
             )}
@@ -523,7 +524,11 @@ function VoicesDetailPanel() {
       <div className="flex flex-col gap-2 text-sm">
         <div className="flex items-center py-1">
           <span className="w-20 text-text-tertiary">角色</span>
-          <span className="text-text-primary">{selectedVoice.role}</span>
+          <span className="text-text-primary">{getVoiceDisplayMeta(selectedVoice.name).toneDescription || selectedVoice.role}</span>
+        </div>
+        <div className="flex items-center py-1">
+          <span className="w-20 text-text-tertiary">英文名</span>
+          <span className="text-text-primary font-mono text-xs">{selectedVoice.name}</span>
         </div>
         <div className="flex items-center py-1">
           <span className="w-20 text-text-tertiary">供应商</span>
@@ -638,7 +643,7 @@ function HistoryPreviewPanel() {
       <div className="flex flex-col gap-2 text-sm bg-bg-sunken p-4 rounded-md border border-border-subtle">
         <div className="flex justify-between">
           <span className="text-text-tertiary">音色</span>
-          <span className="text-text-primary">{record.voice}</span>
+          <span className="text-text-primary">{formatVoiceCompactLabel(record.voice)}</span>
         </div>
         <div className="flex justify-between">
           <span className="text-text-tertiary">格式</span>

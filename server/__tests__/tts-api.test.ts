@@ -326,6 +326,103 @@ describe("TTS Generate API", () => {
       // Verify the upstream request used response_format "pcm"
       const reqBody = JSON.parse((init as RequestInit).body as string);
       expect(reqBody.response_format).toBe("pcm");
+      expect(reqBody.voice).toBe("Zephyr");
+      expect(reqBody.generationConfig?.speechConfig?.voiceConfig?.prebuiltVoiceConfig?.voiceName).toBe("Zephyr");
+      expect(reqBody.generationConfig?.responseModalities).toEqual(["AUDIO"]);
+    });
+
+    it("passes selected Gemini voice through native speechConfig for male-associated voices", async () => {
+      await seedKey(app);
+
+      const fakePcm = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
+      mockFetch.mockResolvedValueOnce(
+        new Response(fakePcm, {
+          status: 200,
+          headers: {
+            "content-type": "audio/pcm",
+            "x-generation-id": "gen-charon-voice-test",
+          },
+        })
+      );
+
+      const res = await r(app, "/api/tts/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: validGenerateBody({
+          voice: "Charon",
+          providerOptions: {
+            provider: { order: ["Google"] },
+            generationConfig: { temperature: 0.2 },
+          },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("succeeded");
+
+      const [, init] = mockFetch.mock.calls[0];
+      const reqBody = JSON.parse((init as RequestInit).body as string);
+      expect(reqBody.voice).toBe("Charon");
+      expect(reqBody.provider).toEqual({ order: ["Google"] });
+      expect(reqBody.generationConfig.temperature).toBe(0.2);
+      expect(reqBody.generationConfig.responseModalities).toEqual(["AUDIO"]);
+      expect(reqBody.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName).toBe("Charon");
+
+      const db = getDb();
+      const [job] = db.select().from(generationJob).all();
+      expect(job.voice).toBe("Charon");
+      const storedProviderOptions = JSON.parse(job.providerOptions ?? "{}");
+      expect(storedProviderOptions.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName).toBe("Charon");
+    });
+
+    it("keeps OpenRouter routing options without allowing providerOptions to override core request fields", async () => {
+      await seedKey(app);
+
+      const fakePcm = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
+      mockFetch.mockResolvedValueOnce(
+        new Response(fakePcm, {
+          status: 200,
+          headers: {
+            "content-type": "audio/pcm",
+            "x-generation-id": "gen-provider-options-safety-test",
+          },
+        })
+      );
+
+      const res = await r(app, "/api/tts/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: validGenerateBody({
+          input: "This is the real text.",
+          voice: "Orus",
+          providerOptions: {
+            order: ["Google"],
+            allow_fallbacks: false,
+            model: "attacker/model",
+            input: "malicious replacement",
+            voice: "Zephyr",
+            response_format: "mp3",
+            speed: 4,
+            generationConfig: { temperature: 0.1 },
+          },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("succeeded");
+
+      const [, init] = mockFetch.mock.calls[0];
+      const reqBody = JSON.parse((init as RequestInit).body as string);
+      expect(reqBody.model).toBe("google/gemini-3.1-flash-tts-preview");
+      expect(reqBody.input).toBe("This is the real text.");
+      expect(reqBody.voice).toBe("Orus");
+      expect(reqBody.response_format).toBe("pcm");
+      expect(reqBody.speed).toBeUndefined();
+      expect(reqBody.provider).toEqual({ order: ["Google"], allow_fallbacks: false });
+      expect(reqBody.generationConfig.temperature).toBe(0.1);
+      expect(reqBody.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName).toBe("Orus");
     });
   });
 

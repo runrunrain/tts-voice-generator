@@ -83,6 +83,8 @@ export function loadProductionList(taskId: string, versionId: string) {
         generationStatus: l.generationStatus ?? (typeof artifactLine.generationStatus === "string" ? artifactLine.generationStatus : "draft"),
         relatedJobId: l.relatedJobId ?? (typeof artifactLine.relatedJobId === "string" ? artifactLine.relatedJobId : null),
         relatedAssetId: l.relatedAssetId ?? (typeof artifactLine.relatedAssetId === "number" ? artifactLine.relatedAssetId : null),
+        lastGenerationSignature: l.lastGenerationSignature ?? (typeof artifactLine.lastGenerationSignature === "string" ? artifactLine.lastGenerationSignature : null),
+        lastGenerationSnapshotJson: l.lastGenerationSnapshotJson ?? (typeof artifactLine.lastGenerationSnapshotJson === "string" ? artifactLine.lastGenerationSnapshotJson : null),
         generationErrorCode: l.generationStatus === "failed"
           ? (l.generationErrorCode ?? (typeof artifactLine.generationErrorCode === "string" ? artifactLine.generationErrorCode : null))
           : null,
@@ -201,6 +203,8 @@ export function loadVersionLines(taskId: string, versionRecord: { id: string; ve
         generationErrorMessage: l.generationErrorMessage ?? null,
         relatedJobId: l.relatedJobId ?? null,
         relatedAssetId: l.relatedAssetId ?? null,
+        lastGenerationSignature: l.lastGenerationSignature ?? null,
+        lastGenerationSnapshotJson: l.lastGenerationSnapshotJson ?? null,
       }));
     }
   }
@@ -225,6 +229,8 @@ export function loadVersionLines(taskId: string, versionRecord: { id: string; ve
           generationStatus: l.generationStatus ?? "draft",
           relatedJobId: l.relatedJobId ?? null,
           relatedAssetId: l.relatedAssetId ?? null,
+          lastGenerationSignature: l.lastGenerationSignature ?? null,
+          lastGenerationSnapshotJson: l.lastGenerationSnapshotJson ?? null,
           generationErrorCode: l.generationErrorCode ?? null,
           generationErrorMessage: l.generationErrorMessage ?? null,
         }));
@@ -258,6 +264,8 @@ export function loadVersionLines(taskId: string, versionRecord: { id: string; ve
         generationErrorMessage: l.generationErrorMessage ?? null,
         relatedJobId: l.relatedJobId ?? null,
         relatedAssetId: l.relatedAssetId ?? null,
+        lastGenerationSignature: l.lastGenerationSignature ?? null,
+        lastGenerationSnapshotJson: l.lastGenerationSnapshotJson ?? null,
       }));
     }
   }

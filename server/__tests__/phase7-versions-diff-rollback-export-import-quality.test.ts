@@ -1182,7 +1182,7 @@ describe("Phase 7: Cost Guard - Generate Endpoint Safety", () => {
 
     // Check DB state
     const db = getDb();
-    const line = db.select().from(voiceLine).where(eq(voiceLine.id, "line_1")).get();
+    const line = db.select().from(voiceLine).where(eq(voiceLine.lineId, "line_1")).get();
     expect(line?.generationStatus).toBe("failed");
     expect(line?.generationErrorCode).toBe("MISSING_API_KEY");
   });

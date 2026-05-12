@@ -7,7 +7,7 @@ import type { TaskWorkspaceValidationSummary } from "../../context/TaskWorkspace
 function isNormalizePreset(button: AgentButton) {
   const normalizedKey = button.key.trim().toLowerCase();
   const normalizedLabel = button.label.trim().toLowerCase();
-  return normalizedKey === "normalize-requirements" || normalizedLabel === "generate production list" || normalizedLabel === "生成语音生产列表";
+  return normalizedKey === "normalize-requirements" || normalizedLabel === "generate production list" || normalizedLabel === "生成语音生产列表" || normalizedLabel === "重新生成生产列表草稿";
 }
 
 export function AgentAutomationPanel({
@@ -70,6 +70,12 @@ export function AgentAutomationPanel({
   }, [buttons]);
 
   const handleNormalize = async () => {
+    const confirmMessage = selectedLineIds.length > 0
+      ? `你当前已在左侧选中 ${selectedLineIds.length} 行。\n\n这不是生成选中行音频。“重新生成生产列表草稿”会从需求文档生成/刷新整张生产列表，并运行草稿质量门；它不会生成选中行音频。\n\n如要生成选中行音频，请取消并点击左侧“生成选中音频”。\n仍要重新生成生产列表草稿吗？`
+      : productionVersion !== null
+        ? "这会重新生成生产列表草稿，并可能创建新的生产列表版本；不会生成音频。\n继续执行吗？"
+        : null;
+    if (confirmMessage && !window.confirm(confirmMessage)) return;
     const result = await normalizeRequirements();
     if (result) await onProductionListChanged?.();
     await refreshRuns();
@@ -144,8 +150,8 @@ export function AgentAutomationPanel({
         {normalizeProgress && <NormalizeProgressCard progress={normalizeProgress} transientError={normalizeProgressError} />}
         {activeRun && <RunningCard run={activeRun} onCancel={() => void cancelRun(activeRun.runId)} />}
 
-        <ActionGroup title="任务级" description="读取任务需求文档或任务上下文">
-          <InspectorButton title="生成语音生产列表" description="strict v2 Normalize，保留进度恢复和质量闸门" disabled={running || !opencodeAvailable} disabledReason={!opencodeAvailable ? "OpenCode 不可用，不能生成真实 strict v2 列表" : undefined} busy={running} onClick={handleNormalize} primary />
+        <ActionGroup title="任务级" description="从需求文档重新生成整张生产列表草稿；不会生成音频。选中行音频请使用左侧“生成选中音频”。">
+          <InspectorButton title="重新生成生产列表草稿" description="strict v2 Normalize：从需求文档生成整张生产列表草稿，运行质量门；不会生成音频" disabled={running || !opencodeAvailable} disabledReason={!opencodeAvailable ? "OpenCode 不可用，不能生成真实 strict v2 列表" : undefined} busy={running} onClick={handleNormalize} primary />
           {groupedButtons.task.map((button) => <InspectorButton key={button.key} title={button.label} description={button.description ?? button.key} disabled={running || !button.available} disabledReason={button.disabledReason ?? undefined} busy={running} onClick={() => void handleExecute(button, { scope: "task" })} />)}
         </ActionGroup>
 
@@ -249,8 +255,9 @@ const stageCopy: Record<NormalizeRunStage, string> = {
   queued: "已创建 Normalize 任务",
   preprocessing: "正在提取候选台词并过滤元信息",
   opencode_running: "OpenCode 正在生成 strict v2 生产列表",
+  timeout_recovery: "OpenCode 超时，正在等待迟到 draft",
   draft_detected: "已检测到 draft，正在准备校验",
-  validating: "正在校验 v2 schema 和内容质量",
+  validating: "正在校验生产列表草稿 schema 和内容质量",
   committing: "质量通过，正在写入生产列表",
   completed: "Normalize 完成",
   failed: "Normalize 失败",
@@ -269,7 +276,7 @@ function NormalizeProgressCard({ progress, transientError }: { progress: Normali
   return (
     <article className={`border ${tone} overflow-hidden`} aria-live="polite">
       <div className="p-3 border-b border-border-subtle flex flex-col gap-2">
-        <div className="flex items-center gap-2 font-semibold text-text-primary">{isTerminal ? <CheckCircle2 size={14} className={progress.stage === "failed" ? "text-error" : "text-success"} /> : <Loader2 size={14} className="animate-spin text-accent" />}<span>Normalize</span><span className="text-text-tertiary">{stageCopy[progress.stage]}</span></div>
+        <div className="flex items-center gap-2 font-semibold text-text-primary">{isTerminal ? <CheckCircle2 size={14} className={progress.stage === "failed" ? "text-error" : "text-success"} /> : <Loader2 size={14} className="animate-spin text-accent" />}<span>生产列表草稿 Normalize</span><span className="text-text-tertiary">{stageCopy[progress.stage]}</span></div>
         <p className="text-[10px] text-text-secondary leading-4">{progress.message}</p>
         <p className="text-[10px] text-text-tertiary font-mono">runId={progress.runId}</p>
       </div>

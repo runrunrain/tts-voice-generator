@@ -32,6 +32,8 @@ export const VoiceLineSchema = z.object({
   generationStatus: z.enum(["draft", "ready", "pending", "running", "succeeded", "failed", "needs_revision"]).optional().default("draft"),
   relatedJobId: z.string().optional().nullable(),
   relatedAssetId: z.number().int().optional().nullable(),
+  lastGenerationSignature: z.string().optional().nullable(),
+  lastGenerationSnapshotJson: z.string().optional().nullable(),
   // Generation error tracking (persisted failure reason per line)
   generationErrorCode: z.string().optional().nullable(),
   generationErrorMessage: z.string().optional().nullable(),
@@ -298,6 +300,8 @@ export const GenerateFromListSchema = z.object({
   lineIds: z.array(z.string().min(1)).optional().default([]),
   /** Whether to skip lines already in succeeded/running state. Default true. */
   skipCompleted: z.boolean().optional().default(true),
+  /** Explicitly regenerate succeeded lines even when their last input signature is unchanged. */
+  forceRegenerate: z.boolean().optional().default(false),
   /**
    * Request source: "user" (frontend), "agent" (OpenCode plugin), "cli" (CLI tool).
    * Default "user". Non-user sources require explicit confirm=true to proceed.
@@ -442,6 +446,8 @@ export const PromptStructuredLineSchema = z.object({
   notes: z.string().optional(),
   style: z.string().max(500, "Line style must be concise and must not contain transcript text").optional(),
   generationStatus: z.enum(["draft", "ready", "pending", "running", "succeeded", "failed", "needs_revision"]).optional(),
+  lastGenerationSignature: z.string().optional().nullable(),
+  lastGenerationSnapshotJson: z.string().optional().nullable(),
 }).passthrough();
 
 export const RawPromptStructuredAgentDraftSchema = z.object({

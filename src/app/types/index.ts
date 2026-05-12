@@ -11,6 +11,8 @@ export type VoiceStatus = "success" | "warning" | "error" | "pending";
 
 export interface VoiceProfile {
   name: string;
+  displayName?: string;
+  toneDescription?: string;
   isDefault: boolean;
   role: string;
   provider: string;
@@ -230,6 +232,8 @@ export interface VoiceLine {
   generationStatus?: "draft" | "ready" | "pending" | "running" | "succeeded" | "failed" | "needs_revision";
   relatedJobId?: string | null;
   relatedAssetId?: number | null;
+  lastGenerationSignature?: string | null;
+  lastGenerationSnapshotJson?: string | null;
   generationErrorCode?: string | null;
   generationErrorMessage?: string | null;
   validationErrors?: string[];
@@ -335,6 +339,7 @@ export interface GenerateFromListRequest {
   expectedVersion?: number;
   lineIds?: string[];
   skipCompleted?: boolean;
+  forceRegenerate?: boolean;
   source?: "user" | "agent" | "cli";
   confirm?: boolean;
 }
@@ -533,6 +538,7 @@ export type NormalizeRunStage =
   | "queued"
   | "preprocessing"
   | "opencode_running"
+  | "timeout_recovery"
   | "draft_detected"
   | "validating"
   | "committing"

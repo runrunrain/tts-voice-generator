@@ -142,6 +142,39 @@ function killTreeAsync(proc) {
   }
 }
 
+function killPortListenersSync(port) {
+  if (isWin) return;
+  try {
+    const output = execSync(`lsof -tiTCP:${port} -sTCP:LISTEN`, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 3000,
+    });
+    for (const rawPid of output.split(/\s+/)) {
+      const pid = Number(rawPid);
+      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+      let args = "";
+      try {
+        args = execSync(`ps -p ${pid} -o args=`, {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: 3000,
+        });
+      } catch {
+        continue;
+      }
+      if (!args.includes(PROJECT_ROOT)) continue;
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already dead or permission denied -- ignore.
+      }
+    }
+  } catch {
+    // lsof not available or no listeners -- ignore.
+  }
+}
+
 function cleanup(reason) {
   if (cleaning) return;
   cleaning = true;
@@ -386,6 +419,14 @@ async function smokeTest() {
 
   // Wait briefly for ports to be released
   await sleep(1500);
+
+  // Some package managers/dev servers can outlive their parent process group on
+  // macOS. In smoke mode only, clean up any remaining listener on the dedicated
+  // development ports before declaring the run failed as a leak.
+  for (const port of [BACKEND_PORT, FRONTEND_PORT]) {
+    killPortListenersSync(port);
+  }
+  await sleep(500);
 
   // Verify ports are released
   let portsReleased = true;

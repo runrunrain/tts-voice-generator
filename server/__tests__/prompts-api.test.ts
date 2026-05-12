@@ -215,20 +215,20 @@ describe("Prompt Assembly API", () => {
       const body = await res.json();
       const prompt: string = body.prompt;
 
-      expect(prompt).toContain("TTS the following script:");
-      expect(prompt).toContain("# AUDIO PROFILE: Speaker A");
-      expect(prompt).toContain("Role/Identity: Warm, conversational podcast");
-      expect(prompt).toContain("## THE SCENE");
+      expect(prompt).toContain("请为以下脚本生成语音：");
+      expect(prompt).toContain("# 音频档案：Speaker A");
+      expect(prompt).toContain("角色/身份：Warm, conversational podcast");
+      expect(prompt).toContain("## 场景");
       expect(prompt).toContain("A cozy living room");
-      expect(prompt).toContain("### DIRECTOR'S NOTES");
-      expect(prompt).toContain("Style: warm conversational host delivery");
-      expect(prompt).toContain("Pacing: relaxed with natural pauses");
-      expect(prompt).toContain("Accent: neutral clear diction");
-      expect(prompt).toContain("Emotion: welcoming and friendly");
-      expect(prompt).toContain("Performance Notes: Legacy notes should be merged into this section.; Keep it relaxed and natural");
-      expect(prompt).toContain("### SAMPLE CONTEXT");
+      expect(prompt).toContain("### 导演备注");
+      expect(prompt).toContain("风格：warm conversational host delivery");
+      expect(prompt).toContain("节奏：relaxed with natural pauses");
+      expect(prompt).toContain("口音/咬字：neutral clear diction");
+      expect(prompt).toContain("情绪：welcoming and friendly");
+      expect(prompt).toContain("表演备注：Legacy notes should be merged into this section.; Keep it relaxed and natural");
+      expect(prompt).toContain("### 示例上下文");
       expect(prompt).toContain("Previous episode established the hosts");
-      expect(prompt).toContain("#### TRANSCRIPT");
+      expect(prompt).toContain("#### 台词");
       expect(prompt).toContain("Speaker A: Welcome back! Speaker B: Thanks for having me.");
     });
 
@@ -242,7 +242,7 @@ describe("Prompt Assembly API", () => {
       const body = await res.json();
       const prompt: string = body.prompt;
 
-      expect(prompt).toContain("Voice:");
+      expect(prompt).toContain("音色：");
       expect(prompt).toContain("Speaker A");
       expect(prompt).toContain("Zephyr");
       expect(prompt).toContain("Speaker B");
@@ -262,8 +262,8 @@ describe("Prompt Assembly API", () => {
       const body = await res.json();
       expect(body.ok).toBe(true);
       expect(body.prompt).toContain("Hello world, this is a test.");
-      expect(body.prompt).toContain("TTS the following script:");
-      expect(body.prompt).toContain("#### TRANSCRIPT");
+      expect(body.prompt).toContain("请为以下脚本生成语音：");
+      expect(body.prompt).toContain("#### 台词");
     });
 
     it("omits empty optional sections from the prompt", async () => {
@@ -280,8 +280,8 @@ describe("Prompt Assembly API", () => {
       });
 
       const body = await res.json();
-      expect(body.prompt).toContain("TTS the following script:");
-      expect(body.prompt).toContain("#### TRANSCRIPT\nJust the transcript.");
+      expect(body.prompt).toContain("请为以下脚本生成语音：");
+      expect(body.prompt).toContain("#### 台词\nJust the transcript.");
     });
   });
 
@@ -468,7 +468,7 @@ describe("Prompt Assembly API", () => {
       });
 
       const body = await res.json();
-      expect(body.prompt).toContain("Voice: Host: Zephyr");
+      expect(body.prompt).toContain("音色：Host: Zephyr");
       expect(body.prompt).not.toContain("alloy");
     });
 
@@ -713,14 +713,14 @@ describe("Prompt Assembly API", () => {
         ],
       });
 
-      expect(result.prompt).toContain("TTS the following script:");
-      expect(result.prompt).toContain("# AUDIO PROFILE: Host");
-      expect(result.prompt).toContain("Role/Identity: Warm podcast");
+      expect(result.prompt).toContain("请为以下脚本生成语音：");
+      expect(result.prompt).toContain("# 音频档案：Host");
+      expect(result.prompt).toContain("角色/身份：Warm podcast");
       expect(result.prompt).toContain("Living room");
-      expect(result.prompt).toContain("Performance Notes: Relaxed tone");
+      expect(result.prompt).toContain("表演备注：Relaxed tone");
       expect(result.prompt).toContain("Previous episode");
       expect(result.prompt).toContain("Hello and welcome!");
-      expect(result.prompt).toContain("Voice: Host: Zephyr");
+      expect(result.prompt).toContain("音色：Host: Zephyr");
     });
 
     it("includes speaker name and style in prompt when provided", () => {
@@ -736,7 +736,7 @@ describe("Prompt Assembly API", () => {
       });
 
       expect(result.prompt).toContain("(Alice)");
-      expect(result.prompt).toContain("Style: Speaker A: cheerful");
+      expect(result.prompt).toContain("风格：Speaker A: cheerful");
     });
 
     it("places line style in Director's Notes and keeps transcript clean", () => {
@@ -757,12 +757,12 @@ describe("Prompt Assembly API", () => {
         ],
       });
 
-      const transcriptSection = result.prompt.split("#### TRANSCRIPT")[1] ?? "";
-      expect(result.prompt).toContain("Line Style Override: near whisper on the final phrase");
-      expect(result.prompt).toContain("Performance Notes: Avoid melodrama.; Legacy notes remain compatible.");
+      const transcriptSection = result.prompt.split("#### 台词")[1] ?? "";
+      expect(result.prompt).toContain("本行风格覆盖：near whisper on the final phrase");
+      expect(result.prompt).toContain("表演备注：Avoid melodrama.; Legacy notes remain compatible.");
       expect(transcriptSection).toContain("Hold the line until dawn.");
-      expect(transcriptSection).not.toContain("Line Style Override");
-      expect(transcriptSection).not.toContain("Style:");
+      expect(transcriptSection).not.toContain("本行风格覆盖");
+      expect(transcriptSection).not.toContain("风格：");
     });
 
     it("keeps old directorNotes compatible by merging into Performance Notes", () => {
@@ -775,7 +775,7 @@ describe("Prompt Assembly API", () => {
         speakers: [{ id: "narrator", label: "Narrator", voice: "Zephyr" }],
       });
 
-      expect(result.prompt).toContain("Performance Notes: measured pace, restrained pride");
+      expect(result.prompt).toContain("表演备注：measured pace, restrained pride");
       expect(result.normalized.performanceNotes).toBe("measured pace, restrained pride");
     });
 
@@ -806,7 +806,7 @@ describe("Prompt Assembly API", () => {
         speakers: [],
       });
 
-      expect(result.prompt).toContain("#### TRANSCRIPT\nJust a plain transcript.");
+      expect(result.prompt).toContain("#### 台词\nJust a plain transcript.");
       expect(result.warnings.length).toBe(4); // audioProfile, scene, directorNotes, style fields
     });
 

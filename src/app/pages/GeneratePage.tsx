@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import { Loader2, AlertTriangle } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import type { AudioFormat } from "../types";
+import { formatVoiceOptionLabel } from "../utils/voiceDisplay";
 
 const MAX_CHARS = 5000;
 
@@ -85,7 +86,7 @@ export function GeneratePage() {
             disabled={generatePhase === "loading"}
           >
             {voiceOptions.map((v) => (
-              <option key={v} value={v}>{v}</option>
+              <option key={v} value={v}>{formatVoiceOptionLabel(v)}</option>
             ))}
           </select>
         </div>

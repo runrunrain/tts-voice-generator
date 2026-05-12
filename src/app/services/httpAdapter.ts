@@ -62,6 +62,7 @@ import type {
   ProductionListRollbackResult,
   ProductionListVersionEntry,
 } from "../types";
+import { getVoiceDisplayMeta } from "../utils/voiceDisplay";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -370,13 +371,15 @@ export const httpAdapter: TtsServiceAdapter = {
     try {
       const result = await apiFetch<{
         ok: boolean;
+        authValid?: boolean;
+        errorCode?: string;
         error: string | null;
       }>("/api/settings/test", { method: "POST" });
 
-      if (result.error === "MISSING_API_KEY") {
+      if (result.error === "MISSING_API_KEY" || result.errorCode === "MISSING_API_KEY" || result.authValid === false) {
         return "failed";
       }
-      return result.ok ? "connected" : "failed";
+      return result.ok && result.authValid !== false ? "connected" : "failed";
     } catch {
       return "failed";
     }
@@ -425,6 +428,8 @@ export const httpAdapter: TtsServiceAdapter = {
     return {
       voices: result.voices.map((v) => ({
         name: v.name,
+        displayName: getVoiceDisplayMeta(v.name).displayName,
+        toneDescription: getVoiceDisplayMeta(v.name).toneDescription,
         isDefault: v.source === "default",
         role: v.role || "",
         provider: v.provider === "openrouter" ? "OpenRouter" : v.provider,
@@ -1073,6 +1078,8 @@ function mapVoiceLine(raw: unknown): VoiceLine {
     generationStatus: normalizeLineGenerationStatus(l.generationStatus),
     relatedJobId: asNullableString(l.relatedJobId),
     relatedAssetId: typeof l.relatedAssetId === "number" ? l.relatedAssetId : null,
+    lastGenerationSignature: asNullableString(l.lastGenerationSignature),
+    lastGenerationSnapshotJson: asNullableString(l.lastGenerationSnapshotJson),
     generationErrorCode: asNullableString(l.generationErrorCode),
     generationErrorMessage: asNullableString(l.generationErrorMessage),
     validationErrors: Array.isArray(l.validationErrors) ? l.validationErrors.filter((item): item is string => typeof item === "string") : undefined,
@@ -1110,6 +1117,8 @@ function toBackendVoiceLine(line: VoiceLine, index: number) {
     generationStatus: line.generationStatus ?? "draft",
     relatedJobId: line.relatedJobId ?? null,
     relatedAssetId: line.relatedAssetId ?? null,
+    lastGenerationSignature: line.lastGenerationSignature ?? null,
+    lastGenerationSnapshotJson: line.lastGenerationSnapshotJson ?? null,
     generationErrorCode: line.generationErrorCode ?? null,
     generationErrorMessage: line.generationErrorMessage ?? null,
   };
@@ -1415,6 +1424,7 @@ function mapNormalizeStage(value: unknown): NormalizeRunStage {
     case "queued":
     case "preprocessing":
     case "opencode_running":
+    case "timeout_recovery":
     case "draft_detected":
     case "validating":
     case "committing":
@@ -1755,6 +1765,7 @@ export const taskApi = {
         ...(payload.expectedVersion !== undefined ? { expectedVersion: payload.expectedVersion } : {}),
         ...(payload.lineIds && payload.lineIds.length > 0 ? { lineIds: payload.lineIds } : {}),
         skipCompleted: payload.skipCompleted ?? true,
+        forceRegenerate: payload.forceRegenerate ?? false,
         source: payload.source ?? "user",
         confirm: payload.confirm ?? false,
       }),

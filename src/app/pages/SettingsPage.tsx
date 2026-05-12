@@ -2,10 +2,36 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { Eye, EyeOff, RefreshCw, Loader2, Shield, Copy, Check, Trash2, AlertTriangle, ChevronDown, ChevronRight, Activity, Database, FolderOpen, Route, Clock, Bot, FileAudio } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import { getDiagnostics } from "../services/httpAdapter";
+import { hasSavedOpenRouterKey, isSuccessfulSettingsConnection } from "../services/settingsKeyStatus";
 import type { AppSettings, AudioFormat, ConnectionStatus, AgentAuthMode, Diagnostics, DiagnosticsPhase, AudioDirInfo } from "../types";
 
+type SettingsConnectionTestResponse = {
+  ok?: boolean;
+  authValid?: boolean;
+  checkedEndpoint?: string;
+  latencyMs?: number;
+  errorCode?: string;
+  errorMessage?: string;
+  providerMessage?: string;
+  actionMessage?: string;
+  error?: string | null;
+};
+
+function formatSettingsConnectionFailure(data: SettingsConnectionTestResponse): string {
+  if (data.errorCode === "MISSING_API_KEY" || data.error === "MISSING_API_KEY") {
+    return "未配置 OpenRouter API Key，请先保存 Key 后再测试音频认证。";
+  }
+  if (data.errorCode === "INVALID_API_KEY") {
+    const providerMessage = data.providerMessage ? ` Provider 返回：${data.providerMessage}` : "";
+    return `${data.errorMessage || "OpenRouter API Key 无效、已过期或账户不可用。"}${data.actionMessage ? ` ${data.actionMessage}` : " 请更新 API Key，并检查 OpenRouter 账户状态/余额。"}${providerMessage}`;
+  }
+  const message = data.errorMessage || data.actionMessage || data.error || "连接测试失败，请检查 API Key、账户状态和 OpenRouter 服务。";
+  const providerMessage = data.providerMessage ? ` Provider 返回：${data.providerMessage}` : "";
+  return `${message}${providerMessage}`;
+}
+
 export function SettingsPage() {
-  const { settings, saveSettings, testConnection, rotateLocalPluginToken, clearLocalPluginToken } = useAppState();
+  const { settings, saveSettings, rotateLocalPluginToken, clearLocalPluginToken } = useAppState();
 
   // Local form state (synced on save)
   const [apiKey, setApiKey] = useState("");
@@ -41,12 +67,8 @@ export function SettingsPage() {
     setAudioDir(settings.audioDir);
     setMaxChars(settings.maxChars);
     setMaxConcurrent(settings.maxConcurrent);
-    // If backend reports key is configured, show masked state
-    if (settings.openRouterApiKey === "***configured***") {
-      setApiKeyMasked(true);
-    } else {
-      setApiKeyMasked(false);
-    }
+    // Any non-empty sentinel or masked value means the backend has a saved key.
+    setApiKeyMasked(hasSavedOpenRouterKey(settings.openRouterApiKey));
     // Sync agent fields
     setAgentAuthMode(settings.agent.authMode);
     setAgentMaxRequests(settings.agent.maxRequests);
@@ -60,6 +82,8 @@ export function SettingsPage() {
   const [saveErrorMessage, setSaveErrorMessage] = useState<string | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>(settings.connectionStatus);
   const [connectionLatency, setConnectionLatency] = useState<number | null>(null);
+  const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
+  const [connectionErrorCode, setConnectionErrorCode] = useState<string | null>(null);
 
   const handleSave = useCallback(async () => {
     setSaveStatus("saving");
@@ -95,12 +119,19 @@ export function SettingsPage() {
         try {
           const res = await fetch("/api/settings");
           const data = await res.json();
-          setApiKeyMasked(!!data.hasOpenRouterApiKey);
+          setApiKeyMasked(!!data.hasOpenRouterApiKey || hasSavedOpenRouterKey(data.keyMask) || hasSavedOpenRouterKey(data.openRouterApiKey));
         } catch {
           setApiKeyMasked(false);
         }
       }
 
+      setConnectionStatus("untested");
+      setConnectionLatency(null);
+      setConnectionErrorCode(null);
+      setConnectionMessage(apiKey.trim()
+        ? "API Key 已保存；请点击测试连接验证音频生成认证是否通过。"
+        : "设置已保存；连接状态尚未测试。"
+      );
       setSaveStatus("saved");
       setTimeout(() => setSaveStatus("idle"), 2000);
     } catch (err) {
@@ -112,19 +143,28 @@ export function SettingsPage() {
   const handleTestConnection = useCallback(async () => {
     setConnectionStatus("testing");
     setConnectionLatency(null);
+    setConnectionMessage("正在通过 OpenRouter 音频生成认证端点测试当前 Key...");
+    setConnectionErrorCode(null);
     try {
       const res = await fetch("/api/settings/test", { method: "POST" });
-      const data = await res.json();
-      if (data.error === "MISSING_API_KEY") {
+      const data = await res.json() as SettingsConnectionTestResponse;
+      if (data.error === "MISSING_API_KEY" || data.errorCode === "MISSING_API_KEY") {
         setConnectionStatus("failed");
-      } else if (data.ok) {
+        setConnectionErrorCode("MISSING_API_KEY");
+        setConnectionMessage(formatSettingsConnectionFailure(data));
+      } else if (isSuccessfulSettingsConnection(data)) {
         setConnectionStatus("connected");
         setConnectionLatency(data.latencyMs ?? null);
+        setConnectionMessage("连接测试通过：当前 Key 已通过 OpenRouter 音频生成认证端点验证，可用于真实音频生成。已保存 Key 与连接测试通过是两个独立状态。");
       } else {
         setConnectionStatus("failed");
+        setConnectionErrorCode(data.errorCode ?? null);
+        setConnectionMessage(formatSettingsConnectionFailure(data));
       }
-    } catch {
+    } catch (err) {
       setConnectionStatus("failed");
+      setConnectionErrorCode("NETWORK_ERROR");
+      setConnectionMessage(err instanceof Error ? `连接测试请求失败：${err.message}` : "连接测试请求失败，请确认后端服务可用。");
     }
   }, []);
 
@@ -306,12 +346,23 @@ export function SettingsPage() {
                       ? "bg-error-muted text-error border-error/20"
                       : "bg-bg-sunken text-text-tertiary border-border"
                   }`}>
-                    {connectionStatus === "connected" ? `已连接${connectionLatency ? ` (${connectionLatency}ms)` : ""}` :
-                     connectionStatus === "testing" ? "测试中..." :
-                     connectionStatus === "failed" ? "连接失败 -- 请检查 API Key 是否正确" :
-                     apiKeyMasked ? "Key 已配置" : "未配置"}
+                    {connectionStatus === "connected" ? `连接测试通过${connectionLatency ? ` (${connectionLatency}ms)` : ""}` :
+                      connectionStatus === "testing" ? "测试中..." :
+                     connectionStatus === "failed" ? `连接测试失败${connectionErrorCode ? ` (${connectionErrorCode})` : ""}` :
+                     apiKeyMasked ? "已保存 Key（未验证连接）" : "未配置"}
                   </span>
                 </div>
+                {connectionMessage && (
+                  <div className={`border rounded-md p-3 text-xs leading-5 ${
+                    connectionStatus === "connected"
+                      ? "border-success/30 bg-success-muted/10 text-success"
+                      : connectionStatus === "failed"
+                      ? "border-error/30 bg-error-muted/20 text-error"
+                      : "border-border bg-bg-sunken text-text-tertiary"
+                  }`}>
+                    {connectionMessage}
+                  </div>
+                )}
               </div>
             </div>
 

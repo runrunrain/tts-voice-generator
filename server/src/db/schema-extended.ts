@@ -92,6 +92,8 @@ export const voiceLine = sqliteTable("voice_line", {
   generationStatus: text("generation_status").notNull().default("draft"), // draft | ready | pending | running | succeeded | failed | needs_revision
   relatedJobId: text("related_job_id"),
   relatedAssetId: integer("related_asset_id"),
+  lastGenerationSignature: text("last_generation_signature"),
+  lastGenerationSnapshotJson: text("last_generation_snapshot_json"),
   // Generation error tracking (MIN-2: persists failure reason per line for post-refresh display)
   generationErrorCode: text("generation_error_code"),
   generationErrorMessage: text("generation_error_message"),
