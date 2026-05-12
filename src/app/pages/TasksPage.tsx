@@ -64,9 +64,9 @@ export function TasksPage() {
       </div>
 
       <div className="shrink-0 px-8 py-3 border-b border-border-subtle flex items-center justify-between gap-4 bg-bg-sunken">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {STATUS_OPTIONS.map((status) => (
-            <button key={status} className={`px-3 py-1.5 rounded-md text-xs border transition-colors ${statusFilter === status ? "border-accent/40 bg-accent-muted text-accent" : "border-border text-text-secondary hover:bg-bg-hover"}`} onClick={() => setStatusFilter(status)}>{STATUS_LABEL[status]}</button>
+            <button key={status} className={`px-3 py-1.5 rounded-md text-xs border transition-colors whitespace-nowrap [writing-mode:horizontal-tb] ${statusFilter === status ? "border-accent/40 bg-accent-muted text-accent" : "border-border text-text-secondary hover:bg-bg-hover"}`} onClick={() => setStatusFilter(status)}>{STATUS_LABEL[status]}</button>
           ))}
         </div>
         <div className="flex items-center gap-2">
@@ -129,4 +129,6 @@ function StatusBadge({ status }: { status: TaskStatus }) {
 
 function Th({ children, className = "" }: { children: React.ReactNode; className?: string }) { return <th className={`px-3 py-2 text-left font-semibold border-r border-border-subtle last:border-r-0 ${className}`}>{children}</th>; }
 
-function StateBlock({ icon, title, hint, action }: { icon: React.ReactNode; title: string; hint?: string; action?: React.ReactNode }) { return <div className="h-full min-h-[360px] flex flex-col items-center justify-center gap-3 text-text-tertiary text-center">{icon}<div className="text-sm font-semibold text-text-secondary">{title}</div>{hint && <div className="text-xs max-w-md leading-5">{hint}</div>}{action}</div>; }
+function StateBlock({ icon, title, hint, action }: { icon: React.ReactNode; title: string; hint?: string; action?: React.ReactNode }) {
+  return <div className="h-full min-h-[360px] w-full flex flex-col items-center justify-center gap-3 text-text-tertiary text-center">{icon}<div className="text-sm font-semibold text-text-secondary">{title}</div>{hint && <div className="w-full max-w-[28rem] px-2 text-xs leading-5 whitespace-normal break-normal [writing-mode:horizontal-tb] [text-orientation:mixed]">{hint}</div>}{action}</div>;
+}
