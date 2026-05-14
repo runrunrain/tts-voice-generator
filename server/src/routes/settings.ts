@@ -6,6 +6,7 @@
  */
 
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { z } from "zod";
 import { getDb } from "../db/index.js";
 import { settings } from "../db/schema.js";
@@ -16,6 +17,24 @@ import { OpenRouterProvider, sanitizeText } from "../services/openrouter-provide
 import { canonicalizeVoice } from "../utils/voice.js";
 import { normalizeFormat, type AudioFormat } from "../utils/audio-format.js";
 import { fingerprintFromHash, generateLocalPluginToken } from "../services/agent-auth.js";
+import { checkOpenCodeAvailability } from "../services/opencode-runner.js";
+import {
+  getOpenCodeRuntimeCapabilities,
+  type OpenCodeRuntimeCapabilities,
+} from "../services/opencode-runtime-gate.js";
+import {
+  OpenCodeConfigError,
+  getOpenCodeConfigPathInfo,
+  readOpenCodeConfigDisplay,
+  updateOpenCodeConfig,
+} from "../services/opencode-config-service.js";
+import {
+  OPENCODE_INSTALL_CONFIRMATION_PHRASE,
+  OpenCodeInstallError,
+  checkNpmAvailability,
+  createOpenCodeInstallPlan,
+  installOpenCodeControlled,
+} from "../services/opencode-install-service.js";
 
 const app = new Hono();
 
@@ -44,6 +63,26 @@ const SettingsSchema = z.object({
     tokenAction: z.enum(["rotate", "clear"]).optional(),
   }).optional(),
 });
+
+const OpenCodeProviderConfigUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  baseURL: z.string().nullable().optional(),
+  apiKey: z.string().optional(),
+  clearApiKey: z.boolean().optional(),
+  apiKeyAction: z.enum(["keep", "set", "clear"]).optional(),
+}).strict();
+
+const OpenCodeConfigUpdateSchema = z.object({
+  expectedRevision: z.string().min(1),
+  model: z.string().optional(),
+  providers: z.array(OpenCodeProviderConfigUpdateSchema).max(20).optional(),
+}).strict();
+
+const OpenCodeInstallSchema = z.object({
+  nonce: z.string().min(16),
+  confirmationPhrase: z.literal(OPENCODE_INSTALL_CONFIRMATION_PHRASE),
+  confirm: z.literal(true),
+}).strict();
 
 function defaults() {
   return {
@@ -76,6 +115,37 @@ function agentSettingsPayload(row: typeof settings.$inferSelect | undefined) {
       sessionExpiry: row?.agentSessionExpiry ?? d.agentSessionExpiry,
     },
   };
+}
+
+function localCapabilityError(capabilities: OpenCodeRuntimeCapabilities) {
+  return {
+    ok: false,
+    runtime: capabilities.runtime,
+    capabilities,
+    error: capabilities.reason ?? "当前运行环境不支持此 OpenCode 本地能力。",
+  };
+}
+
+async function safeJson(c: Context): Promise<unknown> {
+  try {
+    return await c.req.json();
+  } catch {
+    return null;
+  }
+}
+
+function mapConfigError(error: unknown) {
+  if (error instanceof OpenCodeConfigError) {
+    return { status: error.status, body: { ok: false, code: error.code, error: error.message } };
+  }
+  return { status: 500, body: { ok: false, code: "OPENCODE_CONFIG_FAILED", error: "OpenCode 配置处理失败。" } };
+}
+
+function mapInstallError(error: unknown) {
+  if (error instanceof OpenCodeInstallError) {
+    return { status: error.status, body: { ok: false, code: error.code, error: error.message } };
+  }
+  return { status: 500, body: { ok: false, code: "OPENCODE_INSTALL_FAILED", error: "OpenCode 安装处理失败。" } };
 }
 
 // ─── GET /api/settings ───────────────────────────────────────────────────────
@@ -255,6 +325,131 @@ app.post("/api/settings/test", async (c) => {
       error: err instanceof Error ? sanitizeText(err.message) : "Test connection failed",
     });
   }
+});
+
+// ─── OpenCode Settings: Runtime Status ───────────────────────────────────────
+
+app.get("/api/settings/opencode/status", async (c) => {
+  const capabilities = getOpenCodeRuntimeCapabilities(c.req.raw);
+  if (!capabilities.canDetectLocalOpenCode) {
+    return c.json({
+      ok: true,
+      runtime: capabilities.runtime,
+      capabilities,
+      availability: null,
+      npm: null,
+      message: capabilities.reason ?? "当前运行环境不支持本地 OpenCode 检测。",
+    });
+  }
+
+  const [availability, npm] = await Promise.all([
+    checkOpenCodeAvailability(),
+    checkNpmAvailability(),
+  ]);
+
+  return c.json({
+    ok: true,
+    runtime: capabilities.runtime,
+    capabilities,
+    availability: {
+      available: availability.available,
+      version: availability.version,
+      error: availability.error,
+      providerMetadata: availability.providerMetadata ?? { hasConfig: false, providerCount: 0, modelCount: 0 },
+      checkedAt: new Date().toISOString(),
+      cacheTtlMs: 60_000,
+    },
+    npm,
+    message: null,
+  });
+});
+
+// ─── OpenCode Settings: Config Read/Write ────────────────────────────────────
+
+app.get("/api/settings/opencode/config", async (c) => {
+  const capabilities = getOpenCodeRuntimeCapabilities(c.req.raw);
+  if (!capabilities.canReadConfig) {
+    return c.json(localCapabilityError(capabilities), 403);
+  }
+
+  try {
+    return c.json(await readOpenCodeConfigDisplay(capabilities.runtime));
+  } catch (error) {
+    const mapped = mapConfigError(error);
+    return c.json(mapped.body, mapped.status as 400 | 403 | 409 | 500);
+  }
+});
+
+app.put("/api/settings/opencode/config", async (c) => {
+  const capabilities = getOpenCodeRuntimeCapabilities(c.req.raw);
+  if (!capabilities.canWriteConfig) {
+    return c.json(localCapabilityError(capabilities), 403);
+  }
+
+  const parsed = OpenCodeConfigUpdateSchema.safeParse(await safeJson(c));
+  if (!parsed.success) {
+    return c.json({ ok: false, error: parsed.error.flatten() }, 400);
+  }
+
+  try {
+    return c.json(await updateOpenCodeConfig(parsed.data));
+  } catch (error) {
+    const mapped = mapConfigError(error);
+    return c.json(mapped.body, mapped.status as 400 | 403 | 409 | 500);
+  }
+});
+
+// ─── OpenCode Settings: Controlled Install ───────────────────────────────────
+
+app.post("/api/settings/opencode/install-plan", async (c) => {
+  const capabilities = getOpenCodeRuntimeCapabilities(c.req.raw);
+  if (!capabilities.canInstall) {
+    return c.json(localCapabilityError(capabilities), 403);
+  }
+
+  try {
+    return c.json(await createOpenCodeInstallPlan());
+  } catch (error) {
+    const mapped = mapInstallError(error);
+    return c.json(mapped.body, mapped.status as 400 | 403 | 409 | 500);
+  }
+});
+
+app.post("/api/settings/opencode/install", async (c) => {
+  const capabilities = getOpenCodeRuntimeCapabilities(c.req.raw);
+  if (!capabilities.canInstall) {
+    return c.json(localCapabilityError(capabilities), 403);
+  }
+
+  const parsed = OpenCodeInstallSchema.safeParse(await safeJson(c));
+  if (!parsed.success) {
+    return c.json({ ok: false, error: parsed.error.flatten() }, 400);
+  }
+
+  try {
+    return c.json(await installOpenCodeControlled(parsed.data));
+  } catch (error) {
+    const mapped = mapInstallError(error);
+    return c.json(mapped.body, mapped.status as 400 | 403 | 409 | 500);
+  }
+});
+
+// Desktop opens the fixed file through Electron IPC. This endpoint exposes only
+// fixed capability metadata and never accepts a path/command from the renderer.
+app.post("/api/settings/opencode/open-config", async (c) => {
+  const capabilities = getOpenCodeRuntimeCapabilities(c.req.raw);
+  if (!capabilities.canOpenConfig && !capabilities.canReturnConfigPathForCopy) {
+    return c.json(localCapabilityError(capabilities), 403);
+  }
+
+  const pathInfo = getOpenCodeConfigPathInfo();
+  return c.json({
+    ok: true,
+    runtime: capabilities.runtime,
+    configPathLabel: pathInfo.label,
+    copyableConfigPath: capabilities.canReturnConfigPathForCopy ? pathInfo.filePath : null,
+    desktopIpcChannel: capabilities.canOpenConfig ? "tts-desktop:open-opencode-config" : null,
+  });
 });
 
 // Alias: /api/settings/test-connection (plan specifies this path)

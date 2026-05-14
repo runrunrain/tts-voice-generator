@@ -4,6 +4,7 @@ import { useAppState } from "../state/AppContext";
 import { apiRequest, getDiagnostics } from "../services/httpAdapter";
 import { hasSavedOpenRouterKey, isSuccessfulSettingsConnection } from "../services/settingsKeyStatus";
 import type { AppSettings, AudioFormat, ConnectionStatus, AgentAuthMode, Diagnostics, DiagnosticsPhase, AudioDirInfo } from "../types";
+import { OpenCodeSettingsPanel } from "./settings/OpenCodeSettingsPanel";
 
 type SettingsConnectionTestResponse = {
   ok?: boolean;
@@ -659,6 +660,8 @@ export function SettingsPage() {
 
           </div>
         </div>
+
+        <OpenCodeSettingsPanel />
 
         {/* ── System Diagnostics Panel (Full Width, Collapsible) ─────────── */}
         <div className="flex flex-col gap-3">

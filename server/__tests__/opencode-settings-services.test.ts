@@ -1,0 +1,168 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { Hono } from "hono";
+import settingsRoutes from "../src/routes/settings.js";
+import {
+  maskApiKey,
+  readOpenCodeConfigDisplay,
+  resolveOpenCodeConfigPath,
+  updateOpenCodeConfig,
+} from "../src/services/opencode-config-service.js";
+import { getOpenCodeRuntimeCapabilities } from "../src/services/opencode-runtime-gate.js";
+import {
+  OPENCODE_INSTALL_ARGS,
+  _resetInstallServiceForTests,
+  _setInstallProcessRunner,
+  _setNpmCheckRunner,
+  _setPostInstallAvailabilityChecker,
+  createOpenCodeInstallPlan,
+  installOpenCodeControlled,
+} from "../src/services/opencode-install-service.js";
+
+function createApp() {
+  const app = new Hono();
+  app.route("/", settingsRoutes);
+  return app;
+}
+
+function localRequest(pathname = "/api/settings/opencode/status", init?: RequestInit) {
+  return new Request(`http://127.0.0.1:3001${pathname}`, {
+    ...init,
+    headers: {
+      Host: "127.0.0.1:3001",
+      Origin: "http://127.0.0.1:5173",
+      ...(init?.headers as Record<string, string> | undefined),
+    },
+  });
+}
+
+describe("OpenCode settings backend services", () => {
+  const originalEnv = { ...process.env };
+  let tmpDir = "";
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-settings-"));
+    process.env.XDG_CONFIG_HOME = path.join(tmpDir, "xdg");
+    process.env.NODE_ENV = "test";
+    delete process.env.OPENCODE_LOCAL_CAPABILITIES;
+    delete process.env.ELECTRON_MODE;
+    delete process.env.DESKTOP_API_TOKEN;
+  });
+
+  afterEach(() => {
+    _resetInstallServiceForTests();
+    process.env = { ...originalEnv };
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("masks API keys without exposing short secrets", () => {
+    expect(maskApiKey("short")).toBe("***");
+    expect(maskApiKey("sk-very-secret-value")).toBe("sk-...lue");
+  });
+
+  it("creates, keeps, sets, and clears OpenCode apiKey without returning plaintext", async () => {
+    const initial = await readOpenCodeConfigDisplay("local");
+    expect(initial.exists).toBe(false);
+    expect(initial.providers[0].name).toBe("openrouter");
+
+    const secret = "sk-test-secret-123456789";
+    const saved = await updateOpenCodeConfig({
+      expectedRevision: initial.revision,
+      model: "openrouter/test-model",
+      providers: [{ name: "openrouter", baseURL: "https://openrouter.ai/api/v1", apiKeyAction: "set", apiKey: secret }],
+    });
+
+    expect(JSON.stringify(saved)).not.toContain(secret);
+    expect(saved.providers[0].hasApiKey).toBe(true);
+    expect(saved.providers[0].apiKeyMasked).toBe("sk-...789");
+
+    const filePath = resolveOpenCodeConfigPath();
+    const mode = fs.statSync(filePath).mode & 0o777;
+    expect(mode).toBe(0o600);
+    const written = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    expect(written.provider.openrouter.options.apiKey).toBe(secret);
+
+    const display = await readOpenCodeConfigDisplay("local");
+    const kept = await updateOpenCodeConfig({
+      expectedRevision: display.revision,
+      providers: [{ name: "openrouter", baseURL: "https://example.com/v1", apiKeyAction: "keep" }],
+    });
+    expect(JSON.stringify(kept)).not.toContain(secret);
+    expect(JSON.parse(fs.readFileSync(filePath, "utf8")).provider.openrouter.options.apiKey).toBe(secret);
+
+    const afterKeep = await readOpenCodeConfigDisplay("local");
+    const cleared = await updateOpenCodeConfig({
+      expectedRevision: afterKeep.revision,
+      providers: [{ name: "openrouter", apiKeyAction: "clear" }],
+    });
+    expect(cleared.providers[0].hasApiKey).toBe(false);
+    expect(JSON.parse(fs.readFileSync(filePath, "utf8")).provider.openrouter.options.apiKey).toBeUndefined();
+  });
+
+  it("rejects invalid model and production http baseURL", async () => {
+    const display = await readOpenCodeConfigDisplay("local");
+    await expect(updateOpenCodeConfig({ expectedRevision: display.revision, model: "" })).rejects.toMatchObject({ status: 400, code: "INVALID_MODEL" });
+    await expect(updateOpenCodeConfig({
+      expectedRevision: display.revision,
+      providers: [{ name: "openrouter", baseURL: "http://api.example.com/v1" }],
+    })).rejects.toMatchObject({ status: 400, code: "INVALID_BASE_URL" });
+  });
+
+  it("classifies desktop/local/web/remote runtime without enabling local capability by default", () => {
+    let caps = getOpenCodeRuntimeCapabilities(localRequest());
+    expect(caps.runtime).toBe("web");
+    expect(caps.canDetectLocalOpenCode).toBe(false);
+
+    process.env.OPENCODE_LOCAL_CAPABILITIES = "enabled";
+    caps = getOpenCodeRuntimeCapabilities(localRequest());
+    expect(caps.runtime).toBe("local");
+    expect(caps.canInstall).toBe(true);
+
+    caps = getOpenCodeRuntimeCapabilities(new Request("http://example.com/api/settings/opencode/status", { headers: { Host: "example.com", Origin: "https://evil.example" } }));
+    expect(caps.runtime).toBe("remote");
+    expect(caps.canReadConfig).toBe(false);
+
+    process.env.ELECTRON_MODE = "true";
+    process.env.DESKTOP_API_TOKEN = "desktop-secret";
+    caps = getOpenCodeRuntimeCapabilities(localRequest("/api/settings/opencode/status", { headers: { "X-TTS-Desktop-Token": "desktop-secret" } }));
+    expect(caps.runtime).toBe("desktop");
+    expect(caps.canOpenConfig).toBe(true);
+  });
+
+  it("keeps web status from probing local machine and gates config routes", async () => {
+    const app = createApp();
+    const status = await app.fetch(localRequest());
+    expect(status.status).toBe(200);
+    const statusBody = await status.json();
+    expect(statusBody.runtime).toBe("web");
+    expect(statusBody.availability).toBeNull();
+    expect(statusBody.npm).toBeNull();
+
+    const config = await app.fetch(localRequest("/api/settings/opencode/config"));
+    expect(config.status).toBe(403);
+  });
+
+  it("uses a fixed npm install allowlist with no shell and requires confirmation", async () => {
+    _setNpmCheckRunner(async () => ({ stdout: "10.0.0\n", stderr: "" }));
+    _setPostInstallAvailabilityChecker(async () => ({ available: true, version: "v1.0.0", error: null }));
+    const captured: Array<{ file: string; args: readonly string[]; options: Record<string, unknown> }> = [];
+    _setInstallProcessRunner(async (file, args, options) => {
+      captured.push({ file, args, options });
+      return { exitCode: 0, timedOut: false, stdout: "installed sk-secret-value-123456", stderr: "" };
+    });
+
+    const plan = await createOpenCodeInstallPlan();
+    await expect(installOpenCodeControlled({ nonce: plan.nonce, confirmationPhrase: "INSTALL_OPENCODE", confirm: false as true })).rejects.toMatchObject({ status: 400 });
+
+    const plan2 = await createOpenCodeInstallPlan();
+    const result = await installOpenCodeControlled({ nonce: plan2.nonce, confirmationPhrase: "INSTALL_OPENCODE", confirm: true });
+    expect(result.ok).toBe(true);
+    expect(result.stdoutTail).not.toContain("sk-secret-value-123456");
+    expect(captured).toHaveLength(1);
+    expect(captured[0].file).toBe("npm");
+    expect(captured[0].args).toEqual(OPENCODE_INSTALL_ARGS);
+    expect(captured[0].options.shell).toBe(false);
+  });
+});

@@ -84,6 +84,7 @@ export class ApiError extends Error {
 
 type DesktopBridge = {
   getApiHeaders: () => Promise<{ "X-TTS-Desktop-Token": string }>;
+  openOpenCodeConfig?: () => Promise<{ ok: true } | { ok: false; error: string }>;
 };
 
 declare global {

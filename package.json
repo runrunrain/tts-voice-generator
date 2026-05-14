@@ -23,6 +23,7 @@
     "desktop:dist:mac:arm64": "node scripts/build-desktop-target.js --platform darwin --arch arm64",
     "desktop:dist:win:x64": "node scripts/build-desktop-target.js --platform win32 --arch x64",
     "desktop:print-electron-version": "node -e \"console.log(require('electron/package.json').version)\"",
+    "deploy:current": "node scripts/quick-build-deploy.mjs",
     "quickstart": "node scripts/start.js",
     "smoke": "node scripts/start.js --smoke"
   },

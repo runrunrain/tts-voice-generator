@@ -1,553 +1,469 @@
 # TTS Voice Generator
 
-AI-powered text-to-speech generator built with React, Hono, and OpenRouter Gemini TTS. A full-stack single-page application that converts text to natural-sounding speech, manages voice profiles, supports director-mode multi-speaker scene assembly, and exposes controlled API endpoints for integration with AI coding agents (e.g., OpenCode CLI plugins).
+TTS Voice Generator 是一个本地优先的 AI 语音生成工具。它使用 OpenRouter Gemini TTS 生成语音，前端为 React/Vite，后端为 Hono，数据落在本机 SQLite。项目同时支持 Web 开发模式、生产静态托管、Electron 桌面应用打包，以及面向 OpenCode 的本机设置管理和 Agent 调用能力。
 
-## Features
+## 快速上手（普通用户）
 
-- **Text-to-Speech Generation**: Convert text to audio via OpenRouter's Gemini TTS models. Supports WAV output with automatic PCM-to-WAV wrapping (24 kHz, 16-bit, mono).
-- **Multi-Voice Management**: Browse, verify, and manage voice profiles. Track verification status per voice.
-- **Director Mode**: Assemble multi-speaker scenes with role assignments, transcript blocks, and audio profiles.
-- **Generation History**: Full audit trail of every generation job with status, cost estimates, error codes, and audio playback/download.
-- **Agent-Controlled API**: Dedicated endpoints for external AI agents to generate speech under budget, concurrency, and approval controls (`confirm_each` and `session_auto` modes).
-- **Security**: OpenRouter API keys encrypted at rest (AES-256-GCM); local plugin tokens hashed (SHA-256) with timing-safe verification; credential patterns redacted from all error messages and logs.
-- **Diagnostics Dashboard**: `/api/ready` preflight checks and `/api/diagnostics` deep-dive endpoint providing server health, DB status, recent failures, and agent action logs.
-- **Production Static Hosting**: Hono server serves the built React SPA alongside API routes from a single Node.js process.
+如果你只想尽快使用工具生成语音，按下面顺序操作即可。
 
-## Architecture Overview
+### 1. 安装或打开应用
 
-```
-+-----------------------+       +----------------------------+
-|   React 18 SPA        |       |   Hono API Server (:3001)  |
-|   (Vite + Tailwind)   |       |   Node.js                  |
-|                       |       |                            |
-|  src/                 |  dev  |  server/src/               |
-|   app/                | proxy |   routes/                  |
-|    pages/             |<----->|    health.ts    /api/health|
-|    components/        |   or  |    settings.ts  /api/set...|
-|    services/          | static|    voices.ts    /api/voice*|
-|    state/             | serve |    tts.ts       /api/tts/* |
-+-----------------------+       |    history.ts   /api/hist* |
-                                |    agent.ts     /api/agent*|
-                                |    diagnostics  /api/diag* |
-                                |                            |
-                                |   services/                |
-                                |    openrouter-provider.ts  |
-                                |    tts-generator.ts        |
-                                |    agent-auth.ts           |
-                                |    key-resolver.ts         |
-                                |    concurrency.ts          |
-                                |                            |
-                                |   db/ (Drizzle ORM)        |
-                                |    SQLite (WAL mode)       |
-                                |   data/                    |
-                                |    db/tts-generator.db     |
-                                |    audio/YYYY/MM/DD/*.wav  |
-                                +----------------------------+
+- 已安装桌面版：直接打开 `TTS Voice Generator.app`，数据会保存在本机用户目录。
+- macOS 快速部署：在项目根目录运行 `npm run deploy:current`，脚本会构建、替换 `/Applications/TTS Voice Generator.app`，并默认执行冒烟检查后启动应用。
+- 开发模式：首次从源码运行时先执行 `npm install` 和 `npm install --prefix server`，之后用 `npm run quickstart` 一键启动前端和后端。
 
-External:
-  OpenRouter API (https://openrouter.ai/api/v1/audio/speech)
-  OpenCode CLI Plugin -> /api/agent/generate-speech
-```
+### 2. 首次配置 OpenRouter API Key
 
-### Tech Stack
+1. 打开应用后进入 Settings。
+2. 在 OpenRouter API Key 输入框粘贴自己的 Key。
+3. 点击保存，并使用连接测试确认可用于真实音频生成。
 
-| Layer | Technology |
-|-------|------------|
-| Frontend | React 18, TypeScript, Vite 6, Tailwind CSS 4, Radix UI, MUI |
-| Routing | react-router 7 |
-| Backend | Hono 4, Node.js, TypeScript |
-| Database | SQLite (better-sqlite3), Drizzle ORM |
-| TTS Provider | OpenRouter (Gemini TTS) |
-| Validation | Zod |
-| Testing | Vitest |
-| Build Tooling | tsc, Vite, concurrently, tsx |
+不要把 API Key 写进 README、截图、日志、命令参数或 Agent 输出。界面和诊断信息只应显示掩码或脱敏结果。
 
-### Project Structure
+### 3. 可选配置 OpenCode
 
-```
-tts-voice-generator/
-  src/                    # React frontend source
-    app/                  # Application pages, components, state, services
-    main.tsx              # Vite entry point
-    index.html            # HTML shell
-  server/                 # Hono backend source
-    src/
-      routes/             # API route handlers
-      services/           # Business logic (TTS, auth, concurrency)
-      config/             # Environment config, encryption utilities
-      db/                 # Drizzle ORM schema, seeds, DB init
-      utils/              # Audio format, voice helpers, file I/O
-    __tests__/            # Vitest test suites
-    package.json          # Server-specific dependencies
-  data/                   # Runtime data (DB + audio files), gitignored
-    audio/                # Generated audio files, organized by date
-    db/                   # SQLite database file
-  dist/                   # Frontend and server build output
-  guidelines/             # Development guidelines for AI coding agents
-  docs/                   # Integration and reference documentation
-```
+如果需要让 OpenCode 辅助整理需求并生成生产列表，可在 Settings 的 OpenCode 管理面板中操作：
 
-## Quick Start
+- 先刷新或检测 CLI 状态。
+- 未安装时，按界面提示执行受控安装。
+- 需要调整模型、provider baseURL 或 provider API Key 时，使用面板保存；也可以打开 `opencode.json` 检查 JSON 配置。
 
-### Prerequisites
+OpenCode 配置读写只在桌面版或可信本机环境可用。远程 Web 环境默认不可访问本机配置。
 
-- Node.js 20+
-- npm 10+
-- An OpenRouter API key (https://openrouter.ai/keys)
+### 4. 创建任务并生成语音
 
-### Setup
+1. 进入 Tasks，新建一个语音生产任务。
+2. 在任务工作区导入或粘贴需求文档。
+3. 使用 Agent/Normalize 流程生成生产列表，检查每一行的文本、说话人、音色和备注。
+4. 确认列表无误后开始生成语音。
+5. 到 History 查看生成记录，播放或下载生成的音频文件。
+
+常见任务状态：
+
+| 状态 | 含义 |
+| --- | --- |
+| 草稿 | 任务刚创建，内容还不完整 |
+| 就绪 | 已有需求文档或生产列表，可以继续处理 |
+| 生产中 | 已开始生成，部分语音可能已经完成 |
+| 阻塞 | 任务被标记为暂不能继续，需要先处理问题 |
+| 完成 | 生产列表中的语音都已成功生成 |
+| 失败 | 至少有语音行生成失败，需要查看错误并重试 |
+
+### 5. 用户数据与问题排查
+
+- Web/开发模式的数据通常在项目 `data/` 目录。
+- 桌面版数据在系统 userData 目录，例如 macOS 的 `~/Library/Application Support/TTS Voice Generator/`。
+- 不要手动删除 `data/` 或 userData；它们保存数据库、历史记录、生成音频、设置和部署备份。
+- 遇到问题时，先看 Settings 里的诊断信息，再检查 OpenCode 管理面板；如果是快速部署问题，优先运行 `npm run deploy:current -- --dry-run --skip-npm-install --no-launch --no-smoke` 或 `npm run smoke` 定位基础启动问题。
+
+## 核心能力
+
+- 文本转语音：通过 OpenRouter Gemini TTS 生成音频，默认输出 WAV。
+- 多音色管理：浏览、验证和使用不同 voice profile。
+- 导演模式：按角色组织多说话人脚本，适合对白和场景化语音。
+- 生成历史：记录每次生成任务、状态、费用估算、错误信息和音频文件。
+- 批量与生产列表：支持需求文档 normalize、生产列表版本管理、导入导出和批量生成。
+- Agent 审批流程：为外部 Agent 提供受控 API，支持每次确认和会话自动批准两种模式。
+- OpenCode 设置管理：在可信本机环境下检测、安装和安全编辑 OpenCode 配置。
+- 桌面应用：Electron 包内嵌 Hono 服务和 React 前端，使用本机 userData 保存数据库与音频。
+
+## 技术栈
+
+| 层级 | 技术 |
+| --- | --- |
+| 前端 | React 18、TypeScript、Vite 6、Tailwind CSS 4、Radix UI、MUI |
+| 后端 | Hono 4、Node.js、TypeScript |
+| 数据库 | SQLite、better-sqlite3、Drizzle ORM |
+| 桌面端 | Electron 31、electron-builder、esbuild |
+| TTS 服务 | OpenRouter Gemini TTS |
+| Agent 集成 | OpenCode CLI subprocess、受控 Agent API |
+
+## 运行环境
+
+- Node.js 20 及以上，quick deploy 要求 `>=20.0.0 <23.0.0`。
+- npm 10 及以上。
+- OpenRouter API Key，用于真实语音生成。
+- macOS 桌面快速部署需要 Xcode Command Line Tools，以及系统自带的 `hdiutil`、`open`、`osascript`、`ditto`、`plutil`、`pgrep`。
+- Windows 桌面包需要在 Windows x64 环境执行对应打包命令。
+
+## 安装依赖
+
+项目根目录和 `server/` 各有一套依赖：
 
 ```bash
-# Install all dependencies (frontend + server)
 npm install
-cd server && npm install && cd ..
-
-# Create .env file with your OpenRouter API key
-echo "OPENROUTER_API_KEY=<your-openrouter-key>" > .env
+npm install --prefix server
 ```
 
-### Development Mode
+如果存在 lockfile，建议在自动化或发布环境中使用：
 
-**One-click quick start** (recommended for first-time use):
+```bash
+npm ci
+npm ci --prefix server
+```
+
+## 配置 API Key
+
+首次运行前，需要配置 OpenRouter API Key。推荐通过应用的 Settings 页面保存，后端会加密写入 SQLite。也可以使用 `.env` 作为回退配置：
+
+```bash
+OPENROUTER_API_KEY=<your_openrouter_api_key>
+```
+
+安全要求：
+
+- 不要提交 `.env`、API Key、local plugin token 或任何凭据文件。
+- 不要把 API Key 写进 README、脚本参数、日志、截图或 Agent 输出。
+- OpenRouter API Key 只应保存在服务器侧 `.env` 或加密后的 Settings 存储中。
+
+## 开发启动
+
+推荐使用一键启动脚本：
 
 ```bash
 npm run quickstart
 ```
 
-On Windows, you can also **double-click `start.bat`** in Explorer.
+该命令由 `scripts/start.js` 负责启动前端和后端，并统一输出日志。Windows 用户也可以双击 `start.bat`。
 
-This launches both services concurrently with unified log output:
-- Vite dev server on `http://localhost:5173` (with `/api/*` proxied to backend)
-- Hono API server on `http://localhost:3001`
-
-Press **Ctrl+C** or close the terminal window to stop all services. No orphan processes will be left behind.
-
-**Alternative** -- use `concurrently` (the original dev command):
+也可以使用 npm scripts 分开启动：
 
 ```bash
+# 同时启动 Hono 后端和 Vite 前端
 npm run dev:all
+
+# 只启动前端 Vite
+npm run dev
+
+# 只启动后端 Hono
+npm run server:dev
 ```
 
-**Smoke test** -- verify both services start and respond, then auto-exit:
+默认地址：
+
+- 前端开发服务：`http://localhost:5173`
+- 后端 API：`http://localhost:3001`
+- 健康检查：`http://localhost:3001/api/health`
+- 就绪检查：`http://localhost:3001/api/ready`
+
+自动化冒烟检查：
 
 ```bash
 npm run smoke
 ```
 
-This is useful for CI/CD or automated validation. It starts the services, checks health endpoints, and exits with code 0 on success or 1 on failure.
+## 生产构建与启动
 
-The API key can also be configured through the Settings page in the UI (stored encrypted in the database). The `.env` file serves as a fallback.
-
-### Production Mode
+构建前端和后端：
 
 ```bash
-# Build frontend + server, then start
+npm run build:all
+```
+
+启动生产服务：
+
+```bash
+npm run server:start
+```
+
+也可以一条命令完成构建并启动：
+
+```bash
 npm run start:all
 ```
 
-Or run the steps individually:
+生产模式下，Hono 会从 `dist/` 提供 React SPA 静态文件，并同时提供 `/api/*` 路由，不需要单独启动前端服务。
+
+## 桌面应用构建与部署
+
+Electron 桌面版会把后端服务限制在本机回环地址，并通过 preload bridge 注入桌面会话 token。桌面运行时的数据库和音频文件保存在操作系统 userData 目录，不在项目 `data/` 目录中。
+
+常用命令：
 
 ```bash
-npm run build:all        # Builds Vite frontend to dist/ + compiles server TypeScript
-npm run server:start     # Starts the production server on port 3001
+# 构建 Electron main/preload 到 dist-electron/
+npm run electron:build
+
+# 构建当前平台目标
+npm run desktop:target
+
+# 构建当前 macOS 架构的桌面包
+npm run desktop:package:mac
+
+# 分架构构建 macOS 包
+npm run desktop:dist:mac:x64
+npm run desktop:dist:mac:arm64
+
+# 在 Windows x64 环境构建 Windows 安装包
+npm run desktop:dist:win:x64
+
+# 打印当前 Electron 版本
+npm run desktop:print-electron-version
 ```
 
-In production, the Hono server serves the built React SPA from `dist/` alongside all API routes. No separate frontend server is needed.
+平台包装脚本：
 
-### Desktop Packaging
+- macOS：`scripts/build-desktop.sh`
+- Windows：`scripts/build-desktop.bat`
 
-The Electron desktop app embeds the built Hono server and serves the SPA through a loopback-only HTTP endpoint. Packaged desktop mode binds the API to `127.0.0.1`, stores the SQLite database and generated audio under the OS user data directory, and protects `/api/*` requests with a per-session `X-TTS-Desktop-Token` header injected by the preload bridge.
+构建产物默认写入 `release/desktop/<platform>-<arch>/`，中间 staging 目录为 `dist-desktop/app-<platform>-<arch>/`。
+
+### macOS 快速构建并部署
+
+快速部署入口是 `scripts/quick-build-deploy.mjs`，package.json 中对应命令为：
 
 ```bash
-npm run electron:build          # build Electron main/preload into dist-electron/
-npm run desktop:package:mac     # build the current macOS arch dmg
-npm run desktop:dist:win:x64    # run on Windows x64 to build NSIS installer
+npm run deploy:current
 ```
 
-Platform wrapper scripts are also available: `scripts/build-desktop.sh` on macOS and `scripts/build-desktop.bat` on Windows. Desktop artifacts are written to `release/desktop/<platform>-<arch>/`; each target uses an independent `dist-desktop/app-<platform>-<arch>/` staging directory and rebuilds `better-sqlite3` against the installed Electron version.
+常用参数：
 
-## Environment Variables
+```bash
+# 只预览计划，不安装依赖、不构建、不替换、不冒烟、不启动
+npm run deploy:current -- --dry-run --skip-npm-install --no-launch --no-smoke
 
-All variables are defined in `server/src/config/env.ts`:
+# 默认安全策略：安装项目依赖、构建、替换 /Applications 中的应用、冒烟、启动
+npm run deploy:current
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OPENROUTER_API_KEY` | (none) | OpenRouter API key (sk-or-v1-...). Fallback if not set in DB. |
-| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter API base URL |
-| `PORT` | `3001` | Server listen port |
-| `AUDIO_OUTPUT_DIR` | `./data/audio` | Directory for generated audio files |
-| `DB_PATH` | `./data/db/tts-generator.db` | SQLite database path |
-| `DATA_DIR` | `./data` | Root data directory |
-| `NODE_ENV` | `development` | Environment (`development` or `production`) |
+# 跳过依赖安装，替换后不启动
+npm run deploy:current -- --skip-npm-install --no-launch
 
-The `.env` file is gitignored. Never commit API keys or tokens to version control.
-
-## Data Directory
-
+# 仅在明确接受 lockfile 缺失时，允许 npm install 回退
+npm run deploy:current -- --allow-npm-install-fallback
 ```
+
+quick deploy 的安全边界：
+
+- 只允许替换 `/Applications/TTS Voice Generator.app`。
+- 不会静默安装系统依赖；`--install-system-deps` 只打印手动安装建议。
+- 默认使用 `npm ci` 安装根项目和 `server/` 依赖。
+- 如果缺少 lockfile，会失败关闭，除非显式传入 `--allow-npm-install-fallback`。
+- 替换前会校验 bundle id，替换失败或冒烟失败时尝试从备份回滚。
+- 不执行 git 命令。
+- 不会删除或移动 `~/Library/Application Support/TTS Voice Generator`。
+
+不要手动删除 userData 目录。该目录保存桌面版 SQLite 数据库、生成音频、部署备份和用户设置，误删会造成历史记录和配置丢失。
+
+## OpenCode 设置管理
+
+Settings 页面包含 OpenCode 管理面板，可用于本机 OpenCode 能力检测、配置读取、配置写入、打开配置文件和受控安装。
+
+配置路径规则：
+
+- 如果 `XDG_CONFIG_HOME` 是绝对路径，使用 `$XDG_CONFIG_HOME/opencode/opencode.json`。
+- 否则使用 `~/.config/opencode/opencode.json`。
+
+安全边界：
+
+- 只有桌面版，或显式启用本机能力的可信 loopback 请求，才能读写 OpenCode 配置。
+- 远程访问、非本机 Host、非本机 Origin 或可疑 forwarded header 会禁用本地 OpenCode 能力。
+- Web 开发模式默认不启用本机 OpenCode 能力；需要通过环境变量 `OPENCODE_LOCAL_CAPABILITIES=enabled` 显式开启。
+- API Key 在界面中只回显掩码，不回显明文。
+- 写入配置使用 revision 校验，避免覆盖外部修改。
+- 只允许安全编辑 model、provider baseURL 和 provider API Key 动作；不会重写未知高级配置。
+- 受控安装固定为 `npm install -g opencode-ai@latest`，需要用户确认短语 `INSTALL_OPENCODE`。
+
+OpenCode CLI 与 TTS 服务交互时，`scripts/tts-agent-cli.ts` 读取 `TTS_API_URL`，默认连接 `http://127.0.0.1:3001`。不要把 OpenRouter API Key 传给 CLI；CLI 只需要连接 TTS 服务，Agent 端点使用独立的 local plugin token。
+
+更多细节见 `docs/opencode-agent-integration.md`。
+
+## 常用命令
+
+以下命令来自根目录 `package.json`：
+
+| 命令 | 作用 |
+| --- | --- |
+| `npm run quickstart` | 使用 `scripts/start.js` 一键启动开发环境 |
+| `npm run dev:all` | 同时启动后端 watch 和前端 Vite |
+| `npm run dev` | 启动前端 Vite |
+| `npm run server:dev` | 启动后端 watch |
+| `npm run build` | 构建前端 |
+| `npm run server:build` | 构建后端 |
+| `npm run build:all` | 构建前端和后端 |
+| `npm run server:start` | 启动已构建的后端生产服务 |
+| `npm run start:all` | 构建前后端并启动生产服务 |
+| `npm test` | 运行后端测试 |
+| `npm run server:test` | 运行后端测试 |
+| `npm run smoke` | 启动服务并执行冒烟检查 |
+| `npm run package:release` | 打包发布归档 |
+| `npm run electron:build` | 构建 Electron main/preload |
+| `npm run desktop:target` | 构建当前桌面目标 |
+| `npm run desktop:package:mac` | 构建当前 macOS 架构包 |
+| `npm run desktop:dist:mac:x64` | 构建 macOS x64 包 |
+| `npm run desktop:dist:mac:arm64` | 构建 macOS arm64 包 |
+| `npm run desktop:dist:win:x64` | 构建 Windows x64 包 |
+| `npm run desktop:print-electron-version` | 打印 Electron 版本 |
+| `npm run deploy:current` | 执行 macOS quick deploy |
+
+`server/package.json` 还提供服务端开发命令：
+
+| 命令 | 执行位置 | 作用 |
+| --- | --- | --- |
+| `npm run dev` | `server/` | 后端 watch 开发 |
+| `npm run build` | `server/` | TypeScript 编译 |
+| `npm run start` | `server/` | 启动 `server/dist/index.js` |
+| `npm run test` | `server/` | Vitest run |
+| `npm run test:watch` | `server/` | Vitest watch |
+| `npm run typecheck` | `server/` | `tsc --noEmit` |
+
+## 目录结构
+
+```text
+tts-voice-generator/
+  src/                         React 前端源码
+    app/                       页面、组件、状态和服务
+  server/                      Hono 后端
+    src/
+      routes/                  API 路由
+      services/                TTS、OpenRouter、OpenCode、审批、并发等服务
+      db/                      Drizzle schema 和数据库初始化
+      config/                  环境变量与配置
+    __tests__/                 后端测试
+    package.json               后端依赖与脚本
+  electron/                    Electron main/preload 源码
+  scripts/                     启动、打包、桌面构建、quick deploy、CLI 脚本
+  docs/                        集成和参考文档
+  guidelines/                  开发规范
+  data/                        本地 Web 运行数据，已 gitignore
+  dist/                        前端构建产物
+  dist-electron/               Electron 构建产物
+  dist-desktop/                桌面 staging 目录
+  release/                     发布和桌面打包产物
+  package.json                 根项目脚本与前端依赖
+  start.bat                    Windows 一键启动脚本
+```
+
+## 数据与文件位置
+
+Web/Node 运行默认使用：
+
+```text
 data/
   db/
-    tts-generator.db       # SQLite database (WAL mode)
-    tts-generator.db-wal   # WAL journal file
-    tts-generator.db-shm   # WAL shared memory file
+    tts-generator.db
+    tts-generator.db-wal
+    tts-generator.db-shm
   audio/
-    YYYY/MM/DD/
-      {uuid}.wav           # Generated audio files, organized by creation date
+    YYYY/MM/DD/{uuid}.wav
 ```
 
-The entire `data/` directory is gitignored. Audio files are named by job UUID, organized by date for manageable file counts per directory.
+桌面版使用系统 userData 目录，例如 macOS：
 
-## Security Model
+```text
+~/Library/Application Support/TTS Voice Generator/
+```
 
-### OpenRouter API Key Protection
+`data/`、userData、`.env`、token 文件、生成音频和数据库都不应提交到版本库。
 
-- **At Rest**: API keys stored in the SQLite database are encrypted with AES-256-GCM. The encryption key is derived from the DB file path + a fixed salt using `crypto.scryptSync`, ensuring the key cannot be recovered from the DB alone without the server environment.
-- **In Transit**: Keys are sent to OpenRouter over HTTPS. The `/api/settings` GET endpoint returns only a masked version (e.g., `sk-***...****`). The plaintext key is never exposed to the frontend.
-- **Resolution Order**: DB-first, then `.env` fallback. The DB path is prioritized because it is encrypted; `.env` is a convenience for first-time setup.
-- **Error Sanitization**: All error responses, logs, and stored error metadata are scanned for credential patterns (`Bearer sk-...`, `apiKey=...`, etc.) and redacted before returning or persisting.
+## API 与 Agent 集成
 
-### Local Plugin Token
+常用 API：
 
-- Agent-facing endpoints (`/api/agent/*`) require a Bearer token for authentication.
-- Tokens use the prefix `lpt_` followed by 32 random bytes (base64url-encoded).
-- Only the **SHA-256 hash** of the token is stored in the database -- never the plaintext.
-- Verification uses `crypto.timingSafeEqual` to prevent timing attacks.
-- Token fingerprint (first 8 + last 8 characters of the hash) is exposed in the settings UI for identification without revealing the full hash.
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/health` | 基础健康检查 |
+| `GET` | `/api/ready` | 就绪检查，不调用 OpenRouter |
+| `GET` | `/api/diagnostics` | 诊断信息，包含脱敏后的近期错误和 Agent 操作 |
+| `GET` | `/api/settings` | 读取设置，敏感字段只返回掩码或指纹 |
+| `PUT` | `/api/settings` | 保存设置、旋转或清除 local plugin token |
+| `POST` | `/api/settings/test` | 测试 OpenRouter 连接 |
+| `POST` | `/api/tts/generate` | 生成语音 |
+| `GET` | `/api/history` | 查询生成历史 |
+| `GET` | `/api/audio/:assetId` | 播放或下载音频 |
+| `POST` | `/api/agent/generate-speech` | Agent 发起语音生成请求 |
+| `POST` | `/api/agent/approve-action` | 批准或拒绝待确认 Agent 动作 |
 
-### CORS
+Agent 端点需要 `Authorization: Bearer <LOCAL_PLUGIN_TOKEN>`。local plugin token 只在创建或旋转时显示一次，后端只保存 SHA-256 hash。
 
-Only whitelisted local development origins are allowed:
-- `http://localhost:5173`
-- `http://127.0.0.1:5173`
-- `http://localhost:5174`
-- `http://127.0.0.1:5174`
+## 发布归档
 
-Programmatic access (curl, agent plugins) does not require CORS headers and works without origin restrictions.
-
-## Core API Reference
-
-All endpoints are prefixed with `/api/` unless noted otherwise.
-
-### Health and Diagnostics
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/health` | Basic health check (uptime, key status, active jobs) |
-| GET | `/api/runtime/health` | Alias for `/api/health` (frontend compatibility) |
-| GET | `/api/ready` | Readiness preflight: checks DB, audio dir, key config, route registration. Does NOT call OpenRouter. |
-| GET | `/api/diagnostics` | Deep diagnostics: server info, recent failures, agent action log, audio directory stats |
-
-### Settings
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/settings` | Read current settings (key masked, agent token fingerprint) |
-| PUT | `/api/settings` | Update settings (key encrypted on save, token rotate/clear) |
-| POST | `/api/settings/test` | Test OpenRouter connection (key validity, latency) |
-| POST | `/api/settings/test-connection` | Alias for test endpoint |
-
-### TTS Generation
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/tts/generate` | Generate speech from text. Requires `model`, `input`, `voice`, optional `responseFormat` (wav/pcm/mp3), `directorSnapshot`. |
-
-### History and Audio
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/history` | List generation jobs (paginated, filterable by voice/status/source/date) |
-| GET | `/api/jobs/:jobId` | Get single job detail with associated audio asset metadata |
-| GET | `/api/audio/:assetId` | Stream/download audio file. Append `?download=1` for Content-Disposition: attachment. |
-
-### Voice Profiles
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/voices` | List all voice profiles |
-| GET | `/api/voices/:voiceId` | Future endpoint for single voice profile details |
-
-### Agent-Controlled Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/agent/generate-speech` | Agent-initiated speech generation (approval gated) |
-| POST | `/api/agent/approve-action` | Approve or reject a pending agent action |
-
-See `docs/opencode-agent-integration.md` for detailed integration guide.
-
-### Agent CLI Remote Connection
-
-`scripts/tts-agent-cli.ts` uses `TTS_API_URL` as the server origin and defaults to `http://127.0.0.1:3001`:
+生成自包含发布归档：
 
 ```bash
-# Local default
-TTS_API_URL=http://127.0.0.1:3001 npx tsx scripts/tts-agent-cli.ts task list
-
-# Remote server; do not append /api
-TTS_API_URL=https://tts.example.com npx tsx scripts/tts-agent-cli.ts production export --taskId <task-id> --format md
-```
-
-OpenRouter API keys stay on the server side only, in `.env` or encrypted Settings storage. CLI requests do not carry or print the OpenRouter API key. See [CLI Remote Connection](./docs/opencode-agent-integration.md#cli-remote-connection) for remote examples and troubleshooting for connection failures, 401/403, `expectedVersion` conflicts, and approval/cost confirmation failures.
-
-## Agent-Controlled API Flow
-
-The agent API follows a two-phase approval model:
-
-### Mode: `confirm_each` (default)
-
-```
-Agent Plugin                  TTS Server
-     |                            |
-     |-- POST /api/agent/generate-speech -->|
-     |   (Bearer <token>)                   |
-     |                            |-- Validate token
-     |                            |-- Check settings (agentAuthMode, budget)
-     |                            |-- Create pending action log
-     |<-- 202 { status: "approval_required" }
-     |                            |
-     |-- POST /api/agent/approve-action --->|
-     |   { actionLogId, decision: "approve", scope: "once" }
-     |                            |-- Claim action (optimistic concurrency)
-     |                            |-- Execute generateSpeech()
-     |                            |-- Update action log
-     |<-- 200 { ok: true, jobId, audioUrl, ... }
-```
-
-### Mode: `session_auto`
-
-When an approval with `scope: "session"` is granted, the server creates a bounded session (max requests, max characters, max cost, expiry). Subsequent generate-speech requests within the same conversation and within budget auto-execute without further approval prompts.
-
-```
-Agent Plugin                  TTS Server
-     |                            |
-     |-- approve-action (scope: "session") -->|
-     |                            |-- Create session (budget caps applied)
-     |                            |-- Execute first action
-     |<-- 200 { ok: true, sessionId, ... }
-     |                            |
-     |-- generate-speech (same conversationId) -->|
-     |                            |-- Find active session
-     |                            |-- Reserve budget (atomic UPDATE with guard)
-     |                            |-- Execute immediately (no approval needed)
-     |<-- 200 { ok: true, ... }
-```
-
-### Budget Tracking
-
-Each session enforces three concurrent limits:
-- **Max Requests**: Maximum number of generate-speech calls per session
-- **Max Characters**: Total input characters across all calls
-- **Max Cost**: Total estimated cost (based on `charCount * 0.000021`)
-
-Budget reservation uses an atomic SQL UPDATE with guard clauses to prevent race conditions from concurrent agent requests.
-
-## Configuration
-
-The following settings can be configured via `PUT /api/settings` or the Settings page in the UI:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `defaultModel` | `google/gemini-3.1-flash-tts-preview` | Default TTS model |
-| `defaultVoice` | `Zephyr` | Default voice |
-| `defaultFormat` | `wav` | Default output format |
-| `maxCharsPerRequest` | `5000` | Maximum input characters per generation request |
-| `maxConcurrentJobs` | `2` | Maximum concurrent generation jobs |
-| `agentAuthMode` | `confirm_each` | Agent approval mode (`confirm_each` or `session_auto`) |
-| `agentMaxRequests` | `10` | Maximum agent requests per session |
-| `agentMaxChars` | `10000` | Maximum total characters per agent session |
-| `agentMaxCost` | `0.01` | Maximum estimated cost (USD) per agent session |
-| `agentSessionExpiry` | `3600` | Agent session expiry in seconds (1 hour) |
-
-## Release Packaging
-
-The project includes a release packaging script that produces a self-contained, distributable `.tar.gz` archive with all built assets, configuration templates, and documentation.
-
-### Package Release
-
-```bash
-# Build everything and create release archive in one command
 npm run package:release
 ```
 
-This single command:
-1. Runs `npm run build:all` (frontend Vite build + server TypeScript compilation)
-2. Stages a clean `release/staging/` directory with only production-ready files
-3. Generates `release-manifest.json` with sha256 checksums for every file
-4. Creates `release/tts-voice-generator-v<version>-<commit>.tar.gz`
-5. Validates the archive for completeness and security
+发布脚本会构建前后端，整理 `release/staging/`，生成 `release-manifest.json`，并创建 `release/tts-voice-generator-v<version>-<commit>.tar.gz`。
 
-### What Gets Included
+发布包不会包含：
 
-| Path | Description |
-|------|-------------|
-| `dist/` | Built React SPA (HTML, JS, CSS assets) |
-| `server/dist/` | Compiled server TypeScript (production JavaScript) |
-| `server/package.json` | Server dependency manifest |
-| `server/package-lock.json` | Server dependency lockfile |
-| `package.json` | Root dependency manifest |
-| `package-lock.json` | Root dependency lockfile |
-| `.env.example` | Environment variable template (no real keys) |
-| `README.md` | This documentation |
-| `ATTRIBUTIONS.md` | Third-party licenses |
-| `docs/` | Integration and reference documentation |
-| `guidelines/` | Development guidelines |
-| `scripts/start.js` | Quick-start launcher |
-| `release-manifest.json` | Build metadata, file list, sha256 checksums |
+- `.env`
+- `APIkey.md`
+- `data/`
+- `node_modules/`
+- `agent-outputs/`
+- `.git/`
+- `.opencode/`
+- `release/`
 
-### What Gets Excluded
+## 故障排查
 
-The following are intentionally excluded from the release package:
+### 启动后打不开页面
 
-| Path/Pattern | Reason |
-|-------------|--------|
-| `node_modules/` | Runtime dependency; installed on target via `npm install --production` |
-| `data/` (db, audio) | Runtime data; created on target at first launch |
-| `.env` | Contains real API keys; use `.env.example` as template |
-| `APIkey.md` | Credential file; never distributed |
-| `agent-outputs/` | Build/test artifacts; not needed in production |
-| `.git/`, `.opencode/` | Development tooling |
-| `release/` | Build staging; prevents recursive packaging |
-| `*.log`, `.DS_Store`, `Thumbs.db` | System/temporary files |
+1. 确认 `npm run quickstart` 或 `npm run dev:all` 没有报错。
+2. 打开 `http://localhost:5173`。
+3. 如果前端能打开但请求失败，检查 `http://localhost:3001/api/ready`。
 
-### Release Manifest
+### 端口 3001 被占用
 
-The `release-manifest.json` in the archive root contains:
+关闭已有后端进程，或设置新的 `PORT` 后重新启动。开发环境中前端代理默认指向后端 API，需要保持地址一致。
 
-```json
-{
-  "appName": "tts-voice-generator",
-  "version": "0.0.1",
-  "serverVersion": "0.1.0",
-  "buildTime": "2026-05-07T...",
-  "nodeVersion": "v20.x.x",
-  "git": { "commit": "abc1234", "branch": "main" },
-  "includedPaths": ["dist/index.html", "server/dist/index.js", ...],
-  "excludedPatterns": ["node_modules/", "data/", ".env", ...],
-  "fileCount": 42,
-  "fileChecksums": { "dist/index.html": "sha256hex...", ... }
-}
-```
+### `/api/ready` 返回 `keyConfigured=false`
 
-### Deploy from Release Archive
+说明后端没有可用 OpenRouter API Key。到 Settings 页面保存 API Key，或检查 `.env` 中的 `OPENROUTER_API_KEY`。
 
-```bash
-# 1. Extract
-tar -xzf tts-voice-generator-v0.0.1-abc1234.tar.gz -C /opt/tts-voice-generator
+### 生成失败或 OpenRouter 返回授权错误
 
-# 2. Install production dependencies
-cd /opt/tts-voice-generator/server && npm install --production && cd ..
+1. 使用 Settings 页面测试连接。
+2. 确认 API Key、账户权限、余额和模型访问权限。
+3. 不要把 API Key 传给前端、CLI 或 Agent 请求。
 
-# 3. Configure environment
-cp .env.example .env
-# Edit .env and set OPENROUTER_API_KEY
+### Agent 端点返回 401
 
-# 4. Start the server (serves both API and static frontend)
-node server/dist/index.js
-```
+1. 在 Settings 页面生成或旋转 local plugin token。
+2. 确认请求带有 `Authorization: Bearer <LOCAL_PLUGIN_TOKEN>`。
+3. token 被清除或旋转后，旧 token 会立即失效。
 
-### Security Guarantee
+### OpenCode 管理面板不可用
 
-The release packaging script:
-- Never reads or includes `.env` files (real API keys)
-- Never includes `APIkey.md` or any credential file
-- Scans the generated manifest for leaked secret patterns
-- Validates that forbidden paths are absent from the archive
-- Exits with non-zero code if any validation fails
+可能原因：
 
-## Verification and Testing
+- 当前不是桌面版。
+- Web 运行时未设置 `OPENCODE_LOCAL_CAPABILITIES=enabled`。
+- 请求不是可信 loopback 访问。
+- 远程部署环境禁止访问本机 OpenCode 配置。
 
-### Test Suite
+这是安全限制。不要为了远程访问而放宽本机配置读写边界。
 
-```bash
-# Run all server tests
-npm test
+### OpenCode 配置保存冲突
 
-# Run with watch mode
-cd server && npm run test:watch
-```
+如果提示配置文件已被外部修改，先刷新页面重新读取配置，再保存。该机制用于避免覆盖你在编辑器或其他工具中刚刚修改的 `opencode.json`。
 
-### Readiness Check
+### quick deploy 失败
 
-```bash
-curl http://localhost:3001/api/ready
-```
+1. 先运行 dry run：
 
-Returns:
-```json
-{
-  "ready": true,
-  "checks": [
-    {"name": "keyConfigured", "ok": true, "detail": "API key is available"},
-    {"name": "dbOk", "ok": true, "detail": "DB accessible, settings row exists"},
-    {"name": "audioDirWritable", "ok": true, "detail": "Audio dir: ./data/audio"},
-    {"name": "routesReady", "ok": true, "detail": "Core API routes are registered and responding"}
-  ],
-  "summary": {
-    "keyConfigured": true,
-    "dbOk": true,
-    "audioDirWritable": true,
-    "routesReady": true
-  },
-  "realOpenRouterVerified": false
-}
-```
+   ```bash
+   npm run deploy:current -- --dry-run --skip-npm-install --no-launch --no-smoke
+   ```
 
-### Diagnostics
+2. 检查 Node.js、npm、lockfile、Xcode Command Line Tools 和 macOS 系统工具。
+3. 如果替换或冒烟失败，脚本会尝试从 `~/Library/Application Support/TTS Voice Generator/deploy-backups` 回滚。
+4. 不要删除 userData 目录来“清理部署”，这会丢失用户数据。
 
-```bash
-curl http://localhost:3001/api/diagnostics
-```
+### 桌面版启动后没有历史记录
 
-Returns server version, uptime, readiness checks, recent failed jobs, recent agent actions, and audio directory stats with sensitive field redaction.
+确认你查看的是桌面版 userData 中的数据库，而不是项目 `data/` 目录。Web 开发模式和 Electron 桌面版的数据位置不同。
 
-### Real OpenRouter Smoke Test
+## 安全说明
 
-The project includes a smoke test (`server/__tests__/smoke-real-openrouter.test.ts`) that performs end-to-end validation against the real OpenRouter API. It runs only when the `OPENROUTER_API_KEY` environment variable is set.
+- 不提交 `.env`、API Key、local plugin token、SQLite 数据库、音频文件或 userData。
+- `.env.example` 只能包含占位符，不能包含真实凭据。
+- Settings 接口返回敏感信息时必须保持掩码或指纹形式。
+- OpenCode 配置读写只允许可信本机环境，远程环境默认禁用。
+- 桌面 quick deploy 只替换应用包，不删除 userData。
+- 日志、错误响应和诊断信息应保持敏感信息脱敏。
 
-**With Key**: Executes full generation, file verification, job detail, audio streaming, and history checks.
+## 许可证
 
-**Without Key**: Writes a structured `blocked` report to `agent-outputs/tester/phase4-real-openrouter-smoke/` with `realOpenRouterVerified: false`. This is an explicit precondition marker -- the test does not constitute a pass when no key is available.
-
-In the current automated environment, the OpenRouter API key is not configured, so the real smoke test reports as blocked/skipped. This is expected and documented.
-
-## Troubleshooting
-
-### Server won't start
-
-Check that port 3001 is not in use:
-```bash
-# Windows
-netstat -ano | findstr :3001
-```
-
-### API returns "MISSING_API_KEY"
-
-Configure your OpenRouter API key either:
-1. Via the Settings page in the UI (stored encrypted in DB)
-2. Via `.env` file: `OPENROUTER_API_KEY=<your-openrouter-key>`
-
-### /api/ready reports keyConfigured=false
-
-Check that the key is set in either the DB (via Settings UI) or the `.env` file. The readiness endpoint checks both sources via the `key-resolver` service.
-
-### Agent endpoints return 401
-
-Ensure:
-1. A local plugin token has been generated (Settings page -> rotate/clear token)
-2. The `Authorization: Bearer <token>` header is sent with the correct token
-3. The token prefix is `lpt_` (e.g., `Authorization: Bearer lpt_...`)
-
-### Audio files not found
-
-Check that `data/audio/` exists and is writable:
-```bash
-ls -la data/audio/   # Unix
-dir data\audio\      # Windows
-```
-
-If the directory is missing, the server will create it on startup.
-
-## License
-
-Proprietary. See [ATTRIBUTIONS.md](./ATTRIBUTIONS.md) for third-party component licenses.
+Proprietary。第三方组件许可见 [ATTRIBUTIONS.md](./ATTRIBUTIONS.md)。

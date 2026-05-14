@@ -10,6 +10,9 @@ const desktopApi = {
   openDataDirectory: async (): Promise<{ ok: true } | { ok: false; error: string }> => {
     return ipcRenderer.invoke("tts-desktop:open-data-directory");
   },
+  openOpenCodeConfig: async (): Promise<{ ok: true } | { ok: false; error: string }> => {
+    return ipcRenderer.invoke("tts-desktop:open-opencode-config");
+  },
 };
 
 contextBridge.exposeInMainWorld("ttsDesktop", desktopApi);

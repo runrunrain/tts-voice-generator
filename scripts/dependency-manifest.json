@@ -1,0 +1,175 @@
+{
+  "$schema": "https://example.local/tts-voice-generator/dependency-manifest.schema.json",
+  "schemaVersion": "tts.quick-deploy.dependency-manifest.v1",
+  "project": {
+    "id": "tts-voice-generator",
+    "name": "TTS Voice Generator",
+    "root": ".",
+    "productName": "TTS Voice Generator",
+    "appId": "com.maorun.tts-voice-generator"
+  },
+  "runtime": {
+    "node": {
+      "range": ">=20.0.0 <23.0.0",
+      "required": true,
+      "manualInstallHint": "Install Node.js 20 with nvm install 20 && nvm use 20, or brew install node@20."
+    },
+    "npm": {
+      "range": ">=10.0.0",
+      "required": true,
+      "manualInstallHint": "Install npm 10+ with the matching Node.js 20 toolchain."
+    }
+  },
+  "npmProjects": [
+    {
+      "id": "root",
+      "path": ".",
+      "packageJson": "package.json",
+      "lockfile": "package-lock.json",
+      "install": {
+        "defaultCommand": ["npm", "ci"],
+        "fallbackCommand": ["npm", "install"],
+        "useFallbackOnlyWhenLockfileMissing": true,
+        "allowedAutoInstall": true
+      },
+      "requiredScripts": [
+        "build:all",
+        "electron:build",
+        "desktop:package:mac",
+        "deploy:current"
+      ]
+    },
+    {
+      "id": "server",
+      "path": "server",
+      "packageJson": "server/package.json",
+      "lockfile": "server/package-lock.json",
+      "install": {
+        "defaultCommand": ["npm", "ci", "--prefix", "server"],
+        "fallbackCommand": ["npm", "install", "--prefix", "server"],
+        "useFallbackOnlyWhenLockfileMissing": true,
+        "allowedAutoInstall": true
+      },
+      "requiredScripts": ["build", "test"],
+      "nativeRuntimeDependencies": [
+        {
+          "name": "better-sqlite3",
+          "reason": "The packaged Electron app embeds the Hono server and SQLite runtime; the native addon must exist in the packaged app and be rebuilt for Electron."
+        }
+      ]
+    }
+  ],
+  "systemDependencies": [
+    {
+      "id": "node",
+      "platforms": ["darwin"],
+      "requiredFor": ["quick-deploy-cli", "project-build"],
+      "detect": { "executables": ["node"] },
+      "safeAutoInstall": false,
+      "manualInstallHint": "Install Node.js 20 with nvm install 20 && nvm use 20, or brew install node@20."
+    },
+    {
+      "id": "npm",
+      "platforms": ["darwin"],
+      "requiredFor": ["project-dependency-install", "project-build"],
+      "detect": { "executables": ["npm"] },
+      "safeAutoInstall": false,
+      "manualInstallHint": "Install npm 10+ through the Node.js 20 toolchain."
+    },
+    {
+      "id": "xcode-command-line-tools",
+      "platforms": ["darwin"],
+      "requiredFor": ["better-sqlite3-electron-rebuild"],
+      "detect": { "command": ["xcode-select", "-p"], "successExitCodes": [0] },
+      "safeAutoInstall": false,
+      "manualInstallHint": "Run xcode-select --install and complete the Apple installer prompt."
+    },
+    {
+      "id": "macos-built-in-deploy-tools",
+      "platforms": ["darwin"],
+      "requiredFor": ["dmg-mount", "app-copy", "app-launch", "app-quit", "bundle-validation"],
+      "detect": { "executables": ["hdiutil", "open", "osascript", "ditto", "plutil", "pgrep"] },
+      "safeAutoInstall": false,
+      "manualInstallHint": "hdiutil, open, osascript, ditto, plutil and pgrep are included with macOS. If any are missing, repair macOS or Xcode Command Line Tools."
+    }
+  ],
+  "desktopTargets": [
+    {
+      "id": "darwin-current",
+      "platform": "darwin",
+      "archDetection": {
+        "arm64Values": ["arm64", "aarch64"],
+        "x64Values": ["x64", "x86_64", "amd64"]
+      },
+      "buildCommands": [
+        ["npm", "run", "build:all"],
+        ["npm", "run", "electron:build"],
+        ["npm", "run", "desktop:package:mac"]
+      ],
+      "outputDir": "release/desktop/darwin-${targetArch}",
+      "preferredUnpackedAppGlobs": [
+        "release/desktop/darwin-${targetArch}/mac*/TTS Voice Generator.app",
+        "release/desktop/darwin-${targetArch}/TTS Voice Generator.app"
+      ],
+      "dmgGlobs": ["release/desktop/darwin-${targetArch}/TTS Voice Generator-*.dmg"],
+      "installLocation": "/Applications/TTS Voice Generator.app",
+      "userDataLocations": ["~/Library/Application Support/TTS Voice Generator"],
+      "bundleValidation": {
+        "infoPlist": "Contents/Info.plist",
+        "expectedBundleIdentifier": "com.maorun.tts-voice-generator",
+        "expectedExecutableName": "TTS Voice Generator",
+        "requiredRelativePaths": [
+          "Contents/MacOS/TTS Voice Generator",
+          "Contents/Resources/app.asar",
+          "Contents/Resources/app.asar.unpacked/server/node_modules/better-sqlite3"
+        ]
+      }
+    }
+  ],
+  "installPolicy": {
+    "defaultMode": "safe",
+    "allowProjectNpmInstallByDefault": true,
+    "allowSystemDependencyInstallByDefault": false,
+    "requireExplicitFlagForSystemDeps": "--install-system-deps",
+    "forbidCommands": [
+      "git commit",
+      "git add",
+      "git reset",
+      "git clean",
+      "rm -rf ~/Library/Application Support/TTS Voice Generator",
+      "sudo rm -rf"
+    ],
+    "macAppReplacement": {
+      "backupExistingAppByDefault": true,
+      "backupDir": "~/Library/Application Support/TTS Voice Generator/deploy-backups",
+      "neverDeleteUserData": true,
+      "requireBundleIdMatchBeforeReplace": true,
+      "strictInstallLocation": "/Applications/TTS Voice Generator.app",
+      "quitRunningAppGracefully": true,
+      "forceKillRunningApp": false
+    }
+  },
+  "validation": {
+    "preBuild": [
+      "node-version",
+      "npm-version",
+      "lockfiles-present-or-explicit-fallback-allowed",
+      "package-scripts-present",
+      "xcode-command-line-tools-present-or-hinted",
+      "macos-deploy-tools-present"
+    ],
+    "postBuild": [
+      "desktop-output-dir-present",
+      "app-bundle-or-dmg-present",
+      "bundle-id-match",
+      "server-dist-present",
+      "app-asar-present"
+    ],
+    "postInstall": [
+      "applications-app-exists",
+      "bundle-id-match",
+      "electron-smoke-test-exits-zero",
+      "user-data-directory-not-removed"
+    ]
+  }
+}

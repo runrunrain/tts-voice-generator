@@ -168,6 +168,122 @@ export interface AgentSettings {
   localPluginTokenFingerprint: string | null;
 }
 
+// ─── OpenCode Settings ───────────────────────────────────────────────────────
+
+export type OpenCodeRuntime = "desktop" | "local" | "web" | "remote";
+
+export interface OpenCodeRuntimeCapabilities {
+  runtime: OpenCodeRuntime;
+  canDetectLocalOpenCode: boolean;
+  canReadConfig: boolean;
+  canWriteConfig: boolean;
+  canInstall: boolean;
+  canOpenConfig: boolean;
+  canReturnConfigPathForCopy: boolean;
+  reason: string | null;
+}
+
+export interface OpenCodeStatusResponse {
+  ok: true;
+  runtime: OpenCodeRuntime;
+  capabilities: OpenCodeRuntimeCapabilities;
+  availability: null | {
+    available: boolean;
+    version: string | null;
+    error: string | null;
+    providerMetadata: {
+      hasConfig: boolean;
+      providerCount: number;
+      modelCount: number;
+    };
+    checkedAt: string;
+    cacheTtlMs: number;
+  };
+  npm: null | { available: boolean; version: string | null };
+  message: string | null;
+}
+
+export interface OpenCodeConfigDisplayResponse {
+  ok: true;
+  exists: boolean;
+  parseOk: boolean;
+  revision: string;
+  configPathLabel: string;
+  copyableConfigPath: string | null;
+  model: string;
+  providers: Array<{
+    name: string;
+    baseURL: string | null;
+    hasApiKey: boolean;
+    apiKeyMasked: string | null;
+    models: Array<{ key: string; name?: string | null }>;
+    editable: boolean;
+    source: "existing" | "default-openrouter";
+  }>;
+  warnings: Array<{ code: string; message: string }>;
+}
+
+export interface OpenCodeConfigUpdateRequest {
+  expectedRevision: string;
+  model?: string;
+  providers?: Array<{
+    name: string;
+    baseURL?: string | null;
+    apiKey?: string;
+    clearApiKey?: boolean;
+    apiKeyAction?: "keep" | "set" | "clear";
+  }>;
+}
+
+export interface OpenCodeConfigUpdateResponse {
+  ok: true;
+  revision: string;
+  model: string;
+  providers: Array<{
+    name: string;
+    baseURL: string | null;
+    hasApiKey: boolean;
+    apiKeyMasked: string | null;
+  }>;
+  saved: {
+    modelChanged: boolean;
+    providersChanged: string[];
+    apiKeyUpdatedFor: string[];
+    apiKeyClearedFor: string[];
+  };
+  warnings: Array<{ code: string; message: string }>;
+}
+
+export interface OpenCodeInstallPlanResponse {
+  ok: true;
+  controlledInstallAvailable: boolean;
+  packageName: "opencode-ai@latest";
+  commandPreview: "npm install -g opencode-ai@latest";
+  confirmationPhrase: "INSTALL_OPENCODE";
+  nonce: string;
+  nonceExpiresAt: string;
+  npm: { available: boolean; version: string | null };
+  warnings: string[];
+}
+
+export interface ControlledInstallRequest {
+  nonce: string;
+  confirmationPhrase: "INSTALL_OPENCODE";
+  confirm: true;
+}
+
+export interface ControlledInstallResponse {
+  ok: boolean;
+  durationMs: number;
+  commandPreview: "npm install -g opencode-ai@latest";
+  exitCode: number | null;
+  timedOut: boolean;
+  stdoutTail: string;
+  stderrTail: string;
+  availabilityAfterInstall: OpenCodeStatusResponse["availability"];
+  error: string | null;
+}
+
 // ─── OpenCode Agent Voice Production Tasks ───────────────────────────────────
 
 export type TaskStatus = "draft" | "ready" | "running" | "blocked" | "completed" | "failed";

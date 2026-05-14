@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -33,6 +34,41 @@ let isQuitting = false;
 
 function ensureDirectory(directory: string) {
   fs.mkdirSync(directory, { recursive: true });
+}
+
+function sanitizeDesktopError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message
+    .replace(os.homedir(), "~")
+    .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(/\bsk-[A-Za-z0-9_\-]{8,}\b/g, "sk-[REDACTED]")
+    .slice(0, 300);
+}
+
+function resolveOpenCodeConfigPath() {
+  const xdgConfigHome = process.env.XDG_CONFIG_HOME?.trim();
+  const configRoot = xdgConfigHome && path.isAbsolute(xdgConfigHome)
+    ? xdgConfigHome
+    : path.join(os.homedir(), ".config");
+  return path.normalize(path.join(configRoot, "opencode", "opencode.json"));
+}
+
+function ensureOpenCodeConfigFile(filePath: string) {
+  const directory = path.dirname(filePath);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(directory, 0o700);
+  } catch {
+    // Best effort on platforms/filesystems that do not support POSIX modes.
+  }
+  if (!fs.existsSync(filePath)) {
+    fs.writeFileSync(filePath, "{}\n", { mode: 0o600, flag: "wx" });
+  }
+  try {
+    fs.chmodSync(filePath, 0o600);
+  } catch {
+    // Best effort on platforms/filesystems that do not support POSIX modes.
+  }
 }
 
 function configureDesktopEnvironment(token: string) {
@@ -255,6 +291,17 @@ ipcMain.handle("tts-desktop:open-data-directory", async () => {
   }
   const result = await shell.openPath(desktopDataDir);
   return result ? { ok: false, error: result } : { ok: true };
+});
+
+ipcMain.handle("tts-desktop:open-opencode-config", async () => {
+  try {
+    const filePath = resolveOpenCodeConfigPath();
+    ensureOpenCodeConfigFile(filePath);
+    const result = await shell.openPath(filePath);
+    return result ? { ok: false, error: sanitizeDesktopError(result) } : { ok: true };
+  } catch (error) {
+    return { ok: false, error: sanitizeDesktopError(error) };
+  }
 });
 
 app.on("window-all-closed", () => {
