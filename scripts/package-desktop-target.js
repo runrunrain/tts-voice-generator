@@ -1,9 +1,9 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { getOutputDir, getStageDir, requireMatchingHost, resolveTarget } from "./desktop-targets.js";
+import { resolveProjectRoot, spawnCrossPlatform } from "./process-utils.js";
 
-const projectRoot = path.resolve(new URL("..", import.meta.url).pathname);
+const projectRoot = resolveProjectRoot(import.meta.url);
 
 const target = resolveTarget(process.argv.slice(2));
 requireMatchingHost(target);
@@ -20,7 +20,7 @@ fs.mkdirSync(outputDir, { recursive: true });
 
 const builderTarget = target.platform === "darwin" ? ["--mac", "dmg"] : ["--win", "nsis"];
 const archFlag = target.arch === "arm64" ? "--arm64" : "--x64";
-const result = spawnSync("npx", [
+const result = spawnCrossPlatform("npx", [
   "electron-builder",
   "--config", "electron-builder.config.cjs",
   ...builderTarget,
@@ -37,6 +37,11 @@ const result = spawnSync("npx", [
     DESKTOP_OUTPUT_DIR: outputDir,
   },
 });
+
+if (result.error) {
+  console.error(`[desktop-package] failed to start electron-builder: ${result.error.message}`);
+  process.exit(1);
+}
 
 if (result.status !== 0) {
   process.exit(result.status ?? 1);

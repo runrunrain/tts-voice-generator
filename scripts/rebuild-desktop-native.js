@@ -1,9 +1,9 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { getStageDir, requireMatchingHost, resolveTarget } from "./desktop-targets.js";
+import { resolveProjectRoot, spawnCrossPlatform } from "./process-utils.js";
 
-const projectRoot = path.resolve(new URL("..", import.meta.url).pathname);
+const projectRoot = resolveProjectRoot(import.meta.url);
 
 function readElectronVersion() {
   const lockfile = path.join(projectRoot, "package-lock.json");
@@ -42,7 +42,7 @@ if (!fs.existsSync(path.join(moduleDir, "node_modules/better-sqlite3"))) {
   throw new Error(`better-sqlite3 is missing in ${moduleDir}; run npm ci --omit=dev --prefix ${moduleDir} first`);
 }
 
-const result = spawnSync("npx", [
+const result = spawnCrossPlatform("npx", [
   "electron-rebuild",
   "--module-dir", moduleDir,
   "--only", "better-sqlite3",
@@ -60,6 +60,11 @@ const result = spawnSync("npx", [
     npm_config_target_arch: target.arch,
   },
 });
+
+if (result.error) {
+  console.error(`[desktop-native] failed to start electron-rebuild: ${result.error.message}`);
+  process.exit(1);
+}
 
 if (result.status !== 0) {
   process.exit(result.status ?? 1);

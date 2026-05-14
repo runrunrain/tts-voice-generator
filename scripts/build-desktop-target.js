@@ -1,18 +1,21 @@
-import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { getStageDir, resolveTarget } from "./desktop-targets.js";
+import { formatCommand, resolveProjectRoot, spawnCrossPlatform } from "./process-utils.js";
 
-const projectRoot = path.resolve(new URL("..", import.meta.url).pathname);
+const projectRoot = resolveProjectRoot(import.meta.url);
 const target = resolveTarget(process.argv.slice(2));
 
 function run(command, args, options = {}) {
-  console.info(`[desktop-build] ${command} ${args.join(" ")}`);
-  const result = spawnSync(command, args, {
+  console.info(`[desktop-build] ${formatCommand(command, args)}`);
+  const result = spawnCrossPlatform(command, args, {
     cwd: projectRoot,
     stdio: "inherit",
-    shell: process.platform === "win32",
     ...options,
   });
+  if (result.error) {
+    console.error(`[desktop-build] failed to start: ${formatCommand(command, args)}: ${result.error.message}`);
+    process.exit(1);
+  }
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
   }

@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveBin } from "./process-utils.js";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(SCRIPT_DIR, "..");
@@ -202,7 +203,7 @@ function runCommand(command, args, options = {}) {
   const cwd = options.cwd ?? PROJECT_ROOT;
   const label = safeCommandLabel(command, args);
   console.info(`[quick-deploy] run: ${label}`);
-  const result = spawnSync(command, args, {
+  const result = spawnSync(resolveBin(command), args, {
     cwd,
     env: options.env ? { ...process.env, ...options.env } : process.env,
     stdio: options.inherit ? "inherit" : "pipe",
@@ -224,7 +225,7 @@ function runCommand(command, args, options = {}) {
 
 function runDetectCommand(commandSpec) {
   const [command, ...args] = commandSpec.command;
-  const result = spawnSync(command, args, {
+  const result = spawnSync(resolveBin(command), args, {
     cwd: PROJECT_ROOT,
     stdio: "pipe",
     encoding: "utf8",

@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { getStageDir, requireMatchingHost, resolveTarget } from "./desktop-targets.js";
+import { resolveProjectRoot } from "./process-utils.js";
 
-const projectRoot = path.resolve(new URL("..", import.meta.url).pathname);
+const projectRoot = resolveProjectRoot(import.meta.url);
 
 function requirePath(relativePath) {
   const absolutePath = path.join(projectRoot, relativePath);
