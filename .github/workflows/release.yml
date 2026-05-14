@@ -1,0 +1,319 @@
+name: Release desktop installers
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create or update, for example v0.0.1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-installers:
+    name: Build ${{ matrix.target }} installer
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-arm64
+            os: macos-latest
+            expected_platform: darwin
+            expected_arch: arm64
+            desktop_script: desktop:dist:mac:arm64
+            output_dir: release/desktop/darwin-arm64
+            artifact_paths: |
+              release/desktop/darwin-arm64/*.dmg
+              release/desktop/darwin-arm64/*.dmg.blockmap
+          - target: windows-x64
+            os: windows-latest
+            expected_platform: win32
+            expected_arch: x64
+            desktop_script: desktop:dist:win:x64
+            output_dir: release/desktop/win32-x64
+            artifact_paths: |
+              release/desktop/win32-x64/*.exe
+              release/desktop/win32-x64/*.exe.blockmap
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+
+      - name: Verify runner matches desktop target
+        shell: bash
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.expected_platform }}
+          EXPECTED_ARCH: ${{ matrix.expected_arch }}
+        run: |
+          node <<'NODE'
+          const expectedPlatform = process.env.EXPECTED_PLATFORM;
+          const expectedArch = process.env.EXPECTED_ARCH;
+          if (process.platform !== expectedPlatform || process.arch !== expectedArch) {
+            console.error(`Runner ${process.platform}-${process.arch} does not match required ${expectedPlatform}-${expectedArch}`);
+            process.exit(1);
+          }
+          console.log(`Runner target verified: ${process.platform}-${process.arch}`);
+          NODE
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install server dependencies
+        run: npm ci --prefix server
+
+      - name: Build web and server
+        run: npm run build:all
+
+      - name: Build Electron main and preload
+        run: npm run electron:build
+
+      - name: Print Electron version
+        run: npm run desktop:print-electron-version
+
+      - name: Run macOS smoke test
+        if: runner.os == 'macOS'
+        run: npm run smoke
+
+      - name: Build desktop installer
+        run: npm run ${{ matrix.desktop_script }}
+
+      - name: Verify installer outputs
+        shell: bash
+        env:
+          TARGET_PLATFORM: ${{ matrix.expected_platform }}
+          TARGET_ARCH: ${{ matrix.expected_arch }}
+          OUTPUT_DIR: ${{ matrix.output_dir }}
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const platform = process.env.TARGET_PLATFORM;
+          const arch = process.env.TARGET_ARCH;
+          const outputDir = process.env.OUTPUT_DIR;
+
+          if (!fs.existsSync(outputDir)) {
+            console.error(`Missing output directory: ${outputDir}`);
+            process.exit(1);
+          }
+
+          const entries = fs.readdirSync(outputDir);
+          const hasInstaller = platform === "darwin"
+            ? entries.some((entry) => entry.endsWith(".dmg"))
+            : entries.some((entry) => entry.endsWith(".exe"));
+          const hasBlockmap = platform === "darwin"
+            ? entries.some((entry) => entry.endsWith(".dmg.blockmap"))
+            : entries.some((entry) => entry.endsWith(".exe.blockmap"));
+
+          if (!hasInstaller || !hasBlockmap) {
+            console.error(`Installer or blockmap missing in ${outputDir}: ${entries.join(", ")}`);
+            process.exit(1);
+          }
+
+          const nativeDependencyDir = platform === "darwin"
+            ? path.join(outputDir, `mac-${arch}`, "TTS Voice Generator.app", "Contents", "Resources", "app.asar.unpacked", "server", "node_modules", "better-sqlite3")
+            : path.join(outputDir, "win-unpacked", "resources", "app.asar.unpacked", "server", "node_modules", "better-sqlite3");
+
+          if (!fs.existsSync(nativeDependencyDir)) {
+            console.error(`Missing unpacked better-sqlite3 dependency: ${nativeDependencyDir}`);
+            process.exit(1);
+          }
+
+          console.log(JSON.stringify({
+            event: "desktop-release-artifacts-verified",
+            outputDir,
+            platform,
+            arch,
+            entries,
+            nativeDependencyDir,
+          }, null, 2));
+          NODE
+
+      - name: Upload installer job artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-installer-${{ matrix.target }}
+          path: ${{ matrix.artifact_paths }}
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release assets
+    runs-on: ubuntu-latest
+    needs: build-installers
+    steps:
+      - name: Resolve release metadata
+        id: release-meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_TAG: ${{ inputs.release_tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            RELEASE_TAG="$DISPATCH_TAG"
+          else
+            RELEASE_TAG="$REF_NAME"
+          fi
+
+          if [ -z "$RELEASE_TAG" ]; then
+            echo "Release tag is required" >&2
+            exit 1
+          fi
+
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *) echo "Release tag must start with v: $RELEASE_TAG" >&2; exit 1 ;;
+          esac
+
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download installer artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: desktop-installer-*
+          merge-multiple: true
+
+      - name: Prepare checksums, manifest, and release notes
+        env:
+          RELEASE_TAG: ${{ steps.release-meta.outputs.release_tag }}
+          RELEASE_VERSION: ${{ steps.release-meta.outputs.version }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          python3 <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          source_dir = Path("release-assets")
+          upload_dir = Path("release-upload")
+          upload_dir.mkdir(parents=True, exist_ok=True)
+
+          allowed_suffixes = (".dmg", ".dmg.blockmap", ".exe", ".exe.blockmap")
+          source_files = sorted(
+              path for path in source_dir.rglob("*")
+              if path.is_file() and any(path.name.endswith(suffix) for suffix in allowed_suffixes)
+          )
+
+          required_groups = {
+              "macOS DMG": lambda name: name.endswith(".dmg"),
+              "macOS DMG blockmap": lambda name: name.endswith(".dmg.blockmap"),
+              "Windows Setup.exe": lambda name: name.endswith(".exe"),
+              "Windows Setup.exe blockmap": lambda name: name.endswith(".exe.blockmap"),
+          }
+
+          missing = [label for label, predicate in required_groups.items() if not any(predicate(path.name) for path in source_files)]
+          if missing:
+              raise SystemExit(f"Missing release assets: {', '.join(missing)}")
+
+          uploaded = []
+          for source in source_files:
+              destination = upload_dir / source.name
+              if destination.exists():
+                  raise SystemExit(f"Duplicate release asset name: {source.name}")
+              shutil.copy2(source, destination)
+              uploaded.append(destination)
+
+          checksum_lines = []
+          assets = []
+          for asset in sorted(uploaded, key=lambda item: item.name):
+              digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+              checksum_lines.append(f"{digest}  {asset.name}")
+              name = asset.name
+              if name.endswith(".dmg") or name.endswith(".dmg.blockmap"):
+                  platform = "darwin"
+                  arch = "arm64" if "arm64" in name else "unknown"
+                  kind = "dmg-blockmap" if name.endswith(".blockmap") else "dmg"
+              elif name.endswith(".exe") or name.endswith(".exe.blockmap"):
+                  platform = "win32"
+                  arch = "x64" if "x64" in name else "unknown"
+                  kind = "nsis-blockmap" if name.endswith(".blockmap") else "nsis-installer"
+              else:
+                  platform = "unknown"
+                  arch = "unknown"
+                  kind = "unknown"
+              assets.append({
+                  "name": name,
+                  "platform": platform,
+                  "arch": arch,
+                  "kind": kind,
+                  "signed": False,
+                  "notarized": False,
+                  "sha256": digest,
+              })
+
+          checksums = upload_dir / "SHA256SUMS.txt"
+          checksums.write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
+
+          manifest = {
+              "version": os.environ["RELEASE_VERSION"],
+              "tag": os.environ["RELEASE_TAG"],
+              "commit": os.environ["GITHUB_SHA"],
+              "signed": False,
+              "notarized": False,
+              "assets": assets,
+          }
+          manifest_path = upload_dir / f"release-manifest-{os.environ['RELEASE_VERSION']}.json"
+          manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+          dmg_assets = [asset["name"] for asset in assets if asset["kind"] == "dmg"]
+          exe_assets = [asset["name"] for asset in assets if asset["kind"] == "nsis-installer"]
+
+          notes = [
+              f"# TTS Voice Generator {os.environ['RELEASE_TAG']}",
+              "",
+              "## Recommended downloads",
+              "",
+              "| Platform | Ordinary user download | Notes |",
+              "| --- | --- | --- |",
+          ]
+          for name in dmg_assets:
+              notes.append(f"| macOS Apple Silicon | `{name}` | Download the DMG, open it, and drag the app to Applications. |")
+          for name in exe_assets:
+              notes.append(f"| Windows x64 | `{name}` | Download the Setup.exe installer and follow the installer prompts. |")
+          notes.extend([
+              "",
+              "## Source archives",
+              "",
+              "GitHub Source code zip/tar.gz files and project tar.gz archives are for developers or operations staff who intend to inspect, build, or deploy from source. They are not one-click installers for ordinary users.",
+              "",
+              "## Unsigned build notice",
+              "",
+              "These desktop installers are currently unsigned and not notarized. macOS Gatekeeper or Windows SmartScreen may warn on first launch. Download only from this GitHub Release and use SHA256SUMS.txt to verify file integrity when needed. Checksums do not replace code signing.",
+              "",
+              "The installers do not contain API keys, .env files, local databases, or userData. Configure your own OpenRouter API Key in the app Settings page after installation.",
+          ])
+          (upload_dir / "release-notes.md").write_text("\n".join(notes) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release-meta.outputs.release_tag }}
+          name: TTS Voice Generator ${{ steps.release-meta.outputs.release_tag }}
+          body_path: release-upload/release-notes.md
+          files: |
+            release-upload/*.dmg
+            release-upload/*.dmg.blockmap
+            release-upload/*.exe
+            release-upload/*.exe.blockmap
+            release-upload/SHA256SUMS.txt
+            release-upload/release-manifest-*.json
+          fail_on_unmatched_files: true

@@ -2,12 +2,26 @@
 
 TTS Voice Generator 是一个本地优先的 AI 语音生成工具。它使用 OpenRouter Gemini TTS 生成语音，前端为 React/Vite，后端为 Hono，数据落在本机 SQLite。项目同时支持 Web 开发模式、生产静态托管、Electron 桌面应用打包，以及面向 OpenCode 的本机设置管理和 Agent 调用能力。
 
+## 发布下载说明
+
+普通用户请优先从 GitHub Release 下载对应系统的桌面安装包：
+
+| 平台 | 推荐下载 | 说明 |
+| --- | --- | --- |
+| macOS Apple Silicon | `.dmg` | 下载 DMG 后打开，将 `TTS Voice Generator.app` 拖入 Applications。 |
+| Windows x64 | `Setup.exe` | 下载 Windows 安装器后按向导安装。 |
+
+GitHub 自动生成的 Source code zip/tar.gz，以及项目脚本生成的 `tts-voice-generator-v*.tar.gz`，只适合开发者或运维从源码检查、构建、部署，不是普通用户的一键安装包。
+
+当前桌面安装包未签名、未公证。macOS 首次打开可能出现 Gatekeeper 提示，可在确认来源为本项目 GitHub Release 后使用右键打开；Windows 可能出现 SmartScreen 提示，可在确认下载来源和校验和后继续。`SHA256SUMS.txt` 只能帮助确认文件完整性，不能替代代码签名。
+
 ## 快速上手（普通用户）
 
 如果你只想尽快使用工具生成语音，按下面顺序操作即可。
 
 ### 1. 安装或打开应用
 
+- GitHub Release 桌面版：macOS 下载 `.dmg`，Windows 下载 `Setup.exe`；不要把 Source code zip/tar.gz 当成普通用户安装包。
 - 已安装桌面版：直接打开 `TTS Voice Generator.app`，数据会保存在本机用户目录。
 - macOS 快速部署：在项目根目录运行 `npm run deploy:current`，脚本会构建、替换 `/Applications/TTS Voice Generator.app`，并默认执行冒烟检查后启动应用。
 - 开发模式：首次从源码运行时先执行 `npm install` 和 `npm install --prefix server`，之后用 `npm run quickstart` 一键启动前端和后端。
@@ -376,6 +390,19 @@ data/
 Agent 端点需要 `Authorization: Bearer <LOCAL_PLUGIN_TOKEN>`。local plugin token 只在创建或旋转时显示一次，后端只保存 SHA-256 hash。
 
 ## 发布归档
+
+面向普通用户发布桌面安装包时，Release 自动化会在 tag `v*` 或手动触发时构建并上传 macOS DMG 与 Windows NSIS `Setup.exe`。这些安装包才是普通用户的推荐下载入口。
+
+发布自动化调用真实桌面打包脚本：
+
+```bash
+npm run desktop:dist:mac:arm64
+npm run desktop:dist:win:x64
+```
+
+工作流会上传安装包和对应 blockmap，并生成 `SHA256SUMS.txt` 与 `release-manifest-<version>.json`。当前没有配置代码签名或公证凭据，发布说明必须继续标注 unsigned 风险；不要在仓库中提交签名证书、API Key 或其他 secret。
+
+### 源码归档
 
 生成自包含发布归档：
 
