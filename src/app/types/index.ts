@@ -203,6 +203,9 @@ export interface OpenCodeStatusResponse {
       hasConfig: boolean;
       providerCount: number;
       modelCount: number;
+      authCredentialCount: number;
+      cliCredentialCount: number | null;
+      credentialCount: number;
     };
     checkedAt: string;
     cacheTtlMs: number;

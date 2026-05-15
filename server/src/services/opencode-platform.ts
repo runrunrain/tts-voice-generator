@@ -550,7 +550,7 @@ function quoteWindowsShimProbeToken(token: string): string {
 }
 
 function buildRestrictedWindowsShimProbeCommand(shimPath: string, probeArgs: readonly string[]): string {
-  const allowedProbeArgs = new Set(["--version", "providers", "list"]);
+  const allowedProbeArgs = new Set(["--version", "providers", "auth", "list"]);
   for (const arg of probeArgs) {
     if (!allowedProbeArgs.has(arg) || !isSafeWindowsShimProbeToken(arg)) {
       throw new Error("Unsafe Windows command-shim probe arguments");
@@ -828,6 +828,18 @@ function normalizePathForDetection(filePath: string): string {
   return filePath.replace(/\\/g, "/").toLowerCase();
 }
 
+function homeDirCandidate(env: Record<string, string | undefined>, platform: PlatformLike): string | null {
+  const rawHome = env.HOME?.trim() || env.USERPROFILE?.trim() || os.homedir();
+  if (!rawHome || !isAbsoluteForPlatform(rawHome, platform)) return null;
+  return normalizeForBase(rawHome);
+}
+
+function pushAbsoluteCandidate(candidates: string[], candidate: string | undefined, platform: PlatformLike): void {
+  const trimmed = candidate?.trim();
+  if (!trimmed || !isAbsoluteForPlatform(trimmed, platform) || /[\0\r\n]/.test(trimmed)) return;
+  candidates.push(normalizeForBase(trimmed));
+}
+
 export function detectInstallMethod(executablePath: string | null | undefined): OpenCodeInstallMethod | null {
   if (!executablePath) return null;
   const normalized = normalizePathForDetection(executablePath);
@@ -913,30 +925,60 @@ export function getOpenCodeConfigPathCandidates(
   env: Record<string, string | undefined> = process.env,
   platform: PlatformLike = process.platform,
 ): string[] {
+  const candidates: string[] = [];
+  pushAbsoluteCandidate(candidates, env.OPENCODE_CONFIG, platform);
+
   if (isWindows(platform)) {
-    const candidates: string[] = [];
+    const home = homeDirCandidate(env, platform);
+    if (home) candidates.push(joinForBase(home, ".config", "opencode", "opencode.json"));
+
     const appData = env.APPDATA?.trim();
     const localAppData = env.LOCALAPPDATA?.trim();
     if (appData && isAbsoluteForPlatform(appData, platform)) candidates.push(joinForBase(appData, "opencode", "opencode.json"));
     if (localAppData && isAbsoluteForPlatform(localAppData, platform)) candidates.push(joinForBase(localAppData, "opencode", "opencode.json"));
-    const home = os.homedir();
-    if (home) candidates.push(joinForBase(home, "AppData", "Roaming", "opencode", "opencode.json"));
     return Array.from(new Set(candidates.map(normalizeForBase)));
   }
 
-  const candidates: string[] = [];
   const xdgConfigHome = env.XDG_CONFIG_HOME?.trim();
   if (xdgConfigHome && isAbsoluteForPlatform(xdgConfigHome, platform)) {
     candidates.push(path.normalize(path.join(xdgConfigHome, "opencode", "opencode.json")));
   }
-  candidates.push(path.normalize(path.join(os.homedir(), ".config", "opencode", "opencode.json")));
+  const home = homeDirCandidate(env, platform);
+  if (home) candidates.push(path.normalize(path.join(home, ".config", "opencode", "opencode.json")));
   return Array.from(new Set(candidates));
+}
+
+export function getOpenCodeAuthPathCandidates(
+  env: Record<string, string | undefined> = process.env,
+  platform: PlatformLike = process.platform,
+): string[] {
+  const candidates: string[] = [];
+  const xdgDataHome = env.XDG_DATA_HOME?.trim();
+  if (xdgDataHome && isAbsoluteForPlatform(xdgDataHome, platform)) {
+    candidates.push(joinForBase(xdgDataHome, "opencode", "auth.json"));
+  }
+
+  const home = homeDirCandidate(env, platform);
+  if (home) candidates.push(joinForBase(home, ".local", "share", "opencode", "auth.json"));
+
+  if (isWindows(platform)) {
+    const localAppData = env.LOCALAPPDATA?.trim();
+    const appData = env.APPDATA?.trim();
+    if (localAppData && isAbsoluteForPlatform(localAppData, platform)) candidates.push(joinForBase(localAppData, "opencode", "auth.json"));
+    if (appData && isAbsoluteForPlatform(appData, platform)) candidates.push(joinForBase(appData, "opencode", "auth.json"));
+  }
+
+  return Array.from(new Set(candidates.map(normalizeForBase)));
 }
 
 export function chooseOpenCodeConfigPath(
   env: Record<string, string | undefined> = process.env,
   platform: PlatformLike = process.platform,
 ): string {
+  const explicitConfig = env.OPENCODE_CONFIG?.trim();
+  if (explicitConfig && isAbsoluteForPlatform(explicitConfig, platform) && !/[\0\r\n]/.test(explicitConfig)) {
+    return normalizeForBase(explicitConfig);
+  }
   const candidates = getOpenCodeConfigPathCandidates(env, platform);
   return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
 }

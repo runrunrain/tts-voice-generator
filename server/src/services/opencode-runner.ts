@@ -22,6 +22,7 @@ import { env } from "../config/env.js";
 import { formatVoiceSelectionGuideForPrompt, inferVoiceForTextContext } from "../utils/voice.js";
 import {
   appendReadOnlyProbeArgs,
+  getOpenCodeAuthPathCandidates,
   getOpenCodeConfigPathCandidates,
   getOpenCodePathDiagnostics,
   resolveOpenCodeProbeContextAsync,
@@ -262,6 +263,12 @@ export interface ProviderConfigMetadata {
   providerCount: number;
   /** Total number of model definitions across all providers */
   modelCount: number;
+  /** Number of non-sensitive credential entries detected in OpenCode auth.json stores */
+  authCredentialCount: number;
+  /** Number of credentials reported by `opencode providers/auth list`, null when not parseable */
+  cliCredentialCount: number | null;
+  /** Best-effort detected credential count across CLI, auth store, and inline config */
+  credentialCount: number;
 }
 
 export interface OpenCodeAvailability {
@@ -737,6 +744,125 @@ export async function runOpenCodeChat(input: OpenCodeChatRunInput): Promise<Open
 
 // ─── Config File Detection (Strategy B - local, no subprocess) ──────────────────
 
+interface AuthStoreMetadata {
+  credentialCount: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+const SENSITIVE_CREDENTIAL_FIELD = /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|token|secret|credential|key)$/i;
+const AUTH_COLLECTION_FIELD = /^(?:auth|auths|credential|credentials|provider|providers|account|accounts|login|logins)$/i;
+
+function hasNonEmptyCredentialField(value: unknown, depth = 0): boolean {
+  if (depth > 4 || !isRecord(value)) return false;
+  for (const [key, nested] of Object.entries(value)) {
+    if (typeof nested === "string" && nested.trim().length > 0 && SENSITIVE_CREDENTIAL_FIELD.test(key)) {
+      return true;
+    }
+    if ((isRecord(nested) || Array.isArray(nested)) && hasNonEmptyCredentialField(nested, depth + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function countCredentialEntries(value: unknown, depth = 0): number {
+  if (depth > 5 || value == null) return 0;
+  if (Array.isArray(value)) {
+    return value.reduce((count, entry) => count + (hasNonEmptyCredentialField(entry) ? 1 : countCredentialEntries(entry, depth + 1)), 0);
+  }
+  if (!isRecord(value)) return 0;
+
+  if (hasNonEmptyCredentialField(value) && depth > 0) return 1;
+
+  let count = 0;
+  for (const [key, nested] of Object.entries(value)) {
+    if (typeof nested === "string" && nested.trim().length > 0 && SENSITIVE_CREDENTIAL_FIELD.test(key)) {
+      count += 1;
+      continue;
+    }
+    if (Array.isArray(nested)) {
+      count += countCredentialEntries(nested, depth + 1);
+      continue;
+    }
+    if (isRecord(nested)) {
+      if (AUTH_COLLECTION_FIELD.test(key)) count += countCredentialEntries(nested, depth + 1);
+      else count += hasNonEmptyCredentialField(nested) ? 1 : countCredentialEntries(nested, depth + 1);
+    }
+  }
+  return count;
+}
+
+/**
+ * Safely inspect OpenCode auth stores for credential presence.
+ * This function only returns counts and never exposes provider IDs, token names,
+ * access tokens, refresh tokens, API keys, or file contents.
+ */
+export function detectOpenCodeAuthStoreMetadata(
+  env: Record<string, string | undefined> = process.env,
+  platform: NodeJS.Platform | string = process.platform,
+): AuthStoreMetadata {
+  let credentialCount = 0;
+  for (const authPath of getOpenCodeAuthPathCandidates(env, platform)) {
+    if (!authPath || !existsSync(authPath)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(authPath, "utf8")) as unknown;
+      credentialCount += countCredentialEntries(parsed);
+    } catch {
+      continue;
+    }
+  }
+  return { credentialCount };
+}
+
+function withCredentialMetadata(
+  meta: Pick<ProviderConfigMetadata, "hasConfig" | "providerCount" | "modelCount">,
+  opts: { authCredentialCount?: number; cliCredentialCount?: number | null } = {},
+): ProviderConfigMetadata {
+  const authCredentialCount = Math.max(0, Math.floor(opts.authCredentialCount ?? detectOpenCodeAuthStoreMetadata().credentialCount));
+  const cliCredentialCount = opts.cliCredentialCount ?? null;
+  const cliCount = cliCredentialCount === null ? 0 : Math.max(0, Math.floor(cliCredentialCount));
+  return {
+    ...meta,
+    authCredentialCount,
+    cliCredentialCount,
+    credentialCount: Math.max(meta.providerCount, authCredentialCount, cliCount),
+  };
+}
+
+function stripAnsi(input: string): string {
+  return input.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+}
+
+export function parseOpenCodeCredentialCount(output: string): number | null {
+  const cleanOutput = stripAnsi(output).replace(/[│┃|]/g, " ").trim();
+  if (!cleanOutput) return null;
+  if (/\b(?:no|zero)\s+(?:auth|credential|credentials|providers?)\b/i.test(cleanOutput)) return 0;
+  if (/\b(?:not\s+authenticated|logged\s+out|unauthenticated)\b/i.test(cleanOutput)) return 0;
+
+  const patterns = [
+    /\b(\d+)\s+(?:credential|credentials)\b/i,
+    /\b(?:credential|credentials)\s*[:=]\s*(\d+)\b/i,
+    /\b(?:auth|authenticated|login|logins)\s*[:=]\s*(\d+)\b/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = cleanOutput.match(pattern);
+    if (!match) continue;
+    const count = Number.parseInt(match[1], 10);
+    if (Number.isFinite(count)) return Math.max(0, count);
+  }
+
+  const authenticatedLines = cleanOutput
+    .split(/\r?\n/)
+    .filter((line) => /\b(?:authenticated|logged\s+in|connected|configured)\b/i.test(line) && !/\b(?:not|no|0)\b/i.test(line));
+  if (authenticatedLines.length > 0) return authenticatedLines.length;
+
+  return null;
+}
+
 /**
  * Safely check if opencode.json has providers with apiKey configured.
  * Only reads existence/non-empty status of apiKey fields, never the values.
@@ -744,13 +870,16 @@ export async function runOpenCodeChat(input: OpenCodeChatRunInput): Promise<Open
  */
 export function detectProviderConfig(): ProviderConfigMetadata {
   const configPaths = getOpenCodeConfigPathCandidates();
+  const authCredentialCount = detectOpenCodeAuthStoreMetadata().credentialCount;
+  const configPath = configPaths.find((candidate) => candidate && existsSync(candidate));
 
-  for (const configPath of configPaths) {
-    if (!configPath || !existsSync(configPath)) continue;
+  if (configPath) {
     try {
       const data = JSON.parse(readFileSync(configPath, "utf8"));
       const providers = data?.provider;
-      if (!providers || typeof providers !== "object") continue;
+      if (!providers || typeof providers !== "object") {
+        return withCredentialMetadata({ hasConfig: false, providerCount: 0, modelCount: 0 }, { authCredentialCount });
+      }
 
       let providerCount = 0;
       let modelCount = 0;
@@ -770,17 +899,17 @@ export function detectProviderConfig(): ProviderConfigMetadata {
         }
       }
 
-      return {
+      return withCredentialMetadata({
         hasConfig: providerCount > 0,
         providerCount,
         modelCount,
-      };
+      }, { authCredentialCount });
     } catch {
-      continue;
+      return withCredentialMetadata({ hasConfig: false, providerCount: 0, modelCount: 0 }, { authCredentialCount });
     }
   }
 
-  return { hasConfig: false, providerCount: 0, modelCount: 0 };
+  return withCredentialMetadata({ hasConfig: false, providerCount: 0, modelCount: 0 }, { authCredentialCount });
 }
 
 // ─── CLI Detection ─────────────────────────────────────────────────────────────
@@ -824,26 +953,33 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
 
     const version = stdout.trim();
 
-    // Stage 2a: check if AI provider credentials exist via auth store
-    let hasAuthCredentials = false;
-    try {
-      const { stdout: providersOutput } = await _execRunner(
-        opencodeProcess.file,
-        appendReadOnlyProbeArgs(opencodeProcess, ["providers", "list"]),
-        { timeout: 5000, windowsHide: true, env: opencodeProcess.env, shell: false },
-      );
-
-      // Strip ANSI escape codes before parsing
-      const cleanOutput = providersOutput.replace(/\x1b\[[0-9;]*m/g, "");
-      hasAuthCredentials = !/\b0\s+credentials\b/i.test(cleanOutput);
-    } catch {
-      // providers list command failed -- try config file instead
+    // Stage 2a: check if AI provider credentials exist via read-only CLI aliases.
+    let cliCredentialCount: number | null = null;
+    for (const probeArgs of [["providers", "list"], ["auth", "list"]] as const) {
+      try {
+        const { stdout: listOutput } = await _execRunner(
+          opencodeProcess.file,
+          appendReadOnlyProbeArgs(opencodeProcess, probeArgs),
+          { timeout: 5000, windowsHide: true, env: opencodeProcess.env, shell: false },
+        );
+        const parsedCount = parseOpenCodeCredentialCount(listOutput);
+        if (parsedCount !== null) {
+          cliCredentialCount = Math.max(cliCredentialCount ?? 0, parsedCount);
+          if (parsedCount > 0) break;
+        }
+      } catch {
+        // providers/auth list command failed -- fall back to local auth/config files.
+      }
     }
 
-    // Stage 2b: check opencode.json for inline provider credentials
-    const configMeta = detectProviderConfig();
+    // Stage 2b/2c: check auth.json credential counts and opencode.json inline provider credentials.
+    const localConfigMeta = detectProviderConfig();
+    const configMeta = withCredentialMetadata(localConfigMeta, {
+      authCredentialCount: localConfigMeta.authCredentialCount,
+      cliCredentialCount,
+    });
 
-    const hasProviderCredentials = hasAuthCredentials || configMeta.hasConfig;
+    const hasProviderCredentials = (cliCredentialCount ?? 0) > 0 || configMeta.authCredentialCount > 0 || configMeta.hasConfig;
     const runAvailable = !diagnostics.runResolutionError;
 
     if (hasProviderCredentials && runAvailable) {
@@ -863,7 +999,7 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
       };
     } else {
       const error = !hasProviderCredentials
-        ? "OpenCode CLI is installed but no AI provider credentials are configured. Run 'opencode providers login' or configure provider apiKey in opencode.json."
+        ? "OpenCode CLI is installed but no AI provider credentials are configured. Run 'opencode auth list' / 'opencode auth login' or configure provider apiKey in the official opencode.json."
         : `OpenCode CLI is installed and provider credentials were detected, but app automation cannot safely execute opencode run: ${diagnostics.runResolutionError}`;
       cachedAvailability = {
         available: false,

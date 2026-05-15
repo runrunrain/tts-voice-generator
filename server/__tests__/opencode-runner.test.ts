@@ -21,6 +21,7 @@ import crypto from "node:crypto";
 
 import {
   detectProviderConfig,
+  detectOpenCodeAuthStoreMetadata,
   checkOpenCodeAvailability,
   runOpenCodeNormalize,
   fallbackNormalize,
@@ -30,6 +31,7 @@ import {
   _resetExecRunner,
   _setSpawnRunner,
   _resetSpawnRunner,
+  parseOpenCodeCredentialCount,
 } from "../src/services/opencode-runner.js";
 import {
   _resetOpenCodePlatformCachesForTests,
@@ -39,6 +41,7 @@ import {
   detectInstallMethod,
   getNpmGlobalPrefix,
   resolveExecutableOnPath,
+  getOpenCodeConfigPathCandidates,
   resolveOpenCodeProcessContext,
   resolvePackageManagerCommand,
 } from "../src/services/opencode-platform.js";
@@ -151,11 +154,26 @@ function createMockExecRunner(responses: Array<{ args: string[]; result: { stdou
 describe("detectProviderConfig", () => {
   const originalHome = process.env.HOME;
   const originalXdg = process.env.XDG_CONFIG_HOME;
+  const originalXdgData = process.env.XDG_DATA_HOME;
+  const originalUserProfile = process.env.USERPROFILE;
+  const originalOpenCodeConfig = process.env.OPENCODE_CONFIG;
   let fixtureDir: string | null = null;
 
+  beforeEach(() => {
+    delete process.env.OPENCODE_CONFIG;
+  });
+
   afterEach(() => {
-    process.env.HOME = originalHome;
-    process.env.XDG_CONFIG_HOME = originalXdg || "";
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = originalXdg;
+    if (originalXdgData === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = originalXdgData;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
+    if (originalOpenCodeConfig === undefined) delete process.env.OPENCODE_CONFIG;
+    else process.env.OPENCODE_CONFIG = originalOpenCodeConfig;
     if (fixtureDir) {
       cleanupDir(fixtureDir);
       fixtureDir = null;
@@ -251,6 +269,7 @@ describe("detectProviderConfig", () => {
 
   it("detects provider config from Windows APPDATA opencode path", () => {
     fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-opencode-config-"));
+    const home = path.join(fixtureDir, "HomeWithoutOfficialConfig");
     const appData = path.join(fixtureDir, "AppData", "Roaming");
     const opencodeDir = path.join(appData, "opencode");
     fs.mkdirSync(opencodeDir, { recursive: true });
@@ -260,6 +279,8 @@ describe("detectProviderConfig", () => {
     const originalLocalAppData = process.env.LOCALAPPDATA;
     try {
       process.env.APPDATA = appData;
+      process.env.HOME = home;
+      process.env.USERPROFILE = home;
       delete process.env.LOCALAPPDATA;
       const result = withProcessPlatform("win32", () => detectProviderConfig());
       expect(result.hasConfig).toBe(true);
@@ -270,6 +291,30 @@ describe("detectProviderConfig", () => {
       if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
       else process.env.LOCALAPPDATA = originalLocalAppData;
     }
+  });
+
+  it("detects auth store credentials without exposing credential values", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-auth-store-"));
+    const authDir = path.join(fixtureDir, ".local", "share", "opencode");
+    fs.mkdirSync(authDir, { recursive: true });
+    fs.writeFileSync(path.join(authDir, "auth.json"), JSON.stringify({
+      openrouter: { type: "api", key: "test-auth-key-value" },
+      anthropic: { accessToken: "test-access-token", refreshToken: "test-refresh-token" },
+      empty: { token: "" },
+    }, null, 2), "utf8");
+    process.env.HOME = fixtureDir;
+    process.env.USERPROFILE = fixtureDir;
+    process.env.XDG_CONFIG_HOME = "";
+    delete process.env.XDG_DATA_HOME;
+
+    const authMeta = detectOpenCodeAuthStoreMetadata();
+    const providerMeta = detectProviderConfig();
+
+    expect(authMeta.credentialCount).toBe(2);
+    expect(providerMeta.authCredentialCount).toBe(2);
+    expect(providerMeta.credentialCount).toBe(2);
+    expect(JSON.stringify(providerMeta)).not.toContain("test-auth-key-value");
+    expect(JSON.stringify(providerMeta)).not.toContain("test-access-token");
   });
 });
 
@@ -540,6 +585,23 @@ describe("OpenCode Windows platform helpers", () => {
     expect(detectInstallMethod("C:\\Users\\me\\scoop\\shims\\opencode.cmd")).toBe("scoop");
     expect(detectInstallMethod("C:\\Tools\\opencode.exe")).toBe("path");
   });
+
+  it("orders Windows OpenCode config candidates with OPENCODE_CONFIG and official global path before AppData fallbacks", () => {
+    const home = "C:\\Users\\Alice";
+    const overrideConfig = "C:\\Custom\\opencode.json";
+    const candidates = getOpenCodeConfigPathCandidates({
+      OPENCODE_CONFIG: overrideConfig,
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: "C:\\Users\\Alice\\AppData\\Roaming",
+      LOCALAPPDATA: "C:\\Users\\Alice\\AppData\\Local",
+    }, "win32");
+
+    expect(candidates[0]).toBe(overrideConfig);
+    expect(candidates[1]).toBe("C:\\Users\\Alice\\.config\\opencode\\opencode.json");
+    expect(candidates).toContain("C:\\Users\\Alice\\AppData\\Roaming\\opencode\\opencode.json");
+    expect(candidates).toContain("C:\\Users\\Alice\\AppData\\Local\\opencode\\opencode.json");
+  });
 });
 
 // ─── checkOpenCodeAvailability (combined detection) ────────────────────────────
@@ -547,16 +609,40 @@ describe("OpenCode Windows platform helpers", () => {
 describe("checkOpenCodeAvailability combined detection", () => {
   const originalHome = process.env.HOME;
   const originalXdg = process.env.XDG_CONFIG_HOME;
+  const originalXdgData = process.env.XDG_DATA_HOME;
+  const originalUserProfile = process.env.USERPROFILE;
+  const originalOpenCodeConfig = process.env.OPENCODE_CONFIG;
+  const originalPath = process.env.PATH;
+  const originalAppData = process.env.APPDATA;
+  const originalLocalAppData = process.env.LOCALAPPDATA;
   let fixtureDir: string | null = null;
 
   beforeEach(() => {
     invalidateAvailabilityCache();
+    delete process.env.OPENCODE_CONFIG;
+    delete process.env.APPDATA;
+    delete process.env.LOCALAPPDATA;
+    process.env.PATH = "";
   });
 
   afterEach(() => {
     _resetExecRunner();
-    process.env.HOME = originalHome;
-    process.env.XDG_CONFIG_HOME = originalXdg || "";
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = originalXdg;
+    if (originalXdgData === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = originalXdgData;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
+    if (originalOpenCodeConfig === undefined) delete process.env.OPENCODE_CONFIG;
+    else process.env.OPENCODE_CONFIG = originalOpenCodeConfig;
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalAppData === undefined) delete process.env.APPDATA;
+    else process.env.APPDATA = originalAppData;
+    if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = originalLocalAppData;
     if (fixtureDir) {
       cleanupDir(fixtureDir);
       fixtureDir = null;
@@ -574,6 +660,62 @@ describe("checkOpenCodeAvailability combined detection", () => {
     expect(result.available).toBe(true);
     expect(result.version).toBe("v1.14.30");
     expect(result.error).toBeNull();
+  });
+
+  it("parses providers/auth list credential counts conservatively", () => {
+    expect(parseOpenCodeCredentialCount("\u001b[32m2 credentials\u001b[0m configured")).toBe(2);
+    expect(parseOpenCodeCredentialCount("Credentials: 0")).toBe(0);
+    expect(parseOpenCodeCredentialCount("No credentials configured")).toBe(0);
+    expect(parseOpenCodeCredentialCount("openrouter authenticated\nanthropic logged in")).toBe(2);
+    expect(parseOpenCodeCredentialCount("provider list without credential signal")).toBeNull();
+  });
+
+  it("returns available=true when local auth store has credentials and CLI lists zero credentials", async () => {
+    _setExecRunner(createMockExecRunner([
+      { args: ["--version"], result: { stdout: "v1.15.0\n", stderr: "" } },
+      { args: ["providers", "list"], result: { stdout: "0 credentials configured", stderr: "" } },
+      { args: ["auth", "list"], result: { stdout: "0 credentials configured", stderr: "" } },
+    ]));
+
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "availability-auth-store-"));
+    const authDir = path.join(fixtureDir, ".local", "share", "opencode");
+    fs.mkdirSync(authDir, { recursive: true });
+    fs.writeFileSync(path.join(authDir, "auth.json"), JSON.stringify({ openrouter: { token: "test-auth-token-value" } }), "utf8");
+    process.env.HOME = fixtureDir;
+    process.env.USERPROFILE = fixtureDir;
+    process.env.XDG_CONFIG_HOME = "";
+    delete process.env.XDG_DATA_HOME;
+
+    const result = await withProcessPlatformAsync("linux", () => checkOpenCodeAvailability());
+
+    expect(result.available).toBe(true);
+    expect(result.providerMetadata?.authCredentialCount).toBe(1);
+    expect(result.providerMetadata?.credentialCount).toBe(1);
+    expect(JSON.stringify(result)).not.toContain("test-auth-token-value");
+  });
+
+  it("uses auth list alias when providers list has no credential signal", async () => {
+    const capturedArgs: string[][] = [];
+    _setExecRunner(async (file: string, args: string[], _options: Record<string, unknown>) => {
+      if (file !== "opencode") throw new Error(`Unexpected command: ${file}`);
+      capturedArgs.push(args);
+      if (JSON.stringify(args) === JSON.stringify(["--version"])) return { stdout: "v1.15.0\n", stderr: "" };
+      if (JSON.stringify(args) === JSON.stringify(["providers", "list"])) return { stdout: "provider table without credential count", stderr: "" };
+      if (JSON.stringify(args) === JSON.stringify(["auth", "list"])) return { stdout: "Credentials: 2", stderr: "" };
+      throw new Error(`Unexpected opencode args: ${JSON.stringify(args)}`);
+    });
+
+    process.env.HOME = path.join(os.tmpdir(), "nonexistent-auth-alias-" + Date.now());
+    process.env.USERPROFILE = process.env.HOME;
+    process.env.XDG_CONFIG_HOME = "";
+    delete process.env.XDG_DATA_HOME;
+
+    const result = await withProcessPlatformAsync("linux", () => checkOpenCodeAvailability());
+
+    expect(result.available).toBe(true);
+    expect(result.providerMetadata?.cliCredentialCount).toBe(2);
+    expect(result.providerMetadata?.credentialCount).toBe(2);
+    expect(capturedArgs).toEqual([["--version"], ["providers", "list"], ["auth", "list"]]);
   });
 
   it("returns available=true when providers list has 0 but config file has apiKey", async () => {

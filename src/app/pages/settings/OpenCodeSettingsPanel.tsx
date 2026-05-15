@@ -152,6 +152,18 @@ function pathStateLabel(pathState: OpenCodeStatusResponse["pathState"] | undefin
   return "未找到";
 }
 
+function availabilityDiagnosticMessage(status: OpenCodeStatusResponse | null): string | null {
+  const availability = status?.availability;
+  if (!availability?.error || availability.resolutionError === availability.error) return null;
+  if (/credential|auth|provider|api key/i.test(availability.error)) {
+    return "OpenCode CLI 已安装，但未检测到可用凭据。请运行 opencode auth list / opencode auth login，或在官方 opencode.json 中配置 provider apiKey。";
+  }
+  if (/automation|safely execute|run|shim|node executable/i.test(availability.error)) {
+    return "OpenCode CLI 只读检测可用，但自动化 run 安全解析不可用。应用不会放宽 Windows .cmd/.bat 执行边界，请检查 Node/OpenCode 安装路径。";
+  }
+  return `OpenCode 自动化不可用：${availability.error}`;
+}
+
 function compareSemver(a: string | null | undefined, b: string | null | undefined): number {
   if (!a || !b) return 0;
   const left = a.replace(/^v/i, "").split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
@@ -393,6 +405,7 @@ export function OpenCodeSettingsPanel() {
       : "border-border bg-bg-sunken text-text-tertiary";
   const updateAvailable = compareSemver(status?.latestVersion, status?.availability?.version) > 0;
   const packageManagerRows = status?.packageManagers ? (Object.entries(status.packageManagers) as Array<["npm" | "pnpm" | "bun" | "corepack", { available: boolean; version: string | null; resolution?: string | null }]>) : [];
+  const availabilityDiagnostic = availabilityDiagnosticMessage(status);
   const saveDisabled = savePhase === "saving" || !canEditConfig || providers.length === 0;
   const installDisabled = installPhase === "planning" || installPhase === "installing" || !capabilities?.canInstall;
   const openDisabled = openPhase === "opening" || (!capabilities?.canOpenConfig && !capabilities?.canReturnConfigPathForCopy);
@@ -436,6 +449,7 @@ export function OpenCodeSettingsPanel() {
               <InfoTile label="PATH 状态" value={pathStateLabel(status?.availability?.pathState ?? status?.pathState)} />
               <InfoTile label="npm" value={status?.npm ? (status.npm.available ? status.npm.version ?? "可用" : "不可用") : "未检测"} />
               <InfoTile label="Provider 数" value={String(status?.availability?.providerMetadata.providerCount ?? config?.providers.length ?? 0)} />
+              <InfoTile label="凭据数" value={String(status?.availability?.providerMetadata.credentialCount ?? 0)} />
               <InfoTile label="Model 数" value={String(status?.availability?.providerMetadata.modelCount ?? modelOptions.length)} />
             </div>
 
@@ -453,6 +467,10 @@ export function OpenCodeSettingsPanel() {
 
             {status?.availability?.runResolutionError && !status?.availability?.resolutionError && (
               <InlineMessage tone="warning" message={`CLI 只读检测可用，但自动化运行安全解析不可用：${status.availability.runResolutionError}`} />
+            )}
+
+            {availabilityDiagnostic && !status?.availability?.runResolutionError && (
+              <InlineMessage tone="warning" message={availabilityDiagnostic} />
             )}
 
             <div className="flex flex-col gap-2">

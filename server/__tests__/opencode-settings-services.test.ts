@@ -59,6 +59,7 @@ describe("OpenCode settings backend services", () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-settings-"));
     process.env.XDG_CONFIG_HOME = path.join(tmpDir, "xdg");
     process.env.NODE_ENV = "test";
+    delete process.env.OPENCODE_CONFIG;
     delete process.env.OPENCODE_LOCAL_CAPABILITIES;
     delete process.env.ELECTRON_MODE;
     delete process.env.DESKTOP_API_TOKEN;
@@ -75,11 +76,44 @@ describe("OpenCode settings backend services", () => {
     expect(maskApiKey("sk-very-secret-value")).toBe("sk-...lue");
   });
 
-  it("resolves Windows OpenCode config path from APPDATA before LOCALAPPDATA", () => {
+  it("resolves Windows OpenCode config path to official global location when no config exists", () => {
+    const home = path.join(tmpDir, "UserHome");
     const appData = path.join(tmpDir, "AppData", "Roaming");
     const localAppData = path.join(tmpDir, "AppData", "Local");
-    const resolved = resolveOpenCodeConfigPath({ APPDATA: appData, LOCALAPPDATA: localAppData }, "win32");
-    expect(resolved).toBe(path.join(appData, "opencode", "opencode.json"));
+    const resolved = resolveOpenCodeConfigPath({ HOME: home, USERPROFILE: home, APPDATA: appData, LOCALAPPDATA: localAppData }, "win32");
+    expect(resolved).toBe(path.join(home, ".config", "opencode", "opencode.json"));
+  });
+
+  it("prefers existing Windows official OpenCode config path over legacy AppData paths", () => {
+    const home = path.join(tmpDir, "UserHome");
+    const appData = path.join(tmpDir, "AppData", "Roaming");
+    const officialConfig = path.join(home, ".config", "opencode", "opencode.json");
+    const legacyConfig = path.join(appData, "opencode", "opencode.json");
+    fs.mkdirSync(path.dirname(officialConfig), { recursive: true });
+    fs.mkdirSync(path.dirname(legacyConfig), { recursive: true });
+    fs.writeFileSync(officialConfig, "{}", "utf8");
+    fs.writeFileSync(legacyConfig, "{}", "utf8");
+
+    const resolved = resolveOpenCodeConfigPath({ HOME: home, USERPROFILE: home, APPDATA: appData }, "win32");
+    expect(resolved).toBe(officialConfig);
+  });
+
+  it("uses OPENCODE_CONFIG absolute path ahead of discovered Windows config files", () => {
+    const home = path.join(tmpDir, "UserHome");
+    const overrideConfig = path.join(tmpDir, "custom", "opencode.json");
+    const resolved = resolveOpenCodeConfigPath({ HOME: home, USERPROFILE: home, OPENCODE_CONFIG: overrideConfig }, "win32");
+    expect(resolved).toBe(overrideConfig);
+  });
+
+  it("falls back to existing Windows legacy AppData OpenCode config path", () => {
+    const home = path.join(tmpDir, "UserHome");
+    const appData = path.join(tmpDir, "AppData", "Roaming");
+    const legacyConfig = path.join(appData, "opencode", "opencode.json");
+    fs.mkdirSync(path.dirname(legacyConfig), { recursive: true });
+    fs.writeFileSync(legacyConfig, "{}", "utf8");
+
+    const resolved = resolveOpenCodeConfigPath({ HOME: home, USERPROFILE: home, APPDATA: appData }, "win32");
+    expect(resolved).toBe(legacyConfig);
   });
 
   it("creates, keeps, sets, and clears OpenCode apiKey without returning plaintext", async () => {

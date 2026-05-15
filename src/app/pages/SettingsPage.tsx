@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { Link } from "react-router";
-import { Eye, EyeOff, RefreshCw, Loader2, Shield, Copy, Check, Trash2, AlertTriangle, ChevronDown, ChevronRight, Activity, Database, FolderOpen, Route, Clock, Bot, FileAudio, Terminal, ExternalLink } from "lucide-react";
+import { Link, useLocation } from "react-router";
+import { ArrowLeft, Eye, EyeOff, RefreshCw, Loader2, Shield, Copy, Check, Trash2, AlertTriangle, Activity, Database, FolderOpen, Route, Clock, Bot, FileAudio, Terminal, ExternalLink, MonitorUp } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import { apiRequest, getDiagnostics } from "../services/httpAdapter";
 import { hasSavedOpenRouterKey, isSuccessfulSettingsConnection } from "../services/settingsKeyStatus";
@@ -33,8 +33,64 @@ function formatSettingsConnectionFailure(data: SettingsConnectionTestResponse): 
   return `${message}${providerMessage}`;
 }
 
+type SettingsSectionId = "api-key" | "defaults" | "limits" | "plugin-token" | "agent" | "updates" | "diagnostics";
+
+type SettingsEntry = {
+  id: SettingsSectionId | "opencode";
+  title: string;
+  description: string;
+  to: string;
+  icon: React.ReactNode;
+  summary: string;
+  tone?: "neutral" | "success" | "warning" | "accent";
+};
+
+const SECTION_COPY: Record<SettingsSectionId, { title: string; description: string }> = {
+  "api-key": {
+    title: "API Key 配置",
+    description: "管理 OpenRouter 认证信息，并通过后端认证端点测试真实连接。",
+  },
+  defaults: {
+    title: "默认参数",
+    description: "设置新建语音任务默认使用的模型、音色、音频格式和输出目录。",
+  },
+  limits: {
+    title: "请求限制",
+    description: "控制单次文本长度与并发请求数，避免误操作造成过载。",
+  },
+  "plugin-token": {
+    title: "插件 Token",
+    description: "生成、轮换或清空本地插件访问凭证；明文 Token 仅在生成后显示一次。",
+  },
+  agent: {
+    title: "Agent 授权",
+    description: "控制 Agent 会话自动批准策略、请求额度、字符额度和费用上限。",
+  },
+  updates: {
+    title: "应用更新 / 版本升级",
+    description: "检查桌面应用版本、下载更新包，并查看托盘常驻行为说明。",
+  },
+  diagnostics: {
+    title: "系统诊断",
+    description: "查看 API Key、数据库、音频目录、路由和最近任务的运行状态。",
+  },
+};
+
+const SAVABLE_SECTIONS = new Set<SettingsSectionId>(["api-key", "defaults", "limits", "agent"]);
+
+function isSettingsSectionId(value: string | undefined): value is SettingsSectionId {
+  return !!value && Object.prototype.hasOwnProperty.call(SECTION_COPY, value);
+}
+
+function getSettingsSectionFromPath(pathname: string): SettingsSectionId | undefined {
+  const [, sectionSegment] = pathname.replace(/\/+$/, "").split("/settings/");
+  const normalizedSection = sectionSegment ? decodeURIComponent(sectionSegment.split("/")[0]) : undefined;
+  return isSettingsSectionId(normalizedSection) ? normalizedSection : undefined;
+}
+
 export function SettingsPage() {
   const { settings, saveSettings, rotateLocalPluginToken, clearLocalPluginToken } = useAppState();
+  const location = useLocation();
 
   // Local form state (synced on save)
   const [apiKey, setApiKey] = useState("");
@@ -218,9 +274,10 @@ export function SettingsPage() {
 
   const hasToken = settings.agent.hasLocalPluginToken;
   const fingerprint = settings.agent.localPluginTokenFingerprint;
+  const activeSection = getSettingsSectionFromPath(location.pathname);
+  const currentSection = activeSection ? SECTION_COPY[activeSection] : null;
 
   // ── Diagnostics State ────────────────────────────────────────────────────
-  const [diagExpanded, setDiagExpanded] = useState(false);
   const [diagPhase, setDiagPhase] = useState<DiagnosticsPhase>("idle");
   const [diagData, setDiagData] = useState<Diagnostics | null>(null);
   const [diagError, setDiagError] = useState<string | null>(null);
@@ -246,12 +303,12 @@ export function SettingsPage() {
       });
   }, []);
 
-  // Auto-load when panel expands
+  // Auto-load when the diagnostics subpage is opened.
   useEffect(() => {
-    if (diagExpanded && diagPhase === "idle") {
+    if (activeSection === "diagnostics" && diagPhase === "idle") {
       loadDiagnostics();
     }
-  }, [diagExpanded, diagPhase, loadDiagnostics]);
+  }, [activeSection, diagPhase, loadDiagnostics]);
 
   const handleCopyDiagnostics = useCallback(async () => {
     if (!diagData) return;
@@ -339,20 +396,129 @@ export function SettingsPage() {
     return () => { cancelled = true; };
   }, []);
 
+  const settingsEntries: SettingsEntry[] = [
+    {
+      id: "api-key",
+      title: "API Key 配置",
+      description: "保存 OpenRouter Key 并测试音频认证连接。",
+      to: "/settings/api-key",
+      icon: <Shield size={18} />,
+      summary: connectionStatus === "connected"
+        ? `连接通过${connectionLatency ? ` · ${connectionLatency}ms` : ""}`
+        : apiKeyMasked
+          ? "已保存 Key，待测试连接"
+          : "未配置 Key",
+      tone: connectionStatus === "connected" ? "success" : apiKeyMasked ? "accent" : "warning",
+    },
+    {
+      id: "defaults",
+      title: "默认参数",
+      description: "模型、音色、音频格式与输出目录。",
+      to: "/settings/defaults",
+      icon: <FileAudio size={18} />,
+      summary: `${defaultVoice || "未设置音色"} · ${defaultFormat.toUpperCase()}`,
+      tone: "neutral",
+    },
+    {
+      id: "limits",
+      title: "请求限制",
+      description: "单次最大字符数与并发请求数。",
+      to: "/settings/limits",
+      icon: <Clock size={18} />,
+      summary: `${maxChars} 字 · ${maxConcurrent} 并发`,
+      tone: "neutral",
+    },
+    {
+      id: "plugin-token",
+      title: "插件 Token",
+      description: "本地插件凭证生成、轮换与清空。",
+      to: "/settings/plugin-token",
+      icon: <Shield size={18} />,
+      summary: hasToken ? `已配置 ${fingerprint ?? ""}` : "未配置 Token",
+      tone: hasToken ? "success" : "warning",
+    },
+    {
+      id: "agent",
+      title: "Agent 授权",
+      description: "自动批准策略、会话额度与费用上限。",
+      to: "/settings/agent",
+      icon: <Bot size={18} />,
+      summary: agentAuthMode === "confirm_each" ? "每次确认" : "会话自动批准",
+      tone: agentAuthMode === "session_auto" ? "accent" : "neutral",
+    },
+    {
+      id: "updates",
+      title: "应用更新",
+      description: "桌面版本检查、下载、安装重启与托盘说明。",
+      to: "/settings/updates",
+      icon: <MonitorUp size={18} />,
+      summary: "进入版本升级中心",
+      tone: "neutral",
+    },
+    {
+      id: "diagnostics",
+      title: "系统诊断",
+      description: "健康检查、最近任务和诊断 JSON。",
+      to: "/settings/diagnostics",
+      icon: <Activity size={18} />,
+      summary: diagPhase === "success" && diagData ? `状态 ${diagData.status}` : diagPhase === "error" ? "诊断加载失败" : "进入后自动刷新",
+      tone: diagPhase === "error" ? "warning" : "neutral",
+    },
+    {
+      id: "opencode",
+      title: "OpenCode 管理",
+      description: "CLI 状态、配置路径、Provider 与受控安装。",
+      to: "/settings/opencode",
+      icon: <Terminal size={18} />,
+      summary: `${openCodeOverview.status} · ${openCodeOverview.version}`,
+      tone: openCodeOverview.phase === "success" ? "accent" : openCodeOverview.phase === "error" ? "warning" : "neutral",
+    },
+  ];
+
+  if (!activeSection) {
+    return (
+      <div className="flex h-full flex-col overflow-y-auto bg-bg-base">
+        <div className="mx-auto flex w-full max-w-[1480px] flex-col gap-8 p-8">
+          <div className="flex flex-col gap-2">
+            <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">Settings Hub</p>
+            <h2 className="font-display text-3xl font-bold text-text-primary">设置</h2>
+            <p className="max-w-3xl text-sm leading-6 text-text-tertiary">
+              主页面仅保留设置入口。点击卡片会直接进入对应二级页面，不在当前页面展开表单，避免长列表堆叠造成的定位负担。
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {settingsEntries.map((entry) => (
+              <SettingsEntryCard key={entry.id} entry={entry} />
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const showSaveFooter = SAVABLE_SECTIONS.has(activeSection);
+
   return (
     <div className="flex flex-col h-full bg-bg-base overflow-y-auto">
-      <div className="max-w-[1848px] w-full mx-auto p-8 flex flex-col gap-8">
+      <div className="max-w-[1180px] w-full mx-auto p-8 flex flex-col gap-8">
 
-        <div className="h-12 shrink-0">
-          <h2 className="text-2xl font-bold font-display text-text-primary">设置</h2>
+        <div className="flex flex-col gap-3">
+          <Link
+            to="/settings"
+            className="inline-flex w-fit items-center gap-2 rounded-md border border-border bg-bg-surface px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+          >
+            <ArrowLeft size={14} /> 返回设置
+          </Link>
+          <div className="flex flex-col gap-1">
+            <h2 className="text-2xl font-bold font-display text-text-primary">{currentSection?.title}</h2>
+            <p className="max-w-3xl text-sm leading-6 text-text-tertiary">{currentSection?.description}</p>
+          </div>
         </div>
 
-        <div className="flex gap-8 items-start">
+        <div className="w-full flex flex-col gap-6">
 
-          {/* Left Column */}
-          <div className="flex-1 max-w-[640px] flex flex-col gap-6">
-
-            <SettingsSection title="API Key 配置" description="OpenRouter 认证信息，仅通过后端 token-aware helper 保存和验证。" icon={<Shield size={16} />} defaultOpen>
+            {activeSection === "api-key" && <SettingsSection title="API Key 配置" description="OpenRouter 认证信息，仅通过后端 token-aware helper 保存和验证。" icon={<Shield size={16} />} defaultOpen>
               <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm text-text-secondary">OpenRouter API Key</label>
@@ -414,9 +580,9 @@ export function SettingsPage() {
                   </div>
                 )}
               </div>
-            </SettingsSection>
+            </SettingsSection>}
 
-            <SettingsSection title="默认参数" description="生成模型、音色、格式与输出目录。" icon={<FileAudio size={16} />} defaultOpen>
+            {activeSection === "defaults" && <SettingsSection title="默认参数" description="生成模型、音色、格式与输出目录。" icon={<FileAudio size={16} />} defaultOpen>
               <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-4">
                 <div className="flex items-center justify-between">
                   <label className="text-sm text-text-secondary w-32">默认模型:</label>
@@ -470,14 +636,9 @@ export function SettingsPage() {
                   />
                 </div>
               </div>
-            </SettingsSection>
+            </SettingsSection>}
 
-          </div>
-
-          {/* Right Column */}
-          <div className="flex-1 flex flex-col gap-6">
-
-            <SettingsSection title="请求限制" description="低频调整项，默认收起以降低页面噪音。" icon={<Clock size={16} />} defaultOpen={false}>
+            {activeSection === "limits" && <SettingsSection title="请求限制" description="低频调整项，默认收起以降低页面噪音。" icon={<Clock size={16} />} defaultOpen>
               <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm text-text-secondary">单次最大字符数</label>
@@ -498,9 +659,9 @@ export function SettingsPage() {
                   />
                 </div>
               </div>
-            </SettingsSection>
+            </SettingsSection>}
 
-            <SettingsSection title="插件 Token" description="本地插件访问凭证，仅显示指纹或一次性明文。" icon={<Shield size={16} />} defaultOpen={false}>
+            {activeSection === "plugin-token" && <SettingsSection title="插件 Token" description="本地插件访问凭证，仅显示指纹或一次性明文。" icon={<Shield size={16} />} defaultOpen>
               <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm text-text-secondary">本地 Plugin Token</label>
@@ -593,13 +754,10 @@ export function SettingsPage() {
                   )}
                 </div>
               </div>
-            </SettingsSection>
-
-          </div>
-        </div>
+            </SettingsSection>}
 
         {/* Agent Auth (Full Width) */}
-        <SettingsSection title="Agent 授权" description="控制 Agent 会话自动批准策略与费用上限。" icon={<Bot size={16} />} defaultOpen={false}>
+        {activeSection === "agent" && <SettingsSection title="Agent 授权" description="控制 Agent 会话自动批准策略与费用上限。" icon={<Bot size={16} />} defaultOpen>
           <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-6">
 
             <div className="flex items-center gap-6">
@@ -704,48 +862,13 @@ export function SettingsPage() {
             </div>
 
           </div>
-        </SettingsSection>
+        </SettingsSection>}
 
-        <SettingsSection title="OpenCode 管理" description="入口卡片：状态、版本、配置路径和 Provider 可视化编辑在二级页中完成。" icon={<Terminal size={16} />} defaultOpen>
-          <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-4">
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
-                <Terminal size={16} className="text-accent" /> OpenCode 配置中心
-              </div>
-              <p className="text-xs leading-5 text-text-tertiary">
-                主设置页仅保留轻量概览。CLI 状态、版本、配置路径、baseURL、model、provider、API Key 动作和受控安装均在二级页面处理，避免在全局设置页中堆叠重型表单。
-              </p>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-              <OpenCodeOverviewTile icon={<Terminal size={14} />} label="状态" value={openCodeOverview.status} phase={openCodeOverview.phase} />
-              <OpenCodeOverviewTile icon={<FileAudio size={14} />} label="版本" value={openCodeOverview.version} phase={openCodeOverview.phase} />
-              <OpenCodeOverviewTile icon={<FolderOpen size={14} />} label="配置路径" value={openCodeOverview.configPath} phase={openCodeOverview.phase} />
-            </div>
-            <Link
-              to="/settings/opencode"
-              className="inline-flex w-fit items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-bg-base shadow-shadow-glow transition-colors hover:bg-accent/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-            >
-              进入 OpenCode 配置 <ExternalLink size={14} />
-            </Link>
-          </div>
-        </SettingsSection>
+        {activeSection === "updates" && <ApplicationUpdateSection />}
 
-        <ApplicationUpdateSection />
-
-        {/* ── System Diagnostics Panel (Full Width, Collapsible) ─────────── */}
-        <div className="flex flex-col gap-3">
-          <button
-            className="flex items-center gap-2 text-sm font-semibold text-text-primary hover:text-accent transition-colors group"
-            onClick={() => setDiagExpanded(!diagExpanded)}
-            aria-expanded={diagExpanded}
-            aria-controls="settings-diagnostics-content"
-          >
-            {diagExpanded ? <ChevronDown size={16} className="text-text-tertiary group-hover:text-accent transition-colors" /> : <ChevronRight size={16} className="text-text-tertiary group-hover:text-accent transition-colors" />}
-            <Activity size={16} className="text-accent" />
-            系统诊断
-          </button>
-
-          {diagExpanded && (
+        {/* ── System Diagnostics Page ─────────────────────────────────────── */}
+        {activeSection === "diagnostics" && (
+          <div className="flex flex-col gap-3">
             <div id="settings-diagnostics-content" className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-5">
 
               {/* Toolbar: refresh + copy */}
@@ -925,11 +1048,12 @@ export function SettingsPage() {
                 </div>
               )}
             </div>
-          )}
+          </div>
+        )}
         </div>
       </div>
 
-      <div className="h-[52px] shrink-0 bg-bg-sunken border-t border-border-subtle mt-auto flex items-center justify-between px-8 sticky bottom-0 z-10">
+      {showSaveFooter && <div className="h-[52px] shrink-0 bg-bg-sunken border-t border-border-subtle mt-auto flex items-center justify-between px-8 sticky bottom-0 z-10">
         <div className="text-xs flex items-center gap-2">
           <span className="text-text-tertiary">设置通过后端 API 持久化保存</span>
           {saveStatus === "error" && saveErrorMessage && (
@@ -951,33 +1075,49 @@ export function SettingsPage() {
         >
           {saveStatus === "saving" ? "保存中..." : saveStatus === "saved" ? "已保存" : saveStatus === "error" ? "保存失败" : "保存设置"}
         </button>
-      </div>
+      </div>}
     </div>
   );
 }
 
-// ── Diagnostics Sub-Components ─────────────────────────────────────────────
+// ── Settings Hub / Diagnostics Sub-Components ──────────────────────────────
 
-function OpenCodeOverviewTile({ icon, label, value, phase }: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  phase: "loading" | "success" | "error";
-}) {
-  const tone = phase === "success"
-    ? "border-border-subtle bg-bg-sunken text-text-primary"
-    : phase === "loading"
-      ? "border-accent/20 bg-accent-muted/10 text-accent"
-      : "border-warning/25 bg-warning-muted/10 text-warning";
+function SettingsEntryCard({ entry }: { entry: SettingsEntry }) {
+  const toneClass = entry.tone === "success"
+    ? "border-success/25 bg-success-muted/10 text-success"
+    : entry.tone === "warning"
+      ? "border-warning/25 bg-warning-muted/10 text-warning"
+      : entry.tone === "accent"
+        ? "border-accent/25 bg-accent-muted/10 text-accent"
+        : "border-border-subtle bg-bg-sunken text-text-secondary";
 
   return (
-    <div className={`min-w-0 rounded-md border p-3 flex flex-col gap-1.5 ${tone}`}>
-      <div className="flex items-center gap-1.5 text-xs">
-        <span className={phase === "error" ? "text-warning" : "text-accent"}>{icon}</span>
-        <span className="font-medium text-text-secondary">{label}</span>
+    <Link
+      to={entry.to}
+      className="group flex min-h-[148px] flex-col justify-between rounded-xl border border-border bg-bg-surface p-5 transition-all hover:-translate-y-0.5 hover:border-accent/45 hover:bg-bg-hover hover:shadow-shadow-glow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+      aria-label={`进入${entry.title}`}
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-accent/20 bg-accent-muted text-accent">
+            {entry.icon}
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-base font-semibold text-text-primary">{entry.title}</h3>
+            <p className="mt-1 text-xs leading-5 text-text-tertiary">{entry.description}</p>
+          </div>
+        </div>
+        <ExternalLink size={16} className="mt-1 shrink-0 text-text-tertiary transition-colors group-hover:text-accent" />
       </div>
-      <span className="truncate text-[11px] font-mono" title={value}>{value}</span>
-    </div>
+      <div className="mt-5 flex items-center justify-between gap-3">
+        <span className={`min-w-0 truncate rounded-md border px-2.5 py-1 text-[11px] font-medium ${toneClass}`} title={entry.summary}>
+          {entry.summary}
+        </span>
+        <span className="inline-flex items-center gap-1 text-xs font-medium text-accent opacity-90 transition-transform group-hover:translate-x-0.5">
+          进入子页 <ExternalLink size={12} />
+        </span>
+      </div>
+    </Link>
   );
 }
 
