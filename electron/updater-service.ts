@@ -55,6 +55,27 @@ function toDesktopProgress(progress: ProgressInfo): DesktopDownloadProgress {
   };
 }
 
+function describeUpdaterError(error: unknown, sanitizedError: string) {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const combinedMessage = `${rawMessage}\n${sanitizedError}`.toLowerCase();
+  const referencesGithubUpdateSource = combinedMessage.includes("github.com")
+    || combinedMessage.includes("github")
+    || combinedMessage.includes("releases.atom")
+    || combinedMessage.includes("latest.yml")
+    || combinedMessage.includes("latest-mac.yml");
+  const looksLikePrivateOrMissingRelease = combinedMessage.includes("404")
+    || combinedMessage.includes("authentication token")
+    || combinedMessage.includes("actual status maybe not reported")
+    || combinedMessage.includes("not found")
+    || combinedMessage.includes("private");
+
+  if (referencesGithubUpdateSource && looksLikePrivateOrMissingRelease) {
+    return "更新源不可访问：GitHub 返回 404 或认证提示，通常表示仓库、Release 或更新资产对未登录客户端不可见。应用内更新不能内置 GitHub Token；请将仓库/Release 或公共更新源开放，或打开下载页手动下载安装新版本。";
+  }
+
+  return sanitizedError;
+}
+
 export class DesktopUpdaterService {
   private state: DesktopUpdateState;
   private checkInFlight: Promise<DesktopUpdateCheckResult> | null = null;
@@ -114,7 +135,7 @@ export class DesktopUpdaterService {
         return { ok: true, state: this.getState() } as const;
       })
       .catch((error) => {
-        const sanitizedError = this.options.sanitizeError(error);
+        const sanitizedError = describeUpdaterError(error, this.options.sanitizeError(error));
         this.setState({ phase: "error", currentVersion: capabilities.appVersion, error: sanitizedError });
         return { ok: false, code: "update-check-failed", error: sanitizedError, state: this.getState() } as const;
       })
@@ -140,7 +161,7 @@ export class DesktopUpdaterService {
     this.downloadInFlight = autoUpdater.downloadUpdate()
       .then(() => ({ ok: true } as const))
       .catch((error) => {
-        const sanitizedError = this.options.sanitizeError(error);
+        const sanitizedError = describeUpdaterError(error, this.options.sanitizeError(error));
         this.setState({ phase: "error", currentVersion: capabilities.appVersion, error: sanitizedError });
         return { ok: false, code: "update-download-failed", error: sanitizedError } as const;
       })
@@ -173,7 +194,7 @@ export class DesktopUpdaterService {
         return { ok: true } as const;
       })
       .catch((error) => {
-        const sanitizedError = this.options.sanitizeError(error);
+        const sanitizedError = describeUpdaterError(error, this.options.sanitizeError(error));
         this.setState({ phase: "error", currentVersion: capabilities.appVersion, error: sanitizedError });
         return { ok: false, code: "update-install-failed", error: sanitizedError } as const;
       })
@@ -212,7 +233,7 @@ export class DesktopUpdaterService {
       this.setState({ phase: "downloaded", latestVersion: updateInfo.version, updateInfo, error: undefined });
     });
     autoUpdater.on("error", (error) => {
-      const sanitizedError = this.options.sanitizeError(error);
+      const sanitizedError = describeUpdaterError(error, this.options.sanitizeError(error));
       this.setState({ phase: "error", error: sanitizedError });
     });
   }

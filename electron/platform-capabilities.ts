@@ -1,7 +1,7 @@
 import { app } from "electron";
 import type { DesktopPlatformCapabilities } from "./desktop-contracts";
 
-const DEFAULT_GITHUB_REPOSITORY = "maorun/tts-voice-generator";
+const DEFAULT_GITHUB_REPOSITORY = "runrunrain/tts-voice-generator";
 
 function resolveGitHubRepository() {
   const rawRepository = process.env.GITHUB_REPOSITORY?.trim() || DEFAULT_GITHUB_REPOSITORY;
@@ -56,7 +56,7 @@ export function getDesktopPlatformCapabilities(): DesktopPlatformCapabilities {
     updateDownloadSupported: updateCheckSupported,
     updateInstallSupported,
     ...(updateInstallUnsupportedReason ? { updateInstallUnsupportedReason } : {}),
-    updateProvider: "github",
+    updateProvider: "generic",
     releasePageUrl: getReleasePageUrl(),
   };
 }

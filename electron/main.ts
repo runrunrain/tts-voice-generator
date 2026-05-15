@@ -48,6 +48,13 @@ function sanitizeDesktopError(error: unknown): string {
   return message
     .replace(os.homedir(), "~")
     .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(/Basic\s+\S+/gi, "Basic [REDACTED]")
+    .replace(/\bgh[opusr]_[A-Za-z0-9_]{20,}\b/g, "gh[REDACTED]")
+    .replace(/([?&](?:access_token|auth|token)=)[^&\s]+/gi, "$1[REDACTED]")
+    .replace(/\b(?:authorization|x-github-token|github-token)\s*[:=]\s*[^\s,;}]+/gi, (match) => {
+      const separator = match.includes(":") ? ":" : "=";
+      return `${match.split(separator)[0]}${separator} [REDACTED]`;
+    })
     .replace(/\bsk-[A-Za-z0-9_\-]{8,}\b/g, "sk-[REDACTED]")
     .slice(0, 300);
 }

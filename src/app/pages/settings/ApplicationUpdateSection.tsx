@@ -31,7 +31,7 @@ type Tone = "neutral" | "info" | "success" | "warning" | "error";
 const PHASE_COPY: Record<DesktopUpdatePhase, { label: string; description: string; tone: Tone }> = {
   idle: { label: "等待检查", description: "手动检查更新，不会自动下载或重启。", tone: "neutral" },
   unsupported: { label: "当前环境不支持", description: "该能力需要桌面安装包与受控 preload API。", tone: "warning" },
-  checking: { label: "正在检查", description: "正在查询 GitHub Release 更新元数据。", tone: "info" },
+  checking: { label: "正在检查", description: "正在查询 Release 更新源元数据。", tone: "info" },
   "up-to-date": { label: "已是最新", description: "当前版本已与更新源同步。", tone: "success" },
   available: { label: "发现新版本", description: "可下载更新包；下载后再手动安装重启。", tone: "info" },
   downloading: { label: "正在下载", description: "更新包下载中，请保持网络连接。", tone: "info" },

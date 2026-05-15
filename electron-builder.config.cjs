@@ -5,10 +5,32 @@ const targetPlatform = process.env.DESKTOP_TARGET_PLATFORM;
 const targetArch = process.env.DESKTOP_TARGET_ARCH;
 const appDir = process.env.DESKTOP_APP_DIR;
 const outputDir = process.env.DESKTOP_OUTPUT_DIR;
-const repository = process.env.GITHUB_REPOSITORY || "maorun/tts-voice-generator";
+const defaultRepository = "runrunrain/tts-voice-generator";
+const repository = process.env.GITHUB_REPOSITORY || defaultRepository;
 const [rawGithubOwner, rawGithubRepo] = repository.split("/");
-const githubOwner = /^[A-Za-z0-9_.-]+$/.test(rawGithubOwner || "") ? rawGithubOwner : "maorun";
+const githubOwner = /^[A-Za-z0-9_.-]+$/.test(rawGithubOwner || "") ? rawGithubOwner : "runrunrain";
 const githubRepo = /^[A-Za-z0-9_.-]+$/.test(rawGithubRepo || "") ? rawGithubRepo : "tts-voice-generator";
+
+function normalizeUpdateFeedUrl(rawUrl) {
+  const parsed = new URL(rawUrl);
+  if (parsed.protocol !== "https:") {
+    throw new Error("DESKTOP_UPDATE_FEED_URL must use https://");
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("DESKTOP_UPDATE_FEED_URL must not contain credentials, query strings or fragments");
+  }
+  return parsed.href.endsWith("/") ? parsed.href : `${parsed.href}/`;
+}
+
+function resolveUpdateFeedUrl() {
+  const configuredFeedUrl = process.env.DESKTOP_UPDATE_FEED_URL?.trim();
+  if (configuredFeedUrl) {
+    return normalizeUpdateFeedUrl(configuredFeedUrl);
+  }
+  return normalizeUpdateFeedUrl(`https://github.com/${githubOwner}/${githubRepo}/releases/latest/download/`);
+}
+
+const updateFeedUrl = resolveUpdateFeedUrl();
 
 if (!targetPlatform || !targetArch || !appDir || !outputDir) {
   throw new Error("DESKTOP_TARGET_PLATFORM, DESKTOP_TARGET_ARCH, DESKTOP_APP_DIR and DESKTOP_OUTPUT_DIR are required");
@@ -60,10 +82,8 @@ module.exports = {
   ],
   publish: [
     {
-      provider: "github",
-      owner: githubOwner,
-      repo: githubRepo,
-      releaseType: "release",
+      provider: "generic",
+      url: updateFeedUrl,
     },
   ],
   npmRebuild: false,

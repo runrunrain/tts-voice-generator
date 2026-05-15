@@ -26,7 +26,7 @@ export type DesktopPlatformCapabilities = {
   updateDownloadSupported: boolean;
   updateInstallSupported: boolean;
   updateInstallUnsupportedReason?: string;
-  updateProvider: "github";
+  updateProvider: "generic";
   releasePageUrl: string;
 };
 
