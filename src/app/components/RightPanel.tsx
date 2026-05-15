@@ -7,6 +7,7 @@ import { AgentAutomationPanel } from "./tasks/AgentAutomationPanel";
 import { useTaskWorkspaceUi } from "../context/TaskWorkspaceUiContext";
 import { formatVoiceCompactLabel, formatVoiceOptionLabel, getVoiceDisplayMeta } from "../utils/voiceDisplay";
 import { PromptTextBlock } from "./PromptTextBlock";
+import { createAudioElementFromAsset, downloadAudioAsset } from "../services/audioAsset";
 
 function displaySpeakerLabel(label: string): string {
   const match = label.match(/^Speaker\s+([A-Z])$/i);
@@ -181,7 +182,12 @@ function DirectorPreview() {
 function GenerateOutputPanel() {
   const { generatePhase, generateResult, generate, lastRequest, resetGeneration } = useAppState();
   const [isPlaying, setIsPlaying] = useState(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioRef = useRef<{ audio: HTMLAudioElement; cleanup: () => void } | null>(null);
+
+  useEffect(() => () => {
+    audioRef.current?.cleanup();
+    audioRef.current = null;
+  }, []);
 
   // Idle state
   if (generatePhase === "idle") {
@@ -284,25 +290,30 @@ function GenerateOutputPanel() {
 
   // Success state
   if (generatePhase === "success" && generateResult) {
-    const handlePlay = () => {
+    const handlePlay = async () => {
       if (generateResult.audioUrl) {
         if (audioRef.current) {
-          audioRef.current.pause();
+          audioRef.current.cleanup();
+          audioRef.current = null;
         }
-        const audio = new Audio(generateResult.audioUrl);
-        audio.onended = () => setIsPlaying(false);
-        audio.play();
-        audioRef.current = audio;
-        setIsPlaying(true);
+        try {
+          const playback = await createAudioElementFromAsset(generateResult.audioUrl);
+          playback.audio.onended = () => setIsPlaying(false);
+          playback.audio.onerror = () => setIsPlaying(false);
+          audioRef.current = playback;
+          setIsPlaying(true);
+          await playback.audio.play();
+        } catch {
+          audioRef.current?.cleanup();
+          audioRef.current = null;
+          setIsPlaying(false);
+        }
       }
     };
 
-    const handleDownload = () => {
+    const handleDownload = async () => {
       if (generateResult.audioUrl) {
-        const a = document.createElement("a");
-        a.href = generateResult.audioUrl;
-        a.download = `${generateResult.jobId}.${generateResult.format}`;
-        a.click();
+        await downloadAudioAsset(generateResult.audioUrl, `${generateResult.jobId}.${generateResult.format}`);
       }
     };
 
@@ -330,7 +341,7 @@ function GenerateOutputPanel() {
             <div className="flex items-center gap-3">
               <button
                 className="w-8 h-8 rounded-full bg-accent text-bg-base flex items-center justify-center hover:bg-accent-hover transition-colors shrink-0"
-                onClick={handlePlay}
+                onClick={() => void handlePlay()}
               >
                 {isPlaying ? <span className="text-xs">||</span> : <Play fill="currentColor" size={14} className="ml-0.5" />}
               </button>
@@ -348,7 +359,7 @@ function GenerateOutputPanel() {
             <div className="flex justify-end gap-2">
               <button
                 className="text-xs text-text-secondary hover:text-text-primary transition-colors flex items-center gap-1"
-                onClick={handleDownload}
+                onClick={() => void handleDownload()}
               >
                 <Download size={14} /> 下载 {generateResult.format.toUpperCase()}
               </button>

@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import { Play, Square, Download, Copy, ChevronRight, Search, Loader2, AlertCircle, RefreshCw } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import type { HistoryStatus, HistorySource } from "../types";
+import { createAudioElementFromAsset, downloadAudioAsset } from "../services/audioAsset";
 
 const HISTORY_SOURCE_LABEL: Record<HistorySource, string> = {
   user: "用户",
@@ -34,7 +35,18 @@ export function HistoryPage() {
     historyRecords[0]?.id ?? ""
   );
   const [playingId, setPlayingId] = useState<string | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioRef = useRef<{ audio: HTMLAudioElement; cleanup: () => void } | null>(null);
+
+  const stopPlayback = useCallback(() => {
+    audioRef.current?.cleanup();
+    audioRef.current = null;
+    setPlayingId(null);
+  }, []);
+
+  useEffect(() => () => {
+    audioRef.current?.cleanup();
+    audioRef.current = null;
+  }, []);
 
   // Auto-select first record when records load and no record is currently selected
   useEffect(() => {
@@ -43,51 +55,34 @@ export function HistoryPage() {
     }
   }, [historyRecords, activeRecord]);
 
-  const handlePlay = useCallback((recordId: string, audioUrl: string | null | undefined) => {
+  const handlePlay = useCallback(async (recordId: string, audioUrl: string | null | undefined) => {
     if (!audioUrl) return;
 
     // If clicking the same record that's playing, stop it
     if (playingId === recordId && audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-      audioRef.current = null;
-      setPlayingId(null);
+      stopPlayback();
       return;
     }
 
     // Stop any currently playing audio
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
+    stopPlayback();
+
+    try {
+      // Start playing the new audio through an authenticated fetch-backed object URL.
+      const playback = await createAudioElementFromAsset(audioUrl);
+      playback.audio.addEventListener("ended", () => stopPlayback(), { once: true });
+      playback.audio.addEventListener("error", () => stopPlayback(), { once: true });
+      audioRef.current = playback;
+      setPlayingId(recordId);
+      await playback.audio.play();
+    } catch {
+      stopPlayback();
     }
+  }, [playingId, stopPlayback]);
 
-    // Start playing the new audio
-    const audio = new Audio(audioUrl);
-    audio.addEventListener("ended", () => {
-      setPlayingId(null);
-      audioRef.current = null;
-    });
-    audio.addEventListener("error", () => {
-      setPlayingId(null);
-      audioRef.current = null;
-    });
-    audioRef.current = audio;
-    audio.play().catch(() => {
-      setPlayingId(null);
-      audioRef.current = null;
-    });
-    setPlayingId(recordId);
-  }, [playingId]);
-
-  const handleDownload = useCallback((downloadUrl: string | null | undefined, fileName?: string) => {
+  const handleDownload = useCallback(async (downloadUrl: string | null | undefined, fileName?: string) => {
     if (!downloadUrl) return;
-    const a = document.createElement("a");
-    a.href = downloadUrl;
-    if (fileName) a.download = fileName;
-    a.rel = "noopener";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    await downloadAudioAsset(downloadUrl, fileName);
   }, []);
 
   // Client-side search on top of server-side filtered records
@@ -306,7 +301,7 @@ export function HistoryPage() {
                       }`}
                       title={playingId === r.id ? "停止" : "播放"}
                       disabled={!r.audioUrl}
-                      onClick={(e) => { e.stopPropagation(); handlePlay(r.id, r.audioUrl); }}
+                      onClick={(e) => { e.stopPropagation(); void handlePlay(r.id, r.audioUrl); }}
                     >
                       {playingId === r.id ? <Square size={16} /> : <Play size={16} />}
                     </button>
@@ -318,7 +313,7 @@ export function HistoryPage() {
                       }`}
                       title="下载"
                       disabled={!r.downloadUrl}
-                      onClick={(e) => { e.stopPropagation(); handleDownload(r.downloadUrl); }}
+                      onClick={(e) => { e.stopPropagation(); void handleDownload(r.downloadUrl); }}
                     >
                       <Download size={16} />
                     </button>

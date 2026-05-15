@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router";
 import { Play, Download, Copy, ChevronLeft, Loader2, AlertCircle } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import { apiRequest } from "../services/httpAdapter";
+import { createAudioElementFromAsset, downloadAudioAsset } from "../services/audioAsset";
 
 interface JobDetail {
   job: {
@@ -115,7 +116,12 @@ export function HistoryDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioRef = useRef<{ audio: HTMLAudioElement; cleanup: () => void } | null>(null);
+
+  useEffect(() => () => {
+    audioRef.current?.cleanup();
+    audioRef.current = null;
+  }, []);
 
   useEffect(() => {
     if (!jobId) return;
@@ -137,23 +143,28 @@ export function HistoryDetailPage() {
       });
   }, [jobId]);
 
-  const handlePlay = () => {
+  const handlePlay = async () => {
     if (detail?.audio?.audioUrl) {
-      if (audioRef.current) audioRef.current.pause();
-      const audio = new Audio(detail.audio.audioUrl);
-      audio.onended = () => setIsPlaying(false);
-      audio.play().catch(() => {});
-      audioRef.current = audio;
-      setIsPlaying(true);
+      audioRef.current?.cleanup();
+      audioRef.current = null;
+      try {
+        const playback = await createAudioElementFromAsset(detail.audio.audioUrl);
+        playback.audio.onended = () => setIsPlaying(false);
+        playback.audio.onerror = () => setIsPlaying(false);
+        audioRef.current = playback;
+        setIsPlaying(true);
+        await playback.audio.play();
+      } catch {
+        audioRef.current?.cleanup();
+        audioRef.current = null;
+        setIsPlaying(false);
+      }
     }
   };
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (detail?.audio?.audioUrl) {
-      const a = document.createElement("a");
-      a.href = detail.audio.audioUrl;
-      a.download = detail.audio.fileName;
-      a.click();
+      await downloadAudioAsset(detail.audio.audioUrl, detail.audio.fileName);
     }
   };
 
@@ -268,7 +279,7 @@ export function HistoryDetailPage() {
                 <div className="flex items-center gap-4">
                   <button
                     className="w-10 h-10 rounded-full bg-accent text-bg-base flex items-center justify-center hover:bg-accent-hover transition-colors shrink-0"
-                    onClick={handlePlay}
+                    onClick={() => void handlePlay()}
                   >
                     {isPlaying ? <span className="text-xs font-bold">||</span> : <Play fill="currentColor" size={18} className="ml-0.5" />}
                   </button>
@@ -282,7 +293,7 @@ export function HistoryDetailPage() {
                 <div className="flex justify-end">
                   <button
                     className="flex items-center gap-2 px-4 py-2 rounded-md bg-bg-base border border-border text-sm font-medium hover:bg-bg-hover transition-colors"
-                    onClick={handleDownload}
+                    onClick={() => void handleDownload()}
                   >
                     <Download size={16} /> 下载 {deriveActualFormat(detail).toUpperCase()}
                   </button>

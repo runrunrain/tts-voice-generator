@@ -4,6 +4,7 @@ import { useAppState } from "../../state/AppContext";
 import { useProductionList } from "../../hooks/useProductionList";
 import { getLineGenerationStatus, isGeneratableVoiceLine, useProductionGeneration } from "../../hooks/useProductionGeneration";
 import { taskApi } from "../../services/httpAdapter";
+import { createAudioElementFromAsset, downloadAudioAsset } from "../../services/audioAsset";
 import { ProductionListP1Panel } from "./ProductionListP1Panel";
 import type { DirectorProfile, LineGenerationResult, LineGenerationStatus, ProductionListValidationReport, ResponseFormat, ValidationIssue, VoiceLine } from "../../types";
 import { formatVoiceOptionLabel } from "../../utils/voiceDisplay";
@@ -575,56 +576,43 @@ function buildDownloadUrl(assetId: number | null, audioUrl: string | null) {
 
 function AudioAssetControls({ audioAccess }: { audioAccess: ResolvedAudioAccess }) {
   const [playing, setPlaying] = useState(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioRef = useRef<{ audio: HTMLAudioElement; cleanup: () => void } | null>(null);
 
   useEffect(() => () => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
-    }
+    audioRef.current?.cleanup();
+    audioRef.current = null;
   }, []);
 
   const stop = () => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-      audioRef.current = null;
-    }
+    audioRef.current?.cleanup();
+    audioRef.current = null;
     setPlaying(false);
   };
 
-  const play = () => {
+  const play = async () => {
     if (!audioAccess.audioUrl) return;
     if (playing) {
       stop();
       return;
     }
     if (audioRef.current) stop();
-    const audio = new Audio(audioAccess.audioUrl);
-    audio.addEventListener("ended", () => {
+    try {
+      const playback = await createAudioElementFromAsset(audioAccess.audioUrl);
+      playback.audio.addEventListener("ended", () => stop(), { once: true });
+      playback.audio.addEventListener("error", () => stop(), { once: true });
+      audioRef.current = playback;
+      setPlaying(true);
+      await playback.audio.play();
+    } catch {
+      audioRef.current?.cleanup();
       audioRef.current = null;
       setPlaying(false);
-    });
-    audio.addEventListener("error", () => {
-      audioRef.current = null;
-      setPlaying(false);
-    });
-    audioRef.current = audio;
-    setPlaying(true);
-    void audio.play().catch(() => {
-      audioRef.current = null;
-      setPlaying(false);
-    });
+    }
   };
 
-  const download = () => {
+  const download = async () => {
     if (!audioAccess.downloadUrl) return;
-    const link = document.createElement("a");
-    link.href = audioAccess.downloadUrl;
-    link.rel = "noopener";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    await downloadAudioAsset(audioAccess.downloadUrl);
   };
 
   return (
@@ -633,7 +621,7 @@ function AudioAssetControls({ audioAccess }: { audioAccess: ResolvedAudioAccess 
         <button
           type="button"
           className="inline-flex h-6 items-center gap-1 rounded border border-success/25 px-2 text-[10px] text-success hover:bg-success-muted disabled:opacity-50"
-          onClick={play}
+          onClick={() => void play()}
           disabled={!audioAccess.audioUrl}
           title={playing ? "停止试听" : "试听音频"}
           aria-label={playing ? "停止试听" : "试听音频"}
@@ -644,7 +632,7 @@ function AudioAssetControls({ audioAccess }: { audioAccess: ResolvedAudioAccess 
         <button
           type="button"
           className="inline-flex h-6 items-center gap-1 rounded border border-border px-2 text-[10px] text-text-secondary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
-          onClick={download}
+          onClick={() => void download()}
           disabled={!audioAccess.downloadUrl}
           title={audioAccess.downloadUrl ? "下载音频" : "缺少可下载的资产 URL"}
           aria-label="下载音频"

@@ -1,7 +1,7 @@
 {
   "name": "tts-voice-generator",
   "private": true,
-  "version": "0.0.6",
+  "version": "0.0.7",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
@@ -23,6 +23,7 @@
     "desktop:dist:mac:arm64": "node scripts/build-desktop-target.js --platform darwin --arch arm64",
     "desktop:dist:win:x64": "node scripts/build-desktop-target.js --platform win32 --arch x64",
     "desktop:print-electron-version": "node -e \"console.log(require('electron/package.json').version)\"",
+    "assert:desktop-audio-access": "node scripts/assert-desktop-audio-access.cjs",
     "deploy:current": "node scripts/quick-build-deploy.mjs",
     "quickstart": "node scripts/start.js",
     "smoke": "node scripts/start.js --smoke"

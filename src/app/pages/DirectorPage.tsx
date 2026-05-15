@@ -4,6 +4,7 @@ import { useAppState } from "../state/AppContext";
 import type { AudioFormat, SpeakerConfig, AssemblePromptRequest, AssemblePromptSuccess } from "../types";
 import { formatVoiceOptionLabel } from "../utils/voiceDisplay";
 import { PromptTextBlock } from "../components/PromptTextBlock";
+import { useAudioObjectUrl } from "../hooks/useAudioObjectUrl";
 
 const MAX_SPEAKERS = 2;
 
@@ -14,6 +15,26 @@ const PARA_TAGS = { "情绪": EMOTION_TAGS, "表达": EXPRESS_TAGS, "副语言":
 function displaySpeakerLabel(label: string): string {
   const match = label.match(/^Speaker\s+([A-Z])$/i);
   return match ? `说话者 ${match[1].toUpperCase()}` : label;
+}
+
+function AuthenticatedAudioControls({ audioUrl }: { audioUrl: string }) {
+  const { objectUrl, loading, error } = useAudioObjectUrl(audioUrl);
+
+  if (loading) {
+    return <div className="rounded-md border border-border bg-bg-sunken px-3 py-2 text-xs text-text-tertiary">正在加载音频...</div>;
+  }
+
+  if (error) {
+    return <div className="rounded-md border border-error/20 bg-error-muted/40 px-3 py-2 text-xs text-error">音频加载失败：{error}</div>;
+  }
+
+  if (!objectUrl) return null;
+
+  return (
+    <audio controls className="w-full" src={objectUrl}>
+      当前浏览器不支持音频播放控件。
+    </audio>
+  );
 }
 
 const DIRECTOR_FIELD_LABELS = {
@@ -642,11 +663,7 @@ export function DirectorPage() {
                 <span className="font-mono text-xs text-text-secondary">{generateResult.jobId}</span>
               </div>
 
-              {generateResult.audioUrl && (
-                <audio controls className="w-full" src={generateResult.audioUrl}>
-                  当前浏览器不支持音频播放控件。
-                </audio>
-              )}
+              {generateResult.audioUrl && <AuthenticatedAudioControls audioUrl={generateResult.audioUrl} />}
 
               <div className="flex flex-col gap-2 text-sm bg-bg-sunken p-4 rounded-md border border-border-subtle">
                 <div className="flex justify-between">
