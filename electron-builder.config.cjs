@@ -5,6 +5,10 @@ const targetPlatform = process.env.DESKTOP_TARGET_PLATFORM;
 const targetArch = process.env.DESKTOP_TARGET_ARCH;
 const appDir = process.env.DESKTOP_APP_DIR;
 const outputDir = process.env.DESKTOP_OUTPUT_DIR;
+const repository = process.env.GITHUB_REPOSITORY || "maorun/tts-voice-generator";
+const [rawGithubOwner, rawGithubRepo] = repository.split("/");
+const githubOwner = /^[A-Za-z0-9_.-]+$/.test(rawGithubOwner || "") ? rawGithubOwner : "maorun";
+const githubRepo = /^[A-Za-z0-9_.-]+$/.test(rawGithubRepo || "") ? rawGithubRepo : "tts-voice-generator";
 
 if (!targetPlatform || !targetArch || !appDir || !outputDir) {
   throw new Error("DESKTOP_TARGET_PLATFORM, DESKTOP_TARGET_ARCH, DESKTOP_APP_DIR and DESKTOP_OUTPUT_DIR are required");
@@ -47,6 +51,21 @@ module.exports = {
     "server/node_modules/better-sqlite3/**",
     "**/*.node",
   ],
+  extraResources: [
+    {
+      from: path.resolve(__dirname, "build"),
+      to: "build",
+      filter: ["tray-icon.ico", "tray-iconTemplate.png"],
+    },
+  ],
+  publish: [
+    {
+      provider: "github",
+      owner: githubOwner,
+      repo: githubRepo,
+      releaseType: "release",
+    },
+  ],
   npmRebuild: false,
   buildDependenciesFromSource: false,
   extraMetadata: {
@@ -54,9 +73,12 @@ module.exports = {
     main: "dist-electron/main.cjs",
   },
   mac: targetPlatform === "darwin" ? {
-    target: [{ target: "dmg", arch: [targetArch] }],
+    target: [
+      { target: "dmg", arch: [targetArch] },
+      { target: "zip", arch: [targetArch] },
+    ],
     category: "public.app-category.productivity",
-    artifactName: "${productName}-${version}-${arch}.${ext}",
+    artifactName: "TTS-Voice-Generator-${version}-${arch}.${ext}",
     hardenedRuntime: false,
     gatekeeperAssess: false,
   } : undefined,
@@ -65,7 +87,7 @@ module.exports = {
   },
   win: targetPlatform === "win32" ? {
     target: [{ target: "nsis", arch: [targetArch] }],
-    artifactName: "${productName} Setup ${version}-${arch}.${ext}",
+    artifactName: "TTS-Voice-Generator-Setup-${version}-${arch}.${ext}",
   } : undefined,
   nsis: {
     oneClick: false,

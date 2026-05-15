@@ -31,6 +31,9 @@ jobs:
             artifact_paths: |
               release/desktop/darwin-arm64/*.dmg
               release/desktop/darwin-arm64/*.dmg.blockmap
+              release/desktop/darwin-arm64/*.zip
+              release/desktop/darwin-arm64/*.zip.blockmap
+              release/desktop/darwin-arm64/latest-mac.yml
           - target: windows-x64
             os: windows-latest
             expected_platform: win32
@@ -40,6 +43,7 @@ jobs:
             artifact_paths: |
               release/desktop/win32-x64/*.exe
               release/desktop/win32-x64/*.exe.blockmap
+              release/desktop/win32-x64/latest.yml
 
     steps:
       - name: Checkout
@@ -119,9 +123,15 @@ jobs:
           const hasBlockmap = platform === "darwin"
             ? entries.some((entry) => entry.endsWith(".dmg.blockmap"))
             : entries.some((entry) => entry.endsWith(".exe.blockmap"));
+          const hasUpdaterMetadata = platform === "darwin"
+            ? entries.includes("latest-mac.yml")
+            : entries.includes("latest.yml");
+          const hasMacZip = platform === "darwin"
+            ? entries.some((entry) => entry.endsWith(".zip")) && entries.some((entry) => entry.endsWith(".zip.blockmap"))
+            : true;
 
-          if (!hasInstaller || !hasBlockmap) {
-            console.error(`Installer or blockmap missing in ${outputDir}: ${entries.join(", ")}`);
+          if (!hasInstaller || !hasBlockmap || !hasUpdaterMetadata || !hasMacZip) {
+            console.error(`Installer, blockmap, zip, or updater metadata missing in ${outputDir}: ${entries.join(", ")}`);
             process.exit(1);
           }
 
@@ -206,7 +216,7 @@ jobs:
           upload_dir = Path("release-upload")
           upload_dir.mkdir(parents=True, exist_ok=True)
 
-          allowed_suffixes = (".dmg", ".dmg.blockmap", ".exe", ".exe.blockmap")
+          allowed_suffixes = (".dmg", ".dmg.blockmap", ".zip", ".zip.blockmap", ".exe", ".exe.blockmap", "latest-mac.yml", "latest.yml")
           source_files = sorted(
               path for path in source_dir.rglob("*")
               if path.is_file() and any(path.name.endswith(suffix) for suffix in allowed_suffixes)
@@ -215,8 +225,12 @@ jobs:
           required_groups = {
               "macOS DMG": lambda name: name.endswith(".dmg"),
               "macOS DMG blockmap": lambda name: name.endswith(".dmg.blockmap"),
+              "macOS ZIP updater asset": lambda name: name.endswith(".zip"),
+              "macOS ZIP blockmap": lambda name: name.endswith(".zip.blockmap"),
+              "macOS updater metadata": lambda name: name == "latest-mac.yml",
               "Windows Setup.exe": lambda name: name.endswith(".exe"),
               "Windows Setup.exe blockmap": lambda name: name.endswith(".exe.blockmap"),
+              "Windows updater metadata": lambda name: name == "latest.yml",
           }
 
           missing = [label for label, predicate in required_groups.items() if not any(predicate(path.name) for path in source_files)]
@@ -241,10 +255,21 @@ jobs:
                   platform = "darwin"
                   arch = "arm64" if "arm64" in name else "unknown"
                   kind = "dmg-blockmap" if name.endswith(".blockmap") else "dmg"
+              elif name.endswith(".zip") or name.endswith(".zip.blockmap") or name == "latest-mac.yml":
+                  platform = "darwin"
+                  arch = "arm64" if "arm64" in name else "unknown"
+                  if name == "latest-mac.yml":
+                      kind = "updater-metadata"
+                  else:
+                      kind = "zip-blockmap" if name.endswith(".blockmap") else "zip-updater"
               elif name.endswith(".exe") or name.endswith(".exe.blockmap"):
                   platform = "win32"
                   arch = "x64" if "x64" in name else "unknown"
                   kind = "nsis-blockmap" if name.endswith(".blockmap") else "nsis-installer"
+              elif name == "latest.yml":
+                  platform = "win32"
+                  arch = "x64"
+                  kind = "updater-metadata"
               else:
                   platform = "unknown"
                   arch = "unknown"
@@ -312,8 +337,12 @@ jobs:
           files: |
             release-upload/*.dmg
             release-upload/*.dmg.blockmap
+            release-upload/*.zip
+            release-upload/*.zip.blockmap
+            release-upload/latest-mac.yml
             release-upload/*.exe
             release-upload/*.exe.blockmap
+            release-upload/latest.yml
             release-upload/SHA256SUMS.txt
             release-upload/release-manifest-*.json
           fail_on_unmatched_files: true

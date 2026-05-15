@@ -1,7 +1,7 @@
 {
   "name": "tts-voice-generator",
   "private": true,
-  "version": "0.0.2",
+  "version": "0.0.3",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
@@ -64,6 +64,7 @@
     "clsx": "2.1.1",
     "cmdk": "1.1.1",
     "date-fns": "3.6.0",
+    "electron-updater": "^6.6.2",
     "embla-carousel-react": "8.6.0",
     "input-otp": "1.4.2",
     "lucide-react": "0.487.0",

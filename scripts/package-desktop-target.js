@@ -18,7 +18,7 @@ if (!fs.existsSync(path.join(stageDir, "dist-electron/main.cjs"))) {
 fs.rmSync(outputDir, { recursive: true, force: true });
 fs.mkdirSync(outputDir, { recursive: true });
 
-const builderTarget = target.platform === "darwin" ? ["--mac", "dmg"] : ["--win", "nsis"];
+const builderTarget = target.platform === "darwin" ? ["--mac", "dmg", "zip"] : ["--win", "nsis"];
 const archFlag = target.arch === "arm64" ? "--arm64" : "--x64";
 const result = spawnCrossPlatform("npx", [
   "electron-builder",

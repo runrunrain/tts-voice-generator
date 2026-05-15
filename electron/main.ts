@@ -4,6 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { getDesktopPlatformCapabilities } from "./platform-capabilities";
+import { QuitCoordinator } from "./quit-coordinator";
+import { DesktopTrayService } from "./tray-service";
+import { DesktopUpdaterService } from "./updater-service";
+import type { DesktopActionResult } from "./desktop-contracts";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const DESKTOP_TOKEN_HEADER = "X-TTS-Desktop-Token";
@@ -30,7 +35,9 @@ let mainWindow: BrowserWindow | null = null;
 let startedServer: StartedServer | null = null;
 let desktopApiToken: string | null = null;
 let desktopDataDir: string | null = null;
-let isQuitting = false;
+let quitCoordinator: QuitCoordinator | null = null;
+let trayService: DesktopTrayService | null = null;
+let updaterService: DesktopUpdaterService | null = null;
 
 function ensureDirectory(directory: string) {
   fs.mkdirSync(directory, { recursive: true });
@@ -229,6 +236,22 @@ function createMainWindow() {
 
   window.once("ready-to-show", () => {
     window.show();
+    trayService?.refreshMenu();
+  });
+
+  window.on("close", (event) => {
+    if (!quitCoordinator?.isQuitRequested() && trayService?.isAvailable()) {
+      event.preventDefault();
+      window.hide();
+      trayService?.refreshMenu();
+    }
+  });
+
+  window.on("closed", () => {
+    if (mainWindow === window) {
+      mainWindow = null;
+    }
+    trayService?.refreshMenu();
   });
 
   window.webContents.on("will-navigate", (event, targetUrl) => {
@@ -244,6 +267,23 @@ function createMainWindow() {
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   void window.loadURL(startedServer.url);
   mainWindow = window;
+  trayService?.refreshMenu();
+  return window;
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (!startedServer) return null;
+    createMainWindow();
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+  trayService?.refreshMenu();
+  return mainWindow;
 }
 
 async function closeServer() {
@@ -254,7 +294,29 @@ async function closeServer() {
   }
 }
 
+function getQuitCoordinator() {
+  if (!quitCoordinator) {
+    quitCoordinator = new QuitCoordinator({
+      closeServer,
+      sanitizeError: sanitizeDesktopError,
+      onBeforeQuit: () => {
+        trayService?.dispose();
+      },
+    });
+  }
+  return quitCoordinator;
+}
+
+function unsupportedUpdateResult(): DesktopActionResult {
+  return {
+    ok: false,
+    code: "updater-not-initialized",
+    error: "桌面更新服务尚未初始化。",
+  };
+}
+
 async function boot() {
+  getQuitCoordinator();
   desktopApiToken = crypto.randomBytes(32).toString("base64url");
   configureDesktopEnvironment(desktopApiToken);
 
@@ -271,6 +333,19 @@ async function boot() {
     return;
   }
   createMainWindow();
+  trayService = new DesktopTrayService({
+    getWindow: () => mainWindow,
+    showWindow: showMainWindow,
+    requestQuit: () => getQuitCoordinator().requestQuit("tray"),
+    sanitizeError: sanitizeDesktopError,
+  });
+  trayService.initialize();
+  updaterService = new DesktopUpdaterService({
+    getWindow: () => mainWindow,
+    getCapabilities: getDesktopPlatformCapabilities,
+    quitCoordinator: getQuitCoordinator(),
+    sanitizeError: sanitizeDesktopError,
+  });
 }
 
 ipcMain.handle("tts-desktop:get-api-headers", () => {
@@ -287,10 +362,10 @@ ipcMain.handle("tts-desktop:get-server-status", () => ({
 
 ipcMain.handle("tts-desktop:open-data-directory", async () => {
   if (!desktopDataDir) {
-    return { ok: false, error: "Data directory is not initialized" };
+    return { ok: false, code: "data-directory-uninitialized", error: "Data directory is not initialized" };
   }
   const result = await shell.openPath(desktopDataDir);
-  return result ? { ok: false, error: result } : { ok: true };
+  return result ? { ok: false, code: "open-data-directory-failed", error: sanitizeDesktopError(result) } : { ok: true };
 });
 
 ipcMain.handle("tts-desktop:open-opencode-config", async () => {
@@ -298,40 +373,78 @@ ipcMain.handle("tts-desktop:open-opencode-config", async () => {
     const filePath = resolveOpenCodeConfigPath();
     ensureOpenCodeConfigFile(filePath);
     const result = await shell.openPath(filePath);
-    return result ? { ok: false, error: sanitizeDesktopError(result) } : { ok: true };
+    return result ? { ok: false, code: "open-opencode-config-failed", error: sanitizeDesktopError(result) } : { ok: true };
   } catch (error) {
-    return { ok: false, error: sanitizeDesktopError(error) };
+    return { ok: false, code: "open-opencode-config-failed", error: sanitizeDesktopError(error) };
   }
 });
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
+ipcMain.handle("tts-desktop:get-platform-capabilities", () => getDesktopPlatformCapabilities());
+
+ipcMain.handle("tts-desktop:update:get-state", () => {
+  if (updaterService) return updaterService.getState();
+  const capabilities = getDesktopPlatformCapabilities();
+  return {
+    phase: "unsupported",
+    currentVersion: capabilities.appVersion,
+    error: "桌面更新服务尚未初始化。",
+  };
+});
+
+ipcMain.handle("tts-desktop:update:check", async () => {
+  if (!updaterService) {
+    const capabilities = getDesktopPlatformCapabilities();
+    return {
+      ok: false,
+      code: "updater-not-initialized",
+      error: "桌面更新服务尚未初始化。",
+      state: {
+        phase: "unsupported",
+        currentVersion: capabilities.appVersion,
+        error: "桌面更新服务尚未初始化。",
+      },
+    };
   }
+  return updaterService.check();
+});
+
+ipcMain.handle("tts-desktop:update:download", async () => updaterService?.download() ?? unsupportedUpdateResult());
+
+ipcMain.handle("tts-desktop:update:install-and-restart", async () => updaterService?.installAndRestart() ?? unsupportedUpdateResult());
+
+ipcMain.handle("tts-desktop:update:open-release-page", async () => updaterService?.openReleasePage() ?? unsupportedUpdateResult());
+
+app.on("window-all-closed", () => {
+  if (!trayService?.isAvailable() && !getQuitCoordinator().isQuitRequested()) {
+    void getQuitCoordinator().requestQuit("system");
+    return;
+  }
+  trayService?.refreshMenu();
 });
 
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0 && startedServer) {
-    createMainWindow();
-  }
+  if (startedServer) showMainWindow();
 });
 
 app.on("before-quit", (event) => {
-  if (isQuitting) return;
-  isQuitting = true;
-  event.preventDefault();
-  closeServer()
-    .catch((error) => {
-      console.error("[electron] Failed to stop embedded server:", error);
-    })
-    .finally(() => app.quit());
+  getQuitCoordinator().handleBeforeQuit(event);
 });
 
-app.whenReady()
-  .then(boot)
-  .catch(async (error) => {
-    await closeServer().catch(() => undefined);
-    const message = error instanceof Error ? error.message : "Unknown startup error";
-    dialog.showErrorBox("TTS Voice Generator failed to start", message);
-    app.exit(1);
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    showMainWindow();
   });
+
+  app.whenReady()
+    .then(boot)
+    .catch(async (error) => {
+      await closeServer().catch(() => undefined);
+      const message = sanitizeDesktopError(error instanceof Error ? error : "Unknown startup error");
+      dialog.showErrorBox("TTS Voice Generator failed to start", message);
+      app.exit(1);
+    });
+}
