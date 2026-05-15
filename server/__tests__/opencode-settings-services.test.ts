@@ -20,6 +20,17 @@ import {
   createOpenCodeInstallPlan,
   installOpenCodeControlled,
 } from "../src/services/opencode-install-service.js";
+import { resolveNpmCommand } from "../src/services/opencode-platform.js";
+
+async function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { value: platform });
+  try {
+    return await fn();
+  } finally {
+    if (descriptor) Object.defineProperty(process, "platform", descriptor);
+  }
+}
 
 function createApp() {
   const app = new Hono();
@@ -60,6 +71,13 @@ describe("OpenCode settings backend services", () => {
   it("masks API keys without exposing short secrets", () => {
     expect(maskApiKey("short")).toBe("***");
     expect(maskApiKey("sk-very-secret-value")).toBe("sk-...lue");
+  });
+
+  it("resolves Windows OpenCode config path from APPDATA before LOCALAPPDATA", () => {
+    const appData = path.join(tmpDir, "AppData", "Roaming");
+    const localAppData = path.join(tmpDir, "AppData", "Local");
+    const resolved = resolveOpenCodeConfigPath({ APPDATA: appData, LOCALAPPDATA: localAppData }, "win32");
+    expect(resolved).toBe(path.join(appData, "opencode", "opencode.json"));
   });
 
   it("creates, keeps, sets, and clears OpenCode apiKey without returning plaintext", async () => {
@@ -164,5 +182,60 @@ describe("OpenCode settings backend services", () => {
     expect(captured[0].file).toBe("npm");
     expect(captured[0].args).toEqual(OPENCODE_INSTALL_ARGS);
     expect(captured[0].options.shell).toBe(false);
+  });
+
+  it("resolves Windows npm through node plus npm-cli.js instead of npm.cmd", () => {
+    const nodeDir = path.join(tmpDir, "nodejs");
+    const npmBin = path.join(nodeDir, "node_modules", "npm", "bin");
+    fs.mkdirSync(npmBin, { recursive: true });
+    const npmCli = path.join(npmBin, "npm-cli.js");
+    fs.writeFileSync(npmCli, "// npm cli fixture\n", "utf8");
+    const shimDir = path.join(tmpDir, "npm-shims");
+    fs.mkdirSync(shimDir, { recursive: true });
+    fs.writeFileSync(path.join(shimDir, "npm.cmd"), "@echo off\r\n", "utf8");
+    const nodeExe = path.join(nodeDir, "node.exe");
+    fs.writeFileSync(nodeExe, "", "utf8");
+
+    const resolved = resolveNpmCommand({ PATH: shimDir }, "win32", nodeExe);
+    expect(resolved).not.toBeNull();
+    expect(resolved?.command).toBe(nodeExe);
+    expect(resolved?.argsPrefix).toEqual([npmCli]);
+  });
+
+  it("uses Windows-safe npm resolution for availability and controlled install", async () => {
+    const npmBin = path.join(tmpDir, "npm-cli-bin");
+    fs.mkdirSync(npmBin, { recursive: true });
+    const npmCli = path.join(npmBin, "npm-cli.js");
+    fs.writeFileSync(npmCli, "// npm cli fixture\n", "utf8");
+    process.env.npm_execpath = npmCli;
+    process.env.PATH = "C:\\Windows\\System32";
+
+    const npmChecks: Array<{ file: string; args: string[] }> = [];
+    _setNpmCheckRunner(async (file, args) => {
+      npmChecks.push({ file, args });
+      return { stdout: "10.0.0\n", stderr: "" };
+    });
+    _setPostInstallAvailabilityChecker(async () => ({ available: true, version: "v1.0.0", error: null }));
+
+    const installs: Array<{ file: string; args: readonly string[]; options: Record<string, unknown> }> = [];
+    _setInstallProcessRunner(async (file, args, options) => {
+      installs.push({ file, args, options });
+      return { exitCode: 0, timedOut: false, stdout: "installed", stderr: "" };
+    });
+
+    await withProcessPlatform("win32", async () => {
+      const plan = await createOpenCodeInstallPlan();
+      expect(plan.npm.available).toBe(true);
+      const result = await installOpenCodeControlled({ nonce: plan.nonce, confirmationPhrase: "INSTALL_OPENCODE", confirm: true });
+      expect(result.ok).toBe(true);
+    });
+
+    expect(npmChecks).toHaveLength(1);
+    expect(npmChecks[0].file).toBe(process.execPath);
+    expect(npmChecks[0].args).toEqual([npmCli, "--version"]);
+    expect(installs).toHaveLength(1);
+    expect(installs[0].file).toBe(process.execPath);
+    expect(installs[0].args).toEqual([npmCli, ...OPENCODE_INSTALL_ARGS]);
+    expect(installs[0].options.shell).toBe(false);
   });
 });

@@ -3,6 +3,7 @@ import { ChevronDown, ChevronUp, Plus, Trash2, Loader2, AlertTriangle, AlertCirc
 import { useAppState } from "../state/AppContext";
 import type { AudioFormat, SpeakerConfig, AssemblePromptRequest, AssemblePromptSuccess } from "../types";
 import { formatVoiceOptionLabel } from "../utils/voiceDisplay";
+import { PromptTextBlock } from "../components/PromptTextBlock";
 
 const MAX_SPEAKERS = 2;
 
@@ -528,9 +529,9 @@ export function DirectorPage() {
                 { label: DIRECTOR_FIELD_LABELS.sampleContext, value: assembleSuccess.normalized.sampleContext },
                 { label: DIRECTOR_FIELD_LABELS.transcript, value: assembleSuccess.normalized.transcript },
               ].map((el) => (
-                <div key={el.label} className="flex items-start gap-2 px-3 py-1.5 rounded-md bg-bg-surface border border-border-subtle">
-                  <span className="text-text-tertiary shrink-0 w-[110px]">{el.label}:</span>
-                  <span className={`break-all ${el.value ? "text-text-secondary" : "text-text-tertiary italic"}`}>
+                <div key={el.label} className="grid grid-cols-1 sm:grid-cols-[120px_minmax(0,1fr)] items-start gap-1.5 sm:gap-2 px-3 py-1.5 rounded-md bg-bg-surface border border-border-subtle min-w-0">
+                  <span className="text-text-tertiary shrink-0">{el.label}:</span>
+                  <span className={`min-w-0 max-w-full whitespace-pre-wrap break-words [overflow-wrap:anywhere] [word-break:normal] text-left ${el.value ? "text-text-secondary" : "text-text-tertiary italic"}`} style={{ writingMode: "horizontal-tb", unicodeBidi: "plaintext" }}>
                     {el.value || "未填写"}
                   </span>
                 </div>
@@ -541,9 +542,9 @@ export function DirectorPage() {
           {/* Assembled prompt preview */}
           <div className="flex flex-col gap-2">
             <h3 className="text-sm font-semibold text-text-primary">组装后的提示词</h3>
-            <div className="bg-bg-sunken p-4 rounded-md border border-border font-mono text-xs text-text-secondary min-h-[160px] max-h-[40vh] overflow-y-auto whitespace-pre-wrap leading-relaxed">
+            <PromptTextBlock minHeightClass="min-h-[160px]" maxHeightClass="max-h-[40vh]">
               {assembleSuccess.prompt}
-            </div>
+            </PromptTextBlock>
             <div className="flex items-center justify-between text-xs text-text-tertiary">
               <span>{assembleSuccess.prompt.length} 字符</span>
               <span>此步骤不消耗额度</span>

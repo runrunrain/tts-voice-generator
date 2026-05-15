@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { sanitizeError, sanitizeString } from "./opencode-runner.js";
+import { chooseOpenCodeConfigPath } from "./opencode-platform.js";
 import type { OpenCodeRuntime } from "./opencode-runtime-gate.js";
 
 export interface OpenCodeConfigWarning {
@@ -98,7 +99,10 @@ function safeHomeLabel(filePath: string): string {
   return filePath.replace(home, "~");
 }
 
-export function resolveOpenCodeConfigPath(env: NodeJS.ProcessEnv = process.env): string {
+export function resolveOpenCodeConfigPath(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform | string = process.platform): string {
+  if (platform === "win32") {
+    return chooseOpenCodeConfigPath(env, platform);
+  }
   const xdgConfigHome = env.XDG_CONFIG_HOME?.trim();
   if (xdgConfigHome && path.isAbsolute(xdgConfigHome)) {
     return path.normalize(path.join(xdgConfigHome, "opencode", "opencode.json"));
@@ -106,13 +110,13 @@ export function resolveOpenCodeConfigPath(env: NodeJS.ProcessEnv = process.env):
   return path.normalize(path.join(os.homedir(), ".config", "opencode", "opencode.json"));
 }
 
-export function getOpenCodeConfigPathInfo(env: NodeJS.ProcessEnv = process.env): { filePath: string; label: string; warnings: OpenCodeConfigWarning[] } {
+export function getOpenCodeConfigPathInfo(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform | string = process.platform): { filePath: string; label: string; warnings: OpenCodeConfigWarning[] } {
   const warnings: OpenCodeConfigWarning[] = [];
   const rawXdg = env.XDG_CONFIG_HOME?.trim();
-  if (rawXdg && !path.isAbsolute(rawXdg)) {
+  if (platform !== "win32" && rawXdg && !path.isAbsolute(rawXdg)) {
     warnings.push({ code: "RELATIVE_XDG_CONFIG_HOME_IGNORED", message: "XDG_CONFIG_HOME 不是绝对路径，已使用默认 OpenCode 配置路径。" });
   }
-  const filePath = resolveOpenCodeConfigPath(env);
+  const filePath = resolveOpenCodeConfigPath(env, platform);
   return { filePath, label: safeHomeLabel(filePath), warnings };
 }
 

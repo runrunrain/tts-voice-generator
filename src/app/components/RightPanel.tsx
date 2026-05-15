@@ -6,6 +6,7 @@ import type { VoiceProfile } from "../types";
 import { AgentAutomationPanel } from "./tasks/AgentAutomationPanel";
 import { useTaskWorkspaceUi } from "../context/TaskWorkspaceUiContext";
 import { formatVoiceCompactLabel, formatVoiceOptionLabel, getVoiceDisplayMeta } from "../utils/voiceDisplay";
+import { PromptTextBlock } from "./PromptTextBlock";
 
 function displaySpeakerLabel(label: string): string {
   const match = label.match(/^Speaker\s+([A-Z])$/i);
@@ -70,9 +71,9 @@ function DirectorPreview() {
         <div className="flex items-center justify-between">
           <span className="text-sm font-medium">提示词预览</span>
         </div>
-        <div className="bg-bg-sunken p-4 rounded-md border border-border font-mono text-xs text-text-secondary min-h-[200px] max-h-[60vh] overflow-y-auto whitespace-pre-wrap">
+        <PromptTextBlock minHeightClass="min-h-[200px]" maxHeightClass="max-h-[60vh]">
           // 在导演模式页面点击「组装提示词」后，组装结果将在此处展示
-        </div>
+        </PromptTextBlock>
         <div className="text-[10px] text-text-tertiary text-center border-t border-border-subtle pt-3 mt-2">
           组装提示词不会消耗 API 额度
         </div>
@@ -140,9 +141,9 @@ function DirectorPreview() {
         )}
 
         {/* Prompt preview */}
-        <div className="bg-bg-sunken p-4 rounded-md border border-border font-mono text-xs text-text-secondary min-h-[120px] max-h-[50vh] overflow-y-auto whitespace-pre-wrap leading-relaxed">
+        <PromptTextBlock minHeightClass="min-h-[120px]" maxHeightClass="max-h-[50vh]">
           {assembleSuccess.prompt}
-        </div>
+        </PromptTextBlock>
 
         {/* Speaker summary */}
         {assembleSuccess.normalized.speakers.length > 0 && (

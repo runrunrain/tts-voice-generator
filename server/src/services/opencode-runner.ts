@@ -15,12 +15,12 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
-import { homedir } from "node:os";
+import { isAbsolute, relative, resolve } from "node:path";
 import crypto from "node:crypto";
 import type { VoiceLine } from "../domain/validators.js";
 import { env } from "../config/env.js";
 import { formatVoiceSelectionGuideForPrompt, inferVoiceForTextContext } from "../utils/voice.js";
+import { getOpenCodeConfigPathCandidates, resolveOpenCodeProcessContext } from "./opencode-platform.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -74,6 +74,7 @@ export function _resetExecRunner(): void {
  * 4. Enforces output size limits while allowing long-running OpenCode sessions
  */
 function spawnOpenCodeRun(
+  command: string,
   args: string[],
   options: {
     timeout: number;
@@ -85,7 +86,8 @@ function spawnOpenCodeRun(
   },
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn("opencode", args, {
+    const child = spawn(command, args, {
+      shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       env: options.env,
       cwd: options.cwd,
@@ -205,10 +207,7 @@ type SpawnRunner = (file: string, args: string[], options: Record<string, unknow
  * Exposed for test mocking via _setSpawnRunner / _resetSpawnRunner.
  */
 let _spawnRunner: SpawnRunner = async (file, args, options) => {
-  if (file !== "opencode") {
-    throw new Error(`spawnRunner: unexpected command '${file}', expected 'opencode'`);
-  }
-  return spawnOpenCodeRun(args, {
+  return spawnOpenCodeRun(file, args, {
     timeout: typeof options.timeout === "number" ? options.timeout : OPENCODE_RUN_TIMEOUT_MS,
     maxOutputBytes: typeof options.maxBuffer === "number" ? options.maxBuffer : OPENCODE_MAX_OUTPUT_BYTES,
     env: (options.env as Record<string, string | undefined>) || process.env,
@@ -230,10 +229,7 @@ export function _setSpawnRunner(runner: SpawnRunner): void {
  */
 export function _resetSpawnRunner(): void {
   _spawnRunner = async (file, args, options) => {
-    if (file !== "opencode") {
-      throw new Error(`spawnRunner: unexpected command '${file}', expected 'opencode'`);
-    }
-    return spawnOpenCodeRun(args, {
+    return spawnOpenCodeRun(file, args, {
       timeout: typeof options.timeout === "number" ? options.timeout : OPENCODE_RUN_TIMEOUT_MS,
       maxOutputBytes: typeof options.maxBuffer === "number" ? options.maxBuffer : OPENCODE_MAX_OUTPUT_BYTES,
       env: (options.env as Record<string, string | undefined>) || process.env,
@@ -646,14 +642,15 @@ export async function runOpenCodeChat(input: OpenCodeChatRunInput): Promise<Open
   const prompt = buildChatPrompt(input);
 
   try {
+    const opencodeProcess = resolveOpenCodeProcessContext(buildSafeChildEnv());
     const { stdout } = await _spawnRunner(
-      "opencode",
-      ["run", "--format", "json", "--dir", cwd, prompt],
+      opencodeProcess.file,
+      [...opencodeProcess.argsPrefix, "run", "--format", "json", "--dir", cwd, prompt],
       {
         timeout: timeoutMs,
         windowsHide: true,
         maxBuffer: OPENCODE_MAX_OUTPUT_BYTES,
-        env: buildSafeChildEnv(),
+        env: opencodeProcess.env,
         cwd,
       },
     );
@@ -727,10 +724,7 @@ export async function runOpenCodeChat(input: OpenCodeChatRunInput): Promise<Open
  * Returns non-sensitive metadata only.
  */
 export function detectProviderConfig(): ProviderConfigMetadata {
-  const configPaths = [
-    join(homedir(), ".config/opencode/opencode.json"),
-    join(process.env.XDG_CONFIG_HOME || "", "opencode/opencode.json"),
-  ];
+  const configPaths = getOpenCodeConfigPathCandidates();
 
   for (const configPath of configPaths) {
     if (!configPath || !existsSync(configPath)) continue;
@@ -797,13 +791,13 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
   }
 
   try {
-    const safeChildEnv = buildSafeChildEnv();
+    const opencodeProcess = resolveOpenCodeProcessContext(buildSafeChildEnv());
 
     // Stage 1: binary exists and responds to --version
-    const { stdout } = await _execRunner("opencode", ["--version"], {
+    const { stdout } = await _execRunner(opencodeProcess.file, [...opencodeProcess.argsPrefix, "--version"], {
       timeout: 5000,
       windowsHide: true,
-      env: safeChildEnv,
+      env: opencodeProcess.env,
     });
 
     const version = stdout.trim();
@@ -812,9 +806,9 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
     let hasAuthCredentials = false;
     try {
       const { stdout: providersOutput } = await _execRunner(
-        "opencode",
-        ["providers", "list"],
-        { timeout: 5000, windowsHide: true, env: safeChildEnv },
+        opencodeProcess.file,
+        [...opencodeProcess.argsPrefix, "providers", "list"],
+        { timeout: 5000, windowsHide: true, env: opencodeProcess.env },
       );
 
       // Strip ANSI escape codes before parsing
@@ -1645,6 +1639,7 @@ export async function runOpenCodeNormalize(
   const startTime = Date.now();
 
   try {
+    const opencodeProcess = resolveOpenCodeProcessContext(buildSafeChildEnv());
     // Use spawn runner (not execFile) to properly close stdin.
     // execFile inherits parent stdin causing opencode run to enter
     // interactive mode and hang indefinitely.
@@ -1653,13 +1648,13 @@ export async function runOpenCodeNormalize(
     // opencode run --format json outputs NDJSON events (step_start, text, step_finish).
     // The actual content is in the "text" event's part.text field.
     const { stdout, stderr } = await _spawnRunner(
-      "opencode",
-      ["run", "--format", "json", prompt],
+      opencodeProcess.file,
+      [...opencodeProcess.argsPrefix, "run", "--format", "json", prompt],
       {
         timeout: timeoutMs,
         windowsHide: true,
         maxBuffer: OPENCODE_MAX_OUTPUT_BYTES,
-        env: buildSafeChildEnv(),
+        env: opencodeProcess.env,
       },
     );
 
@@ -1934,13 +1929,15 @@ export async function runBundleOpenCodeNormalize(
   const timeoutMs = input.timeoutMs ?? computeBundleNormalizeTimeout({ docCount: 0, charCount: 0 });
 
   try {
+    const opencodeProcess = resolveOpenCodeProcessContext(buildSafeChildEnv());
     // CRITICAL: prompt MUST come before --file args.
     // OpenCode CLI uses yargs where --file is [array] type; positional args
     // after --file get absorbed into the file array instead of being treated
     // as the message/prompt. See B-MAJOR-01 fix for details.
     const { stdout, stderr } = await _spawnRunner(
-      "opencode",
+      opencodeProcess.file,
       [
+        ...opencodeProcess.argsPrefix,
         "run",
         "--format", "json",
         "--dir", process.cwd(),
@@ -1952,7 +1949,7 @@ export async function runBundleOpenCodeNormalize(
         timeout: timeoutMs,
         windowsHide: true,
         maxBuffer: OPENCODE_MAX_OUTPUT_BYTES,
-        env: buildSafeChildEnv(),
+        env: opencodeProcess.env,
         draftPath: input.draftPath,
         draftReadyPollIntervalMs: 1000,
       },

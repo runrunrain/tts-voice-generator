@@ -6,6 +6,7 @@ import { VoicesPage } from "./pages/VoicesPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { HistoryDetailPage } from "./pages/HistoryDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { OpenCodeSettingsPage } from "./pages/settings/OpenCodeSettingsPage";
 import { TasksPage } from "./pages/TasksPage";
 import { TaskWorkspacePage } from "./pages/TaskWorkspacePage";
 
@@ -23,6 +24,7 @@ export const router = createBrowserRouter([
       { path: "tasks", Component: TasksPage },
       { path: "tasks/:taskId", Component: TaskWorkspacePage },
       { path: "settings", Component: SettingsPage },
+      { path: "settings/opencode", Component: OpenCodeSettingsPage },
     ],
   },
 ]);

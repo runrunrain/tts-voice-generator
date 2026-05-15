@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check, Copy, ExternalLink, FileJson, Loader2, RefreshCw, Shield, Terminal, Wrench } from "lucide-react";
 import { apiRequest, ApiError } from "../../services/httpAdapter";
+import { SettingsSection } from "../../components/SettingsSection";
 import type {
   ControlledInstallResponse,
   OpenCodeConfigDisplayResponse,
@@ -388,7 +389,7 @@ export function OpenCodeSettingsPanel() {
 
       <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-5">
         <div className="grid grid-cols-1 xl:grid-cols-[1fr_1.35fr] gap-4">
-          <div className="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
+          <SettingsSection title="CLI 状态" description="检测本机 OpenCode、npm、Provider 与运行时能力。" icon={<Terminal size={14} />} defaultOpen contentClassName="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
             <div className="flex items-start justify-between gap-3">
               <div className="flex flex-col gap-1">
                 <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">CLI 状态</span>
@@ -424,9 +425,9 @@ export function OpenCodeSettingsPanel() {
             {loadMessage && (
               <InlineMessage tone={loadPhase === "error" ? "error" : loadPhase === "success" ? "success" : "neutral"} message={loadMessage} />
             )}
-          </div>
+          </SettingsSection>
 
-          <div className="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
+          <SettingsSection title="配置文件" description="查看固定 opencode.json 路径，并按运行环境打开或复制。" icon={<FileJson size={14} />} defaultOpen contentClassName="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
             <div className="flex items-start justify-between gap-3">
               <div className="flex flex-col gap-1">
                 <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">配置文件</span>
@@ -458,11 +459,11 @@ export function OpenCodeSettingsPanel() {
             ) : null}
 
             {openMessage && <InlineMessage tone={openPhase === "error" ? "error" : openPhase === "success" ? "success" : "neutral"} message={openMessage} />}
-          </div>
+          </SettingsSection>
         </div>
 
         <div className="grid grid-cols-1 2xl:grid-cols-[1.5fr_1fr] gap-4">
-          <div className="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
+          <SettingsSection title="可视化配置" description="编辑 model、provider baseURL 与 API Key 动作；不会回显明文密钥。" icon={<FileJson size={14} />} defaultOpen contentClassName="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <FileJson size={14} className="text-accent" />
@@ -560,9 +561,9 @@ export function OpenCodeSettingsPanel() {
             {saveMessage && (
               <InlineMessage tone={savePhase === "success" ? "success" : savePhase === "conflict" ? "warning" : savePhase === "error" ? "error" : "neutral"} message={saveMessage} />
             )}
-          </div>
+          </SettingsSection>
 
-          <div className="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
+          <SettingsSection title="受控安装" description="低频且高风险操作，默认收起；命令由后端 allowlist 固定。" icon={<Wrench size={14} />} defaultOpen={false} contentClassName="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <Wrench size={14} className="text-accent" />
@@ -617,7 +618,7 @@ export function OpenCodeSettingsPanel() {
                 {installResult.stderrTail && <code className="font-mono break-all text-error/90">stderr: {installResult.stderrTail}</code>}
               </div>
             )}
-          </div>
+          </SettingsSection>
         </div>
       </div>
     </section>

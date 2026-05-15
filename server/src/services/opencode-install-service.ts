@@ -8,6 +8,7 @@ import {
   sanitizeString,
   type OpenCodeAvailability,
 } from "./opencode-runner.js";
+import { resolveNpmCommand } from "./opencode-platform.js";
 
 export const OPENCODE_INSTALL_PACKAGE = "opencode-ai@latest" as const;
 export const OPENCODE_INSTALL_COMMAND_PREVIEW = "npm install -g opencode-ai@latest" as const;
@@ -157,10 +158,12 @@ function defaultInstallProcessRunner(file: string, args: readonly string[], opti
 
 export async function checkNpmAvailability(): Promise<NpmAvailability> {
   try {
-    const { stdout } = await execRunner("npm", ["--version"], {
+    const npmCommand = resolveNpmCommand(buildSafeChildEnv());
+    if (!npmCommand) return { available: false, version: null };
+    const { stdout } = await execRunner(npmCommand.command, [...npmCommand.argsPrefix, "--version"], {
       timeout: 3_000,
       windowsHide: true,
-      env: buildSafeChildEnv(),
+      env: npmCommand.env,
     });
     return { available: true, version: stdout.trim() || null };
   } catch {
@@ -207,10 +210,14 @@ export async function installOpenCodeControlled(input: ControlledInstallRequest)
   installInProgress = true;
   const startedAt = Date.now();
   try {
-    const result = await installProcessRunner("npm", OPENCODE_INSTALL_ARGS, {
+    const npmCommand = resolveNpmCommand(buildSafeChildEnv());
+    if (!npmCommand) {
+      throw new OpenCodeInstallError(409, "NPM_UNAVAILABLE", "npm 可执行入口不可用，无法安全执行受控安装。");
+    }
+    const result = await installProcessRunner(npmCommand.command, [...npmCommand.argsPrefix, ...OPENCODE_INSTALL_ARGS], {
       shell: false,
       timeout: INSTALL_TIMEOUT_MS,
-      env: buildSafeChildEnv(),
+      env: npmCommand.env,
     });
     invalidateAvailabilityCache();
     const availabilityAfterInstall = await availabilityChecker();

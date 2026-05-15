@@ -42,7 +42,7 @@ export function Shell() {
   // Certain routes hide the right panel completely. /tasks is exact-only so
   // /tasks/:taskId can show the task-scoped Agent inspector in the Shell panel.
   const isHistoryDetail = location.pathname.startsWith("/history/") && location.pathname.split("/").length > 2;
-  const isRightPanelHidden = location.pathname === "/tasks" || location.pathname === "/settings" || isHistoryDetail;
+  const isRightPanelHidden = location.pathname === "/tasks" || location.pathname === "/settings" || location.pathname.startsWith("/settings/") || isHistoryDetail;
   const isCompactLayout = viewportWidth < 1200;
   const rightPanelWidth = viewportWidth >= 1440 ? "clamp(320px, 20vw, 384px)" : "clamp(280px, 22vw, 320px)";
   const gridRightPanelColumn = isRightPanelHidden || isCompactLayout || !isRightPanelOpen ? "0px" : rightPanelWidth;

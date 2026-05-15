@@ -1,10 +1,11 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { Eye, EyeOff, RefreshCw, Loader2, Shield, Copy, Check, Trash2, AlertTriangle, ChevronDown, ChevronRight, Activity, Database, FolderOpen, Route, Clock, Bot, FileAudio } from "lucide-react";
+import { Link } from "react-router";
+import { Eye, EyeOff, RefreshCw, Loader2, Shield, Copy, Check, Trash2, AlertTriangle, ChevronDown, ChevronRight, Activity, Database, FolderOpen, Route, Clock, Bot, FileAudio, Terminal, ExternalLink } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import { apiRequest, getDiagnostics } from "../services/httpAdapter";
 import { hasSavedOpenRouterKey, isSuccessfulSettingsConnection } from "../services/settingsKeyStatus";
-import type { AppSettings, AudioFormat, ConnectionStatus, AgentAuthMode, Diagnostics, DiagnosticsPhase, AudioDirInfo } from "../types";
-import { OpenCodeSettingsPanel } from "./settings/OpenCodeSettingsPanel";
+import type { AppSettings, AudioFormat, ConnectionStatus, AgentAuthMode, Diagnostics, DiagnosticsPhase, AudioDirInfo, OpenCodeConfigDisplayResponse, OpenCodeStatusResponse } from "../types";
+import { SettingsSection } from "../components/SettingsSection";
 
 type SettingsConnectionTestResponse = {
   ok?: boolean;
@@ -289,6 +290,54 @@ export function SettingsPage() {
   const agentActions = diagData?.recentAgentActions ?? [];
   const recentJobs = diagData?.recentJobs ?? [];
 
+  const [openCodeOverview, setOpenCodeOverview] = useState({
+    phase: "loading" as "loading" | "success" | "error",
+    status: "检测中",
+    version: "检测中",
+    configPath: "检测中",
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadOpenCodeOverview = async () => {
+      try {
+        const statusResponse = await apiRequest("/api/settings/opencode/status");
+        const status = await statusResponse.json() as OpenCodeStatusResponse;
+        let configPath = status.capabilities.canReadConfig ? "可读取，进入二级页查看" : (status.capabilities.reason ?? "当前环境不可读取");
+
+        if (status.capabilities.canReadConfig) {
+          try {
+            const configResponse = await apiRequest("/api/settings/opencode/config");
+            const config = await configResponse.json() as OpenCodeConfigDisplayResponse;
+            configPath = config.configPathLabel;
+          } catch {
+            configPath = "配置路径读取失败，进入二级页刷新";
+          }
+        }
+
+        if (cancelled) return;
+        setOpenCodeOverview({
+          phase: "success",
+          status: status.availability?.available ? "已安装" : status.capabilities.canDetectLocalOpenCode ? "未安装或不可用" : "不可检测",
+          version: status.availability?.version ?? "未获取",
+          configPath,
+        });
+      } catch (error) {
+        if (cancelled) return;
+        setOpenCodeOverview({
+          phase: "error",
+          status: "检测失败",
+          version: "未获取",
+          configPath: error instanceof Error ? error.message : "OpenCode 概览加载失败",
+        });
+      }
+    };
+
+    void loadOpenCodeOverview();
+    return () => { cancelled = true; };
+  }, []);
+
   return (
     <div className="flex flex-col h-full bg-bg-base overflow-y-auto">
       <div className="max-w-[1848px] w-full mx-auto p-8 flex flex-col gap-8">
@@ -302,8 +351,7 @@ export function SettingsPage() {
           {/* Left Column */}
           <div className="flex-1 max-w-[640px] flex flex-col gap-6">
 
-            <div className="flex flex-col gap-3">
-              <h3 className="text-sm font-semibold text-text-primary">API Key 配置</h3>
+            <SettingsSection title="API Key 配置" description="OpenRouter 认证信息，仅通过后端 token-aware helper 保存和验证。" icon={<Shield size={16} />} defaultOpen>
               <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm text-text-secondary">OpenRouter API Key</label>
@@ -365,10 +413,9 @@ export function SettingsPage() {
                   </div>
                 )}
               </div>
-            </div>
+            </SettingsSection>
 
-            <div className="flex flex-col gap-3">
-              <h3 className="text-sm font-semibold text-text-primary">默认参数</h3>
+            <SettingsSection title="默认参数" description="生成模型、音色、格式与输出目录。" icon={<FileAudio size={16} />} defaultOpen>
               <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-4">
                 <div className="flex items-center justify-between">
                   <label className="text-sm text-text-secondary w-32">默认模型:</label>
@@ -422,15 +469,14 @@ export function SettingsPage() {
                   />
                 </div>
               </div>
-            </div>
+            </SettingsSection>
 
           </div>
 
           {/* Right Column */}
           <div className="flex-1 flex flex-col gap-6">
 
-            <div className="flex flex-col gap-3">
-              <h3 className="text-sm font-semibold text-text-primary">请求限制</h3>
+            <SettingsSection title="请求限制" description="低频调整项，默认收起以降低页面噪音。" icon={<Clock size={16} />} defaultOpen={false}>
               <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm text-text-secondary">单次最大字符数</label>
@@ -451,10 +497,9 @@ export function SettingsPage() {
                   />
                 </div>
               </div>
-            </div>
+            </SettingsSection>
 
-            <div className="flex flex-col gap-3">
-              <h3 className="text-sm font-semibold text-text-primary">插件 Token</h3>
+            <SettingsSection title="插件 Token" description="本地插件访问凭证，仅显示指纹或一次性明文。" icon={<Shield size={16} />} defaultOpen={false}>
               <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm text-text-secondary">本地 Plugin Token</label>
@@ -547,14 +592,13 @@ export function SettingsPage() {
                   )}
                 </div>
               </div>
-            </div>
+            </SettingsSection>
 
           </div>
         </div>
 
         {/* Agent Auth (Full Width) */}
-        <div className="flex flex-col gap-3">
-          <h3 className="text-sm font-semibold text-text-primary">Agent 授权</h3>
+        <SettingsSection title="Agent 授权" description="控制 Agent 会话自动批准策略与费用上限。" icon={<Bot size={16} />} defaultOpen={false}>
           <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-6">
 
             <div className="flex items-center gap-6">
@@ -659,15 +703,39 @@ export function SettingsPage() {
             </div>
 
           </div>
-        </div>
+        </SettingsSection>
 
-        <OpenCodeSettingsPanel />
+        <SettingsSection title="OpenCode 管理" description="入口卡片：状态、版本、配置路径和 Provider 可视化编辑在二级页中完成。" icon={<Terminal size={16} />} defaultOpen>
+          <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
+                <Terminal size={16} className="text-accent" /> OpenCode 配置中心
+              </div>
+              <p className="text-xs leading-5 text-text-tertiary">
+                主设置页仅保留轻量概览。CLI 状态、版本、配置路径、baseURL、model、provider、API Key 动作和受控安装均在二级页面处理，避免在全局设置页中堆叠重型表单。
+              </p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+              <OpenCodeOverviewTile icon={<Terminal size={14} />} label="状态" value={openCodeOverview.status} phase={openCodeOverview.phase} />
+              <OpenCodeOverviewTile icon={<FileAudio size={14} />} label="版本" value={openCodeOverview.version} phase={openCodeOverview.phase} />
+              <OpenCodeOverviewTile icon={<FolderOpen size={14} />} label="配置路径" value={openCodeOverview.configPath} phase={openCodeOverview.phase} />
+            </div>
+            <Link
+              to="/settings/opencode"
+              className="inline-flex w-fit items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-bg-base shadow-shadow-glow transition-colors hover:bg-accent/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+            >
+              进入 OpenCode 配置 <ExternalLink size={14} />
+            </Link>
+          </div>
+        </SettingsSection>
 
         {/* ── System Diagnostics Panel (Full Width, Collapsible) ─────────── */}
         <div className="flex flex-col gap-3">
           <button
             className="flex items-center gap-2 text-sm font-semibold text-text-primary hover:text-accent transition-colors group"
             onClick={() => setDiagExpanded(!diagExpanded)}
+            aria-expanded={diagExpanded}
+            aria-controls="settings-diagnostics-content"
           >
             {diagExpanded ? <ChevronDown size={16} className="text-text-tertiary group-hover:text-accent transition-colors" /> : <ChevronRight size={16} className="text-text-tertiary group-hover:text-accent transition-colors" />}
             <Activity size={16} className="text-accent" />
@@ -675,7 +743,7 @@ export function SettingsPage() {
           </button>
 
           {diagExpanded && (
-            <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-5">
+            <div id="settings-diagnostics-content" className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-5">
 
               {/* Toolbar: refresh + copy */}
               <div className="flex items-center justify-between">
@@ -886,6 +954,29 @@ export function SettingsPage() {
 }
 
 // ── Diagnostics Sub-Components ─────────────────────────────────────────────
+
+function OpenCodeOverviewTile({ icon, label, value, phase }: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  phase: "loading" | "success" | "error";
+}) {
+  const tone = phase === "success"
+    ? "border-border-subtle bg-bg-sunken text-text-primary"
+    : phase === "loading"
+      ? "border-accent/20 bg-accent-muted/10 text-accent"
+      : "border-warning/25 bg-warning-muted/10 text-warning";
+
+  return (
+    <div className={`min-w-0 rounded-md border p-3 flex flex-col gap-1.5 ${tone}`}>
+      <div className="flex items-center gap-1.5 text-xs">
+        <span className={phase === "error" ? "text-warning" : "text-accent"}>{icon}</span>
+        <span className="font-medium text-text-secondary">{label}</span>
+      </div>
+      <span className="truncate text-[11px] font-mono" title={value}>{value}</span>
+    </div>
+  );
+}
 
 function CheckItem({ icon, label, ok, okText, failText }: {
   icon: React.ReactNode;

@@ -31,6 +31,7 @@ import {
   _setSpawnRunner,
   _resetSpawnRunner,
 } from "../src/services/opencode-runner.js";
+import { buildOpenCodeChildEnv, resolveExecutableOnPath, resolveOpenCodeProcessContext } from "../src/services/opencode-platform.js";
 
 // ─── Test Helpers ──────────────────────────────────────────────────────────────
 
@@ -50,6 +51,40 @@ function setupConfigDir(config: Record<string, unknown>): string {
 function cleanupDir(dir: string) {
   if (fs.existsSync(dir)) {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function createOpenCodePackageFixture(appDataNpm: string): string {
+  const packageDir = path.join(appDataNpm, "node_modules", "opencode-ai");
+  const binDir = path.join(packageDir, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const binPath = path.join(binDir, "opencode.js");
+  fs.writeFileSync(binPath, "#!/usr/bin/env node\n", "utf8");
+  fs.writeFileSync(
+    path.join(packageDir, "package.json"),
+    JSON.stringify({ name: "opencode-ai", bin: { opencode: "bin/opencode.js" } }, null, 2),
+    "utf8",
+  );
+  return binPath;
+}
+
+function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { value: platform });
+  try {
+    return fn();
+  } finally {
+    if (descriptor) Object.defineProperty(process, "platform", descriptor);
+  }
+}
+
+async function withProcessPlatformAsync<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { value: platform });
+  try {
+    return await fn();
+  } finally {
+    if (descriptor) Object.defineProperty(process, "platform", descriptor);
   }
 }
 
@@ -192,6 +227,108 @@ describe("detectProviderConfig", () => {
     const result = detectProviderConfig();
 
     expect(result.hasConfig).toBe(false);
+  });
+
+  it("detects provider config from Windows APPDATA opencode path", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-opencode-config-"));
+    const appData = path.join(fixtureDir, "AppData", "Roaming");
+    const opencodeDir = path.join(appData, "opencode");
+    fs.mkdirSync(opencodeDir, { recursive: true });
+    fs.writeFileSync(path.join(opencodeDir, "opencode.json"), JSON.stringify(sampleConfigWithProviders(1), null, 2), "utf8");
+
+    const originalAppData = process.env.APPDATA;
+    const originalLocalAppData = process.env.LOCALAPPDATA;
+    try {
+      process.env.APPDATA = appData;
+      delete process.env.LOCALAPPDATA;
+      const result = withProcessPlatform("win32", () => detectProviderConfig());
+      expect(result.hasConfig).toBe(true);
+      expect(result.providerCount).toBe(1);
+    } finally {
+      if (originalAppData === undefined) delete process.env.APPDATA;
+      else process.env.APPDATA = originalAppData;
+      if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+      else process.env.LOCALAPPDATA = originalLocalAppData;
+    }
+  });
+});
+
+describe("OpenCode Windows platform helpers", () => {
+  let fixtureDir: string | null = null;
+
+  afterEach(() => {
+    if (fixtureDir) {
+      cleanupDir(fixtureDir);
+      fixtureDir = null;
+    }
+  });
+
+  it("augments PATH with APPDATA/LOCALAPPDATA npm dirs and resolves .cmd shims", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-path-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const localAppData = path.join(fixtureDir, "Local");
+    const appDataNpm = path.join(appData, "npm");
+    const localAppDataNpm = path.join(localAppData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    fs.mkdirSync(localAppDataNpm, { recursive: true });
+    const cmdShim = path.join(appDataNpm, "opencode.cmd");
+    fs.writeFileSync(cmdShim, "@echo off\r\n", "utf8");
+
+    const enhancedEnv = buildOpenCodeChildEnv({ PATH: "C:\\Windows\\System32", APPDATA: appData, LOCALAPPDATA: localAppData }, "win32");
+    const pathEntries = enhancedEnv.PATH?.split(";") ?? [];
+    expect(pathEntries).toContain(appDataNpm);
+    expect(pathEntries).toContain(localAppDataNpm);
+
+    const resolved = resolveExecutableOnPath("opencode", enhancedEnv, "win32");
+    expect(resolved.resolved).toBe(true);
+    expect(resolved.command).toBe(cmdShim);
+  });
+
+  it("builds a native node execution plan instead of returning a direct .cmd shim", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-cmd-plan-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    const cmdShim = path.join(appDataNpm, "opencode.cmd");
+    const jsBin = createOpenCodePackageFixture(appDataNpm);
+    fs.writeFileSync(cmdShim, `@echo off\r\nnode "%~dp0\\node_modules\\opencode-ai\\bin\\opencode.js" %*\r\n`, "utf8");
+
+    const nodeExe = path.join(fixtureDir, "node.exe");
+    fs.writeFileSync(nodeExe, "", "utf8");
+    const plan = resolveOpenCodeProcessContext({ PATH: "C:\\Windows\\System32", APPDATA: appData }, "win32", nodeExe);
+
+    expect(plan.file).toBe(nodeExe);
+    expect(plan.argsPrefix).toEqual([jsBin]);
+    expect(plan.executionMode).toBe("windows-node-shim");
+    expect(plan.shimPath).toBe(cmdShim);
+    expect(plan.file.toLowerCase()).not.toMatch(/\.cmd$|\.bat$/);
+    expect(plan.file.toLowerCase()).not.toMatch(/cmd\.exe$/);
+    expect(plan.argsPrefix).not.toContain("/c");
+  });
+
+  it("fails closed when a Windows .cmd shim cannot be resolved to a native node target", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-unresolved-cmd-plan-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\necho unknown shim\r\n", "utf8");
+
+    expect(() => resolveOpenCodeProcessContext({ PATH: "C:\\Windows\\System32", APPDATA: appData }, "win32"))
+      .toThrow(/Unable to resolve safe native OpenCode target/);
+  });
+
+  it("uses a native Windows executable directly when opencode.exe is resolved", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-exe-plan-"));
+    const binDir = path.join(fixtureDir, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    const exePath = path.join(binDir, "opencode.exe");
+    fs.writeFileSync(exePath, "", "utf8");
+
+    const plan = resolveOpenCodeProcessContext({ PATH: binDir }, "win32");
+
+    expect(plan.file).toBe(exePath);
+    expect(plan.argsPrefix).toEqual([]);
+    expect(plan.executionMode).toBe("native-executable");
   });
 });
 
@@ -349,6 +486,87 @@ describe("checkOpenCodeAvailability combined detection", () => {
       }
     }
   });
+
+  it("uses a Windows native node shim plan and enhanced env for version and providers checks", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-opencode-runner-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    const cmdShim = path.join(appDataNpm, "opencode.cmd");
+    const jsBin = createOpenCodePackageFixture(appDataNpm);
+    fs.writeFileSync(cmdShim, `@echo off\r\nnode "%~dp0\\node_modules\\opencode-ai\\bin\\opencode.js" %*\r\n`, "utf8");
+
+    const originalAppData = process.env.APPDATA;
+    const originalLocalAppData = process.env.LOCALAPPDATA;
+    const originalPath = process.env.PATH;
+    process.env.APPDATA = appData;
+    delete process.env.LOCALAPPDATA;
+    process.env.PATH = "C:\\Windows\\System32";
+
+    const captured: Array<{ file: string; args: string[]; env: Record<string, string | undefined> }> = [];
+    _setExecRunner(async (file: string, args: string[], options: Record<string, unknown>) => {
+      captured.push({ file, args, env: options.env as Record<string, string | undefined> });
+      if (file !== process.execPath) throw new Error(`Unexpected file: ${file}`);
+      if (JSON.stringify(args) === JSON.stringify([jsBin, "--version"])) return { stdout: "v1.14.30\n", stderr: "" };
+      if (JSON.stringify(args) === JSON.stringify([jsBin, "providers", "list"])) return { stdout: "1 credentials configured", stderr: "" };
+      throw new Error(`Unexpected args: ${JSON.stringify(args)}`);
+    });
+
+    try {
+      const result = await withProcessPlatformAsync("win32", () => checkOpenCodeAvailability());
+      expect(result.available).toBe(true);
+      expect(captured).toHaveLength(2);
+      expect(captured[0].file).toBe(process.execPath);
+      expect(captured[1].file).toBe(process.execPath);
+      expect(captured[0].args).toEqual([jsBin, "--version"]);
+      expect(captured[1].args).toEqual([jsBin, "providers", "list"]);
+      expect(captured[0].args.join(" ")).not.toContain("/c");
+      expect(captured[0].env.PATH).toContain(appDataNpm);
+    } finally {
+      if (originalAppData === undefined) delete process.env.APPDATA;
+      else process.env.APPDATA = originalAppData;
+      if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+      else process.env.LOCALAPPDATA = originalLocalAppData;
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  });
+
+  it("marks Windows detection unavailable when a .cmd shim has no safe native target", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-opencode-unresolved-runner-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\necho unknown shim\r\n", "utf8");
+
+    const originalAppData = process.env.APPDATA;
+    const originalLocalAppData = process.env.LOCALAPPDATA;
+    const originalPath = process.env.PATH;
+    process.env.APPDATA = appData;
+    delete process.env.LOCALAPPDATA;
+    process.env.PATH = "C:\\Windows\\System32";
+
+    const captured: Array<{ file: string; args: string[] }> = [];
+    _setExecRunner(async (file: string, args: string[]) => {
+      captured.push({ file, args });
+      return { stdout: "v1.14.30\n", stderr: "" };
+    });
+
+    try {
+      const result = await withProcessPlatformAsync("win32", () => checkOpenCodeAvailability());
+      expect(result.available).toBe(false);
+      expect(result.version).toBeNull();
+      expect(result.error).toContain("Unable to resolve safe native OpenCode target");
+      expect(captured).toHaveLength(0);
+    } finally {
+      if (originalAppData === undefined) delete process.env.APPDATA;
+      else process.env.APPDATA = originalAppData;
+      if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+      else process.env.LOCALAPPDATA = originalLocalAppData;
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  });
 });
 
 // ─── runOpenCodeNormalize success path ─────────────────────────────────────────
@@ -394,6 +612,105 @@ describe("runOpenCodeNormalize success path", () => {
     expect(result.productionList.lines[1].text).toBe("Second line");
     expect(result.productionList.metadata.method).toBe("opencode-run");
     expect(result.productionList.metadata.durationMs).toBeTypeOf("number");
+  });
+
+  it("passes malicious-looking prompt content only as native argv after resolving Windows .cmd shim", async () => {
+    let fixtureDir: string | null = null;
+    const originalAppData = process.env.APPDATA;
+    const originalLocalAppData = process.env.LOCALAPPDATA;
+    const originalPath = process.env.PATH;
+    try {
+      fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-run-args-plan-"));
+      const appData = path.join(fixtureDir, "Roaming");
+      const appDataNpm = path.join(appData, "npm");
+      fs.mkdirSync(appDataNpm, { recursive: true });
+      const cmdShim = path.join(appDataNpm, "opencode.cmd");
+      const jsBin = createOpenCodePackageFixture(appDataNpm);
+      fs.writeFileSync(cmdShim, `@echo off\r\nnode "%~dp0\\node_modules\\opencode-ai\\bin\\opencode.js" %*\r\n`, "utf8");
+
+      process.env.APPDATA = appData;
+      delete process.env.LOCALAPPDATA;
+      process.env.PATH = "C:\\Windows\\System32";
+
+      const validOutput = {
+        lines: [{ id: crypto.randomUUID(), order: 0, speaker: "narrator", text: "Safe", voice: "Zephyr" }],
+        speakers: [{ id: "narrator", label: "Narrator", voice: "Zephyr" }],
+      };
+      const captured: Array<{ file: string; args: string[] }> = [];
+      _setSpawnRunner(async (file: string, args: string[]) => {
+        captured.push({ file, args });
+        return { stdout: JSON.stringify({ content: JSON.stringify(validOutput) }), stderr: "" };
+      });
+
+      const result = await withProcessPlatformAsync("win32", () => runOpenCodeNormalize({
+        documents: [
+          {
+            id: "doc-1",
+            fileName: "malicious-looking.txt",
+            content: "Line with shell metacharacters \" & echo SHOULD_NOT_RUN & \"",
+            enabled: true,
+          },
+        ],
+      }));
+
+      expect(result.runner).toBe("opencode");
+      expect(captured).toHaveLength(1);
+      expect(captured[0].file).toBe(process.execPath);
+      expect(captured[0].args.slice(0, 4)).toEqual([jsBin, "run", "--format", "json"]);
+      expect(captured[0].args).not.toContain("/c");
+      expect(captured[0].args.join(" ")).not.toContain("cmd.exe");
+      const promptArg = captured[0].args[captured[0].args.length - 1];
+      expect(promptArg).toContain("SHOULD_NOT_RUN");
+      expect(promptArg).toContain("&");
+      expect(promptArg).toContain('"');
+    } finally {
+      if (originalAppData === undefined) delete process.env.APPDATA;
+      else process.env.APPDATA = originalAppData;
+      if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+      else process.env.LOCALAPPDATA = originalLocalAppData;
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (fixtureDir) cleanupDir(fixtureDir);
+    }
+  });
+
+  it("fails closed for opencode run when a Windows .cmd shim cannot be safely resolved", async () => {
+    let fixtureDir: string | null = null;
+    const originalAppData = process.env.APPDATA;
+    const originalLocalAppData = process.env.LOCALAPPDATA;
+    const originalPath = process.env.PATH;
+    try {
+      fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-run-unresolved-plan-"));
+      const appData = path.join(fixtureDir, "Roaming");
+      const appDataNpm = path.join(appData, "npm");
+      fs.mkdirSync(appDataNpm, { recursive: true });
+      fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\necho unknown shim\r\n", "utf8");
+
+      process.env.APPDATA = appData;
+      delete process.env.LOCALAPPDATA;
+      process.env.PATH = "C:\\Windows\\System32";
+
+      const captured: Array<{ file: string; args: string[] }> = [];
+      _setSpawnRunner(async (file: string, args: string[]) => {
+        captured.push({ file, args });
+        return { stdout: "{}", stderr: "" };
+      });
+
+      await expect(withProcessPlatformAsync("win32", () => runOpenCodeNormalize({
+        documents: [
+          { id: "doc-1", fileName: "unsafe.txt", content: "Line & echo SHOULD_NOT_RUN", enabled: true },
+        ],
+      }))).rejects.toThrow(/OPENCODE_RUN_FAILED: Unable to resolve safe native OpenCode target/);
+      expect(captured).toHaveLength(0);
+    } finally {
+      if (originalAppData === undefined) delete process.env.APPDATA;
+      else process.env.APPDATA = originalAppData;
+      if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+      else process.env.LOCALAPPDATA = originalLocalAppData;
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (fixtureDir) cleanupDir(fixtureDir);
+    }
   });
 
   it("handles opencode run returning raw production list JSON (no envelope)", async () => {

@@ -22,11 +22,14 @@ export function GlobalAgentDock({ isOpen: controlledIsOpen, onOpenChange }: Glob
   }, [isOpen]);
 
   return (
-    <div id="global-agent-dock" className={`fixed right-0 top-[60px] bottom-[40px] z-[80] flex items-stretch transition-[width] duration-300 ${isOpen ? "w-[min(480px,calc(100vw-96px))]" : "w-9"}`}>
-      <section className={`h-full w-full border border-border-subtle bg-bg-elevated shadow-shadow-lg overflow-hidden ${isOpen ? "rounded-l-lg" : "rounded-l-md"}`} aria-label="Global Agent Dock" data-state={isOpen ? "open" : "closed"}>
+    <div
+      id="global-agent-dock"
+      className={`fixed z-[80] flex transition-all duration-300 ${isOpen ? "right-0 top-[48px] bottom-[28px] w-[min(480px,calc(100vw-96px))] items-stretch pointer-events-auto" : "right-2 top-1/2 h-24 w-8 -translate-y-1/2 items-center pointer-events-none"}`}
+    >
+      <section className={`h-full w-full border border-border-subtle bg-bg-elevated shadow-shadow-lg overflow-hidden ${isOpen ? "rounded-l-lg" : "rounded-md pointer-events-none"}`} aria-label="Global Agent Dock" data-state={isOpen ? "open" : "closed"}>
         <button
           type="button"
-          className={`${isOpen ? "w-full h-11 px-3 flex-row justify-between border-b" : "h-full w-full flex-col justify-center gap-3 py-3"} flex items-center bg-bg-sunken border-border-subtle hover:bg-bg-hover transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60`}
+          className={`${isOpen ? "w-full h-11 px-3 flex-row justify-between border-b" : "h-full w-full flex-col justify-center gap-2 py-2 pointer-events-auto"} flex items-center bg-bg-sunken border-border-subtle hover:bg-bg-hover transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60`}
           onClick={toggle}
           aria-controls={contentId}
           aria-expanded={isOpen}
