@@ -327,6 +327,34 @@ describe("OpenCode Windows platform helpers", () => {
     expect(plan.argsPrefix).not.toContain("/c");
   });
 
+  it("prefers a PATHEXT command shim over an extensionless npm shell shim on Windows", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-extensionless-shim-plan-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    const extensionlessShellShim = path.join(appDataNpm, "opencode");
+    const cmdShim = path.join(appDataNpm, "opencode.cmd");
+    const jsBin = createOpenCodePackageFixture(appDataNpm);
+    const nodeExe = path.join(appDataNpm, "node.exe");
+    fs.writeFileSync(nodeExe, "", "utf8");
+    fs.writeFileSync(extensionlessShellShim, "#!/bin/sh\nbasedir=$(dirname \"$0\")\nexec node \"$basedir/node_modules/opencode-ai/bin/opencode.js\" \"$@\"\n", "utf8");
+    fs.writeFileSync(cmdShim, `@echo off\r\nnode "%~dp0\\node_modules\\opencode-ai\\bin\\opencode.js" %*\r\n`, "utf8");
+
+    const env = { PATH: "C:\\Windows\\System32", APPDATA: appData, PATHEXT: ".CMD;.EXE;.BAT;.COM" };
+    const enhancedEnv = buildOpenCodeChildEnv(env, "win32");
+    const resolved = resolveExecutableOnPath("opencode", enhancedEnv, "win32");
+    const plan = resolveOpenCodeProcessContext(env, "win32", path.join(fixtureDir, "Electron.exe"));
+
+    expect(resolved.resolved).toBe(true);
+    expect(resolved.command).toBe(cmdShim);
+    expect(resolved.command).not.toBe(extensionlessShellShim);
+    expect(plan.file).toBe(nodeExe);
+    expect(plan.argsPrefix).toEqual([jsBin]);
+    expect(plan.executionMode).toBe("windows-node-shim");
+    expect(plan.shimPath).toBe(cmdShim);
+    expect(plan.file).not.toBe(extensionlessShellShim);
+  });
+
   it("parses npm cmd-shim patterns with %dp0%, _prog, CALL :find_dp0, backslashes, and extensionless bin", () => {
     fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-npm10-cmd-plan-"));
     const appData = path.join(fixtureDir, "Roaming");

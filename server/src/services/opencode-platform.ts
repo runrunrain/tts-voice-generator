@@ -446,14 +446,14 @@ function getWindowsExecutableExtensions(env: Record<string, string | undefined>)
     .split(";")
     .map((ext) => ext.trim().toLowerCase())
     .filter((ext) => ext.startsWith("."));
-  const ordered = [...defaults, ...fromEnv];
+  const ordered = fromEnv.length > 0 ? [...fromEnv, ...defaults] : defaults;
   return Array.from(new Set(ordered));
 }
 
 function candidateCommandNames(command: string, env: Record<string, string | undefined>, platform: PlatformLike): string[] {
   if (!isWindows(platform)) return [command];
   if (extnameFor(command)) return [command];
-  return [command, ...getWindowsExecutableExtensions(env).map((ext) => `${command}${ext}`)];
+  return [...getWindowsExecutableExtensions(env).map((ext) => `${command}${ext}`), command];
 }
 
 export function resolveExecutableOnPath(
