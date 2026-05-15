@@ -20,8 +20,9 @@ export interface OpenCodeProcessContext {
   argsPrefix: string[];
   env: Record<string, string | undefined>;
   resolved: boolean;
-  executionMode: "plain" | "native-executable" | "windows-node-shim";
+  executionMode: "plain" | "native-executable" | "windows-node-shim" | "windows-cmd-shim-probe";
   shimPath?: string;
+  restrictedToReadOnlyProbe?: boolean;
 }
 
 export interface ResolvedNpmCommand {
@@ -40,6 +41,8 @@ export interface OpenCodePathDiagnostics {
   executablePath: string | null;
   effectivePathCandidates: string[];
   resolutionError: string | null;
+  runResolutionError: string | null;
+  probeExecutionMode: OpenCodeProcessContext["executionMode"] | null;
 }
 
 const execFileAsync = promisify(execFile);
@@ -350,10 +353,17 @@ export function getWindowsNpmGlobalPathCandidates(env: Record<string, string | u
   const localAppData = env.LOCALAPPDATA?.trim();
   const home = env.HOME?.trim() || env.USERPROFILE?.trim();
   const programData = env.ProgramData?.trim() || env.PROGRAMDATA?.trim();
+  const programFiles = env.ProgramFiles?.trim() || env.PROGRAMFILES?.trim();
+  const programFilesX86 = env["ProgramFiles(x86)"]?.trim() || env["PROGRAMFILES(X86)"]?.trim();
+  const programW6432 = env.ProgramW6432?.trim() || env.PROGRAMW6432?.trim();
   const chocolateyInstall = env.ChocolateyInstall?.trim() || env.CHOCOLATEYINSTALL?.trim();
   const scoop = env.SCOOP?.trim();
   if (appData) candidates.push(joinForBase(appData, "npm"));
   if (localAppData) candidates.push(joinForBase(localAppData, "npm"));
+  if (localAppData) candidates.push(joinForBase(localAppData, "Programs", "nodejs"));
+  for (const root of [programFiles, programFilesX86, programW6432]) {
+    if (root) candidates.push(joinForBase(root, "nodejs"));
+  }
   if (home) {
     candidates.push(joinForBase(home, ".npm-global", "bin"));
     candidates.push(joinForBase(home, "scoop", "shims"));
@@ -504,6 +514,82 @@ function resolveSafeNodeExecutableForShim(
   return null;
 }
 
+function isSafeWindowsCommandInterpreter(filePath: string | undefined, platform: PlatformLike): boolean {
+  if (!isWindows(platform) || !filePath) return false;
+  const normalized = normalizeForBase(filePath);
+  if (!isSafeShimDerivedPath(normalized, platform) || !fileExists(normalized)) return false;
+  return basenameFor(normalized).toLowerCase() === "cmd.exe";
+}
+
+function resolveWindowsCommandInterpreterForProbe(
+  env: Record<string, string | undefined>,
+  platform: PlatformLike,
+): string | null {
+  if (!isWindows(platform)) return null;
+  const comspec = env.ComSpec?.trim() || env.COMSPEC?.trim() || process.env.ComSpec?.trim() || process.env.COMSPEC?.trim();
+  const candidates = [
+    comspec ?? "",
+    resolveExecutableOnPath("cmd.exe", env, platform).command,
+    resolveExecutableOnPath("cmd", env, platform).command,
+  ];
+  for (const candidate of Array.from(new Set(candidates.map((value) => value ? normalizeForBase(value) : value)))) {
+    if (isSafeWindowsCommandInterpreter(candidate, platform)) return candidate;
+  }
+  return null;
+}
+
+function isSafeWindowsShimProbeToken(token: string): boolean {
+  return !!token && !/[\0\r\n"%!]/.test(token);
+}
+
+function quoteWindowsShimProbeToken(token: string): string {
+  if (!isSafeWindowsShimProbeToken(token)) {
+    throw new Error("Unsafe Windows command-shim probe token");
+  }
+  return `"${token}"`;
+}
+
+function buildRestrictedWindowsShimProbeCommand(shimPath: string, probeArgs: readonly string[]): string {
+  const allowedProbeArgs = new Set(["--version", "providers", "list"]);
+  for (const arg of probeArgs) {
+    if (!allowedProbeArgs.has(arg) || !isSafeWindowsShimProbeToken(arg)) {
+      throw new Error("Unsafe Windows command-shim probe arguments");
+    }
+  }
+  return `"${[shimPath, ...probeArgs].map(quoteWindowsShimProbeToken).join(" ")}"`;
+}
+
+function resolveWindowsCommandShimProbeContext(
+  env: Record<string, string | undefined>,
+  platform: PlatformLike,
+): OpenCodeProcessContext | null {
+  if (!isWindows(platform)) return null;
+  const resolved = resolveExecutableOnPath("opencode", env, platform);
+  if (!resolved.resolved || !isWindowsCommandShim(resolved.command)) return null;
+  const shimPath = normalizeForBase(resolved.command);
+  if (!isSafeShimDerivedPath(shimPath, platform) || !fileExists(shimPath) || !isSafeWindowsShimProbeToken(shimPath)) return null;
+  const commandInterpreter = resolveWindowsCommandInterpreterForProbe(env, platform);
+  if (!commandInterpreter) return null;
+  return {
+    file: commandInterpreter,
+    argsPrefix: [],
+    env,
+    resolved: true,
+    executionMode: "windows-cmd-shim-probe",
+    shimPath,
+    restrictedToReadOnlyProbe: true,
+  };
+}
+
+export function appendReadOnlyProbeArgs(
+  context: OpenCodeProcessContext,
+  probeArgs: readonly string[],
+): string[] {
+  if (context.executionMode !== "windows-cmd-shim-probe") return [...context.argsPrefix, ...probeArgs];
+  if (!context.shimPath) throw new Error("Windows command-shim probe context is missing shimPath");
+  return ["/d", "/s", "/c", buildRestrictedWindowsShimProbeCommand(context.shimPath, probeArgs)];
+}
+
 export function resolveOpenCodeProcessContext(
   safeEnv: Record<string, string | undefined>,
   platform: PlatformLike = process.platform,
@@ -584,6 +670,21 @@ export async function resolveOpenCodeProcessContextAsync(
     resolved: resolved.resolved,
     executionMode: resolved.resolved ? "native-executable" : "plain",
   };
+}
+
+export async function resolveOpenCodeProbeContextAsync(
+  safeEnv: Record<string, string | undefined>,
+  platform: PlatformLike = process.platform,
+  nodeExecPath: string = process.execPath,
+): Promise<OpenCodeProcessContext> {
+  try {
+    return await resolveOpenCodeProcessContextAsync(safeEnv, platform, nodeExecPath);
+  } catch (strictError) {
+    const env = await buildOpenCodeChildEnvAsync(safeEnv, platform);
+    const probeContext = resolveWindowsCommandShimProbeContext(env, platform);
+    if (probeContext) return probeContext;
+    throw strictError;
+  }
 }
 
 function isSafeNpmCliPath(filePath: string, platform: PlatformLike): boolean {
@@ -769,9 +870,15 @@ export async function getOpenCodePathDiagnostics(
   const prefix = isWindows(platform) ? await getNpmGlobalPrefix(safeEnv, platform) : null;
   const effectivePathCandidates = getEffectiveOpenCodePathCandidates(safeEnv, platform, prefix);
   let resolutionError: string | null = null;
+  let runResolutionError: string | null = null;
 
   try {
-    const context = await resolveOpenCodeProcessContextAsync(safeEnv, platform);
+    const context = await resolveOpenCodeProbeContextAsync(safeEnv, platform);
+    try {
+      await resolveOpenCodeProcessContextAsync(safeEnv, platform);
+    } catch (error) {
+      runResolutionError = error instanceof Error ? error.message : String(error);
+    }
     const executablePath = context.shimPath ?? (context.resolved ? context.file : null);
     const pathState: OpenCodePathState = systemResolved.resolved
       ? "system-path"
@@ -784,6 +891,8 @@ export async function getOpenCodePathDiagnostics(
       executablePath,
       effectivePathCandidates,
       resolutionError,
+      runResolutionError,
+      probeExecutionMode: context.executionMode,
     };
   } catch (error) {
     resolutionError = error instanceof Error ? error.message : String(error);
@@ -794,6 +903,8 @@ export async function getOpenCodePathDiagnostics(
       executablePath,
       effectivePathCandidates,
       resolutionError,
+      runResolutionError: null,
+      probeExecutionMode: null,
     };
   }
 }

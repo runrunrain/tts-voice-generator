@@ -189,12 +189,16 @@ export interface OpenCodeStatusResponse {
   capabilities: OpenCodeRuntimeCapabilities;
   availability: null | {
     available: boolean;
+    cliAvailable?: boolean;
+    runAvailable?: boolean;
     version: string | null;
     error: string | null;
     installMethod: "npm" | "chocolatey" | "scoop" | "path" | "unknown" | null;
     pathState: "system-path" | "augmented-path" | "not-found";
     effectivePathCandidates: string[];
     resolutionError: string | null;
+    runResolutionError?: string | null;
+    probeExecutionMode?: string | null;
     providerMetadata: {
       hasConfig: boolean;
       providerCount: number;

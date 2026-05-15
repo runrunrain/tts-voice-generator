@@ -98,6 +98,16 @@ async function withProcessPlatformAsync<T>(platform: NodeJS.Platform, fn: () => 
   }
 }
 
+async function withProcessExecPathAsync<T>(execPath: string, fn: () => Promise<T>): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "execPath");
+  Object.defineProperty(process, "execPath", { value: execPath });
+  try {
+    return await fn();
+  } finally {
+    if (descriptor) Object.defineProperty(process, "execPath", descriptor);
+  }
+}
+
 function sampleConfigWithProviders(apiKeyCount: number): Record<string, unknown> {
   const providers: Record<string, unknown> = {};
   for (let i = 0; i < apiKeyCount; i++) {
@@ -387,6 +397,28 @@ describe("OpenCode Windows platform helpers", () => {
     expect(plan.file).toBe(nodeExe);
     expect(plan.argsPrefix).toEqual([extensionlessBin]);
     expect(plan.file).not.toBe(electronExe);
+  });
+
+  it("discovers Program Files nodejs while resolving an npm opencode cmd-shim", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-program-files-node-plan-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    const programFiles = path.join(fixtureDir, "Program Files");
+    const nodeDir = path.join(programFiles, "nodejs");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    fs.mkdirSync(nodeDir, { recursive: true });
+    const extensionlessBin = createOpenCodePackageFixture(appDataNpm, "opencode");
+    const nodeExe = path.join(nodeDir, "node.exe");
+    const electronExe = path.join(fixtureDir, "TTS Voice Generator.exe");
+    fs.writeFileSync(nodeExe, "", "utf8");
+    fs.writeFileSync(electronExe, "", "utf8");
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\n\"%_prog%\" \"%dp0%\\node_modules\\opencode-ai\\bin\\opencode\" %*\r\n", "utf8");
+
+    const plan = resolveOpenCodeProcessContext({ PATH: "C:\\Windows\\System32", APPDATA: appData, ProgramFiles: programFiles }, "win32", electronExe);
+
+    expect(plan.file).toBe(nodeExe);
+    expect(plan.argsPrefix).toEqual([extensionlessBin]);
+    expect(plan.executionMode).toBe("windows-node-shim");
   });
 
   it("fails closed with a clear diagnostic when script resolves but no safe node executable exists", () => {
@@ -715,6 +747,67 @@ describe("checkOpenCodeAvailability combined detection", () => {
       else process.env.LOCALAPPDATA = originalLocalAppData;
       if (originalPath === undefined) delete process.env.PATH;
       else process.env.PATH = originalPath;
+    }
+  });
+
+  it("uses a restricted Windows command-shim probe for status when run-safe node resolution is unavailable", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-opencode-probe-only-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    const cmdDir = path.join(fixtureDir, "System32");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    fs.mkdirSync(cmdDir, { recursive: true });
+    const cmdShim = path.join(appDataNpm, "opencode.cmd");
+    createOpenCodePackageFixture(appDataNpm, "opencode");
+    fs.writeFileSync(cmdShim, "@echo off\r\n\"%_prog%\" \"%dp0%\\node_modules\\opencode-ai\\bin\\opencode\" %*\r\n", "utf8");
+    const cmdExe = path.join(cmdDir, "cmd.exe");
+    const electronExe = path.join(fixtureDir, "TTS Voice Generator.exe");
+    fs.writeFileSync(cmdExe, "", "utf8");
+    fs.writeFileSync(electronExe, "", "utf8");
+
+    const originalAppData = process.env.APPDATA;
+    const originalLocalAppData = process.env.LOCALAPPDATA;
+    const originalPath = process.env.PATH;
+    const originalComSpec = process.env.ComSpec;
+    process.env.APPDATA = appData;
+    delete process.env.LOCALAPPDATA;
+    process.env.PATH = cmdDir;
+    process.env.ComSpec = cmdExe;
+
+    const captured: Array<{ file: string; args: string[]; options: Record<string, unknown> }> = [];
+    _setExecRunner(async (file: string, args: string[], options: Record<string, unknown>) => {
+      captured.push({ file, args, options });
+      expect(file).toBe(cmdExe);
+      expect(args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
+      expect(args[3]).toContain(`"${cmdShim}"`);
+      expect(args[3]).not.toContain("Line with shell metacharacters");
+      expect(options.shell).toBe(false);
+      if (args[3].includes('"--version"')) return { stdout: "v1.15.0\n", stderr: "" };
+      if (args[3].includes('"providers"') && args[3].includes('"list"')) return { stdout: "1 credentials configured", stderr: "" };
+      throw new Error(`Unexpected probe args: ${JSON.stringify(args)}`);
+    });
+
+    try {
+      const result = await withProcessPlatformAsync("win32", () => withProcessExecPathAsync(electronExe, () => checkOpenCodeAvailability()));
+
+      expect(result.cliAvailable).toBe(true);
+      expect(result.runAvailable).toBe(false);
+      expect(result.available).toBe(false);
+      expect(result.version).toBe("v1.15.0");
+      expect(result.resolutionError).toBeNull();
+      expect(result.runResolutionError).toContain("Unable to resolve safe Node executable");
+      expect(result.probeExecutionMode).toBe("windows-cmd-shim-probe");
+      expect(result.error).toContain("app automation cannot safely execute opencode run");
+      expect(captured).toHaveLength(2);
+    } finally {
+      if (originalAppData === undefined) delete process.env.APPDATA;
+      else process.env.APPDATA = originalAppData;
+      if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+      else process.env.LOCALAPPDATA = originalLocalAppData;
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (originalComSpec === undefined) delete process.env.ComSpec;
+      else process.env.ComSpec = originalComSpec;
     }
   });
 });

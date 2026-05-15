@@ -134,6 +134,7 @@ function safeStatusLabel(status: OpenCodeStatusResponse | null): string {
   if (!status) return "未检测";
   if (!status.availability) return "不可检测";
   if (status.availability.available) return "已安装";
+  if (status.availability.cliAvailable) return "CLI 已安装，自动化不可用";
   return "未安装或不可用";
 }
 
@@ -448,6 +449,10 @@ export function OpenCodeSettingsPanel() {
 
             {status?.availability?.resolutionError && (
               <InlineMessage tone="error" message={`安全解析失败：${status.availability.resolutionError}`} />
+            )}
+
+            {status?.availability?.runResolutionError && !status?.availability?.resolutionError && (
+              <InlineMessage tone="warning" message={`CLI 只读检测可用，但自动化运行安全解析不可用：${status.availability.runResolutionError}`} />
             )}
 
             <div className="flex flex-col gap-2">

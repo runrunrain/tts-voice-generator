@@ -21,8 +21,10 @@ import type { VoiceLine } from "../domain/validators.js";
 import { env } from "../config/env.js";
 import { formatVoiceSelectionGuideForPrompt, inferVoiceForTextContext } from "../utils/voice.js";
 import {
+  appendReadOnlyProbeArgs,
   getOpenCodeConfigPathCandidates,
   getOpenCodePathDiagnostics,
+  resolveOpenCodeProbeContextAsync,
   resolveOpenCodeProcessContext,
   resolveOpenCodeProcessContextAsync,
   type OpenCodeInstallMethod,
@@ -264,12 +266,16 @@ export interface ProviderConfigMetadata {
 
 export interface OpenCodeAvailability {
   available: boolean;
+  cliAvailable?: boolean;
+  runAvailable?: boolean;
   version: string | null;
   error: string | null;
   installMethod?: OpenCodeInstallMethod | null;
   pathState?: OpenCodePathState;
   effectivePathCandidates?: string[];
   resolutionError?: string | null;
+  runResolutionError?: string | null;
+  probeExecutionMode?: string | null;
   /** Non-sensitive metadata about detected provider configuration */
   providerMetadata?: ProviderConfigMetadata;
 }
@@ -806,13 +812,14 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
   try {
     const safeEnv = buildSafeChildEnv();
     const diagnostics = await getOpenCodePathDiagnostics(safeEnv);
-    const opencodeProcess = await resolveOpenCodeProcessContextAsync(safeEnv);
+    const opencodeProcess = await resolveOpenCodeProbeContextAsync(safeEnv);
 
     // Stage 1: binary exists and responds to --version
-    const { stdout } = await _execRunner(opencodeProcess.file, [...opencodeProcess.argsPrefix, "--version"], {
+    const { stdout } = await _execRunner(opencodeProcess.file, appendReadOnlyProbeArgs(opencodeProcess, ["--version"]), {
       timeout: 5000,
       windowsHide: true,
       env: opencodeProcess.env,
+      shell: false,
     });
 
     const version = stdout.trim();
@@ -822,8 +829,8 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
     try {
       const { stdout: providersOutput } = await _execRunner(
         opencodeProcess.file,
-        [...opencodeProcess.argsPrefix, "providers", "list"],
-        { timeout: 5000, windowsHide: true, env: opencodeProcess.env },
+        appendReadOnlyProbeArgs(opencodeProcess, ["providers", "list"]),
+        { timeout: 5000, windowsHide: true, env: opencodeProcess.env, shell: false },
       );
 
       // Strip ANSI escape codes before parsing
@@ -836,27 +843,40 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
     // Stage 2b: check opencode.json for inline provider credentials
     const configMeta = detectProviderConfig();
 
-    if (hasAuthCredentials || configMeta.hasConfig) {
+    const hasProviderCredentials = hasAuthCredentials || configMeta.hasConfig;
+    const runAvailable = !diagnostics.runResolutionError;
+
+    if (hasProviderCredentials && runAvailable) {
       cachedAvailability = {
         available: true,
+        cliAvailable: true,
+        runAvailable,
         version,
         error: null,
         installMethod: diagnostics.installMethod,
         pathState: diagnostics.pathState,
         effectivePathCandidates: diagnostics.effectivePathCandidates,
         resolutionError: diagnostics.resolutionError,
+        runResolutionError: diagnostics.runResolutionError,
+        probeExecutionMode: diagnostics.probeExecutionMode,
         providerMetadata: configMeta,
       };
     } else {
+      const error = !hasProviderCredentials
+        ? "OpenCode CLI is installed but no AI provider credentials are configured. Run 'opencode providers login' or configure provider apiKey in opencode.json."
+        : `OpenCode CLI is installed and provider credentials were detected, but app automation cannot safely execute opencode run: ${diagnostics.runResolutionError}`;
       cachedAvailability = {
         available: false,
+        cliAvailable: true,
+        runAvailable,
         version,
-        error:
-          "OpenCode CLI is installed but no AI provider credentials are configured. Run 'opencode providers login' or configure provider apiKey in opencode.json.",
+        error,
         installMethod: diagnostics.installMethod,
         pathState: diagnostics.pathState,
         effectivePathCandidates: diagnostics.effectivePathCandidates,
         resolutionError: diagnostics.resolutionError,
+        runResolutionError: diagnostics.runResolutionError,
+        probeExecutionMode: diagnostics.probeExecutionMode,
         providerMetadata: configMeta,
       };
     }
@@ -876,12 +896,16 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
 
     cachedAvailability = {
       available: false,
+      cliAvailable: false,
+      runAvailable: false,
       version: null,
       error: safeMessage,
       installMethod: diagnostics?.installMethod ?? null,
       pathState: diagnostics?.pathState ?? "not-found",
       effectivePathCandidates: diagnostics?.effectivePathCandidates ?? [],
       resolutionError: diagnostics?.resolutionError ?? safeMessage,
+      runResolutionError: diagnostics?.runResolutionError ?? null,
+      probeExecutionMode: diagnostics?.probeExecutionMode ?? null,
     };
   }
 
