@@ -31,7 +31,17 @@ import {
   _setSpawnRunner,
   _resetSpawnRunner,
 } from "../src/services/opencode-runner.js";
-import { buildOpenCodeChildEnv, resolveExecutableOnPath, resolveOpenCodeProcessContext } from "../src/services/opencode-platform.js";
+import {
+  _resetOpenCodePlatformCachesForTests,
+  _setNpmGlobalPrefixRunnerForTests,
+  buildOpenCodeChildEnv,
+  buildOpenCodeChildEnvAsync,
+  detectInstallMethod,
+  getNpmGlobalPrefix,
+  resolveExecutableOnPath,
+  resolveOpenCodeProcessContext,
+  resolvePackageManagerCommand,
+} from "../src/services/opencode-platform.js";
 
 // ─── Test Helpers ──────────────────────────────────────────────────────────────
 
@@ -257,6 +267,7 @@ describe("OpenCode Windows platform helpers", () => {
   let fixtureDir: string | null = null;
 
   afterEach(() => {
+    _resetOpenCodePlatformCachesForTests();
     if (fixtureDir) {
       cleanupDir(fixtureDir);
       fixtureDir = null;
@@ -329,6 +340,59 @@ describe("OpenCode Windows platform helpers", () => {
     expect(plan.file).toBe(exePath);
     expect(plan.argsPrefix).toEqual([]);
     expect(plan.executionMode).toBe("native-executable");
+  });
+
+  it("adds HOME .npm-global/bin and dynamic npm prefix candidates on Windows", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-npm-prefix-"));
+    const shimDir = path.join(fixtureDir, "shims");
+    const prefixDir = path.join(fixtureDir, "custom-prefix");
+    const homeDir = path.join(fixtureDir, "home");
+    fs.mkdirSync(shimDir, { recursive: true });
+    fs.mkdirSync(prefixDir, { recursive: true });
+    fs.writeFileSync(path.join(shimDir, "npm.exe"), "", "utf8");
+    _setNpmGlobalPrefixRunnerForTests(async () => ({ stdout: `${prefixDir}\n`, stderr: "" }));
+
+    const prefix = await getNpmGlobalPrefix({ PATH: shimDir, HOME: homeDir }, "win32");
+    const enhancedEnv = await buildOpenCodeChildEnvAsync({ PATH: "C:\\Windows\\System32;" + shimDir, HOME: homeDir }, "win32");
+    const entries = enhancedEnv.PATH?.split(";") ?? [];
+
+    expect(prefix).toBe(prefixDir);
+    expect(entries).toContain(path.join(homeDir, ".npm-global", "bin"));
+    expect(entries).toContain(prefixDir);
+  });
+
+  it("resolves pnpm/corepack Windows shims through node scripts and fails closed on bad shim", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-pm-resolve-"));
+    const nodeDir = path.join(fixtureDir, "nodejs");
+    const shimDir = path.join(fixtureDir, "shims");
+    fs.mkdirSync(path.join(shimDir, "node_modules", "pnpm", "bin"), { recursive: true });
+    fs.mkdirSync(path.join(shimDir, "node_modules", "corepack", "dist"), { recursive: true });
+    const pnpmCli = path.join(shimDir, "node_modules", "pnpm", "bin", "pnpm.cjs");
+    const corepackCli = path.join(shimDir, "node_modules", "corepack", "dist", "corepack.js");
+    fs.writeFileSync(pnpmCli, "// pnpm", "utf8");
+    fs.writeFileSync(corepackCli, "// corepack", "utf8");
+    fs.writeFileSync(path.join(shimDir, "pnpm.cmd"), `@echo off\r\nnode "%~dp0\\node_modules\\pnpm\\bin\\pnpm.cjs" %*\r\n`, "utf8");
+    fs.writeFileSync(path.join(shimDir, "corepack.cmd"), `@echo off\r\nnode "%~dp0\\node_modules\\corepack\\dist\\corepack.js" %*\r\n`, "utf8");
+    fs.writeFileSync(path.join(shimDir, "bun.cmd"), "@echo off\r\necho unsafe\r\n", "utf8");
+    const nodeExe = path.join(nodeDir, "node.exe");
+    fs.mkdirSync(nodeDir, { recursive: true });
+    fs.writeFileSync(nodeExe, "", "utf8");
+
+    const pnpm = resolvePackageManagerCommand("pnpm", { PATH: shimDir }, "win32", nodeExe);
+    const corepack = resolvePackageManagerCommand("corepack", { PATH: shimDir }, "win32", nodeExe);
+    const bun = resolvePackageManagerCommand("bun", { PATH: shimDir }, "win32", nodeExe);
+
+    expect(pnpm?.command).toBe(nodeExe);
+    expect(pnpm?.argsPrefix).toEqual([pnpmCli]);
+    expect(corepack?.argsPrefix).toEqual([corepackCli]);
+    expect(bun).toBeNull();
+  });
+
+  it("detects OpenCode install method from npm, Chocolatey, Scoop, and plain PATH", () => {
+    expect(detectInstallMethod("C:\\Users\\me\\AppData\\Roaming\\npm\\opencode.cmd")).toBe("npm");
+    expect(detectInstallMethod("C:\\ProgramData\\chocolatey\\bin\\opencode.exe")).toBe("chocolatey");
+    expect(detectInstallMethod("C:\\Users\\me\\scoop\\shims\\opencode.cmd")).toBe("scoop");
+    expect(detectInstallMethod("C:\\Tools\\opencode.exe")).toBe("path");
   });
 });
 

@@ -191,6 +191,10 @@ export interface OpenCodeStatusResponse {
     available: boolean;
     version: string | null;
     error: string | null;
+    installMethod: "npm" | "chocolatey" | "scoop" | "path" | "unknown" | null;
+    pathState: "system-path" | "augmented-path" | "not-found";
+    effectivePathCandidates: string[];
+    resolutionError: string | null;
     providerMetadata: {
       hasConfig: boolean;
       providerCount: number;
@@ -200,6 +204,9 @@ export interface OpenCodeStatusResponse {
     cacheTtlMs: number;
   };
   npm: null | { available: boolean; version: string | null };
+  packageManagers: null | Record<"npm" | "pnpm" | "bun" | "corepack", { available: boolean; version: string | null; resolution?: string | null }>;
+  latestVersion: string | null;
+  pathState: "system-path" | "augmented-path" | "not-found";
   message: string | null;
 }
 
@@ -263,6 +270,8 @@ export interface OpenCodeInstallPlanResponse {
   nonce: string;
   nonceExpiresAt: string;
   npm: { available: boolean; version: string | null };
+  packageManagers: Record<"npm" | "pnpm" | "bun" | "corepack", { available: boolean; version: string | null; resolution?: string | null }>;
+  installCandidates: string[];
   warnings: string[];
 }
 
@@ -281,6 +290,17 @@ export interface ControlledInstallResponse {
   stdoutTail: string;
   stderrTail: string;
   availabilityAfterInstall: OpenCodeStatusResponse["availability"];
+  packageManager: "npm" | "pnpm" | "bun" | "corepack" | null;
+  attempts: Array<{
+    packageManager: "npm" | "pnpm" | "bun" | "corepack";
+    commandPreview: string;
+    resolved: boolean;
+    exitCode: number | null;
+    timedOut: boolean;
+    stdoutTail: string;
+    stderrTail: string;
+    error: string | null;
+  }>;
   error: string | null;
 }
 

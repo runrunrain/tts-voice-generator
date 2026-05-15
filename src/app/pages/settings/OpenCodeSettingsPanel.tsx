@@ -137,6 +137,31 @@ function safeStatusLabel(status: OpenCodeStatusResponse | null): string {
   return "未安装或不可用";
 }
 
+function installMethodLabel(method: "npm" | "chocolatey" | "scoop" | "path" | "unknown" | null | undefined): string {
+  if (method === "npm") return "npm";
+  if (method === "chocolatey") return "Chocolatey";
+  if (method === "scoop") return "Scoop";
+  if (method === "path") return "PATH";
+  return "未知";
+}
+
+function pathStateLabel(pathState: OpenCodeStatusResponse["pathState"] | undefined): string {
+  if (pathState === "system-path") return "系统 PATH";
+  if (pathState === "augmented-path") return "应用补全 PATH";
+  return "未找到";
+}
+
+function compareSemver(a: string | null | undefined, b: string | null | undefined): number {
+  if (!a || !b) return 0;
+  const left = a.replace(/^v/i, "").split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
+  const right = b.replace(/^v/i, "").split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
+  for (let i = 0; i < Math.max(left.length, right.length, 3); i++) {
+    const diff = (left[i] ?? 0) - (right[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 export function OpenCodeSettingsPanel() {
   const [status, setStatus] = useState<OpenCodeStatusResponse | null>(null);
   const [config, setConfig] = useState<OpenCodeConfigDisplayResponse | null>(null);
@@ -365,6 +390,8 @@ export function OpenCodeSettingsPanel() {
     : canUseLocalButtons
       ? "border-warning/25 bg-warning-muted/10 text-warning"
       : "border-border bg-bg-sunken text-text-tertiary";
+  const updateAvailable = compareSemver(status?.latestVersion, status?.availability?.version) > 0;
+  const packageManagerRows = status?.packageManagers ? (Object.entries(status.packageManagers) as Array<["npm" | "pnpm" | "bun" | "corepack", { available: boolean; version: string | null; resolution?: string | null }]>) : [];
   const saveDisabled = savePhase === "saving" || !canEditConfig || providers.length === 0;
   const installDisabled = installPhase === "planning" || installPhase === "installing" || !capabilities?.canInstall;
   const openDisabled = openPhase === "opening" || (!capabilities?.canOpenConfig && !capabilities?.canReturnConfigPathForCopy);
@@ -403,9 +430,36 @@ export function OpenCodeSettingsPanel() {
 
             <div className="grid grid-cols-2 gap-3 text-xs">
               <InfoTile label="版本" value={status?.availability?.version ?? "未获取"} />
+              <InfoTile label="最新版本" value={status?.latestVersion ?? "未获取"} />
+              <InfoTile label="安装来源" value={installMethodLabel(status?.availability?.installMethod)} />
+              <InfoTile label="PATH 状态" value={pathStateLabel(status?.availability?.pathState ?? status?.pathState)} />
               <InfoTile label="npm" value={status?.npm ? (status.npm.available ? status.npm.version ?? "可用" : "不可用") : "未检测"} />
               <InfoTile label="Provider 数" value={String(status?.availability?.providerMetadata.providerCount ?? config?.providers.length ?? 0)} />
               <InfoTile label="Model 数" value={String(status?.availability?.providerMetadata.modelCount ?? modelOptions.length)} />
+            </div>
+
+            {updateAvailable && (
+              <InlineMessage tone="warning" message={`检测到 OpenCode 新版本 ${status?.latestVersion}，可通过下方受控安装执行固定更新命令。`} />
+            )}
+
+            {status?.availability?.pathState === "augmented-path" && (
+              <InlineMessage tone="warning" message="OpenCode 不在系统 PATH 中，仅通过应用补全 PATH 检测到。若终端和桌面行为不一致，请检查 npm global prefix、Scoop 或 Chocolatey 路径。" />
+            )}
+
+            {status?.availability?.resolutionError && (
+              <InlineMessage tone="error" message={`安全解析失败：${status.availability.resolutionError}`} />
+            )}
+
+            <div className="flex flex-col gap-2">
+              <span className="text-xs font-semibold text-text-secondary">Package managers</span>
+              <div className="grid grid-cols-2 gap-2">
+                {packageManagerRows.map(([name, manager]) => (
+                  <span key={name} className={`px-2 py-1 rounded border text-[11px] ${manager.available ? "border-success/20 bg-success-muted/10 text-success" : "border-border bg-bg-base text-text-tertiary"}`}>
+                    {name}: {manager.available ? manager.version ?? manager.resolution ?? "可用" : "不可用"}
+                  </span>
+                ))}
+                {packageManagerRows.length === 0 && <span className="text-[11px] text-text-tertiary">未检测</span>}
+              </div>
             </div>
 
             <div className="flex flex-col gap-2">
@@ -589,6 +643,12 @@ export function OpenCodeSettingsPanel() {
                   二次确认固定命令
                 </div>
                 <code className="bg-bg-base border border-border rounded px-3 py-2 text-xs font-mono text-text-primary select-all">{installPlan.commandPreview}</code>
+                {installPlan.installCandidates.length > 0 && (
+                  <div className="flex flex-col gap-1 text-[11px] text-text-tertiary">
+                    <span>可用安装候选：</span>
+                    {installPlan.installCandidates.map((candidate) => <code key={candidate} className="font-mono">{candidate}</code>)}
+                  </div>
+                )}
                 <input
                   value={installConfirmation}
                   onChange={(event) => setInstallConfirmation(event.target.value)}
@@ -614,8 +674,18 @@ export function OpenCodeSettingsPanel() {
 
             {installResult && (
               <div className="border border-border-subtle rounded-md bg-bg-base p-3 flex flex-col gap-2 text-[11px] text-text-tertiary">
-                <span>exitCode: {installResult.exitCode ?? "null"} | duration: {installResult.durationMs}ms | timeout: {installResult.timedOut ? "yes" : "no"}</span>
+                <span>packageManager: {installResult.packageManager ?? "none"} | exitCode: {installResult.exitCode ?? "null"} | duration: {installResult.durationMs}ms | timeout: {installResult.timedOut ? "yes" : "no"}</span>
                 {installResult.stderrTail && <code className="font-mono break-all text-error/90">stderr: {installResult.stderrTail}</code>}
+                {installResult.attempts?.length ? (
+                  <div className="flex flex-col gap-1">
+                    <span>尝试记录：</span>
+                    {installResult.attempts.map((attempt, index) => (
+                      <code key={`${attempt.packageManager}-${index}`} className="font-mono break-all">
+                        {attempt.commandPreview} | resolved={String(attempt.resolved)} | exit={attempt.exitCode ?? "null"} | error={attempt.error ?? "none"}
+                      </code>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             )}
           </SettingsSection>

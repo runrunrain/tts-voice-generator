@@ -20,7 +20,14 @@ import crypto from "node:crypto";
 import type { VoiceLine } from "../domain/validators.js";
 import { env } from "../config/env.js";
 import { formatVoiceSelectionGuideForPrompt, inferVoiceForTextContext } from "../utils/voice.js";
-import { getOpenCodeConfigPathCandidates, resolveOpenCodeProcessContext } from "./opencode-platform.js";
+import {
+  getOpenCodeConfigPathCandidates,
+  getOpenCodePathDiagnostics,
+  resolveOpenCodeProcessContext,
+  resolveOpenCodeProcessContextAsync,
+  type OpenCodeInstallMethod,
+  type OpenCodePathState,
+} from "./opencode-platform.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -259,6 +266,10 @@ export interface OpenCodeAvailability {
   available: boolean;
   version: string | null;
   error: string | null;
+  installMethod?: OpenCodeInstallMethod | null;
+  pathState?: OpenCodePathState;
+  effectivePathCandidates?: string[];
+  resolutionError?: string | null;
   /** Non-sensitive metadata about detected provider configuration */
   providerMetadata?: ProviderConfigMetadata;
 }
@@ -642,7 +653,9 @@ export async function runOpenCodeChat(input: OpenCodeChatRunInput): Promise<Open
   const prompt = buildChatPrompt(input);
 
   try {
-    const opencodeProcess = resolveOpenCodeProcessContext(buildSafeChildEnv());
+    const safeEnv = buildSafeChildEnv();
+    const diagnostics = await getOpenCodePathDiagnostics(safeEnv);
+    const opencodeProcess = await resolveOpenCodeProcessContextAsync(safeEnv);
     const { stdout } = await _spawnRunner(
       opencodeProcess.file,
       [...opencodeProcess.argsPrefix, "run", "--format", "json", "--dir", cwd, prompt],
@@ -791,7 +804,9 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
   }
 
   try {
-    const opencodeProcess = resolveOpenCodeProcessContext(buildSafeChildEnv());
+    const safeEnv = buildSafeChildEnv();
+    const diagnostics = await getOpenCodePathDiagnostics(safeEnv);
+    const opencodeProcess = await resolveOpenCodeProcessContextAsync(safeEnv);
 
     // Stage 1: binary exists and responds to --version
     const { stdout } = await _execRunner(opencodeProcess.file, [...opencodeProcess.argsPrefix, "--version"], {
@@ -826,6 +841,10 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
         available: true,
         version,
         error: null,
+        installMethod: diagnostics.installMethod,
+        pathState: diagnostics.pathState,
+        effectivePathCandidates: diagnostics.effectivePathCandidates,
+        resolutionError: diagnostics.resolutionError,
         providerMetadata: configMeta,
       };
     } else {
@@ -834,6 +853,10 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
         version,
         error:
           "OpenCode CLI is installed but no AI provider credentials are configured. Run 'opencode providers login' or configure provider apiKey in opencode.json.",
+        installMethod: diagnostics.installMethod,
+        pathState: diagnostics.pathState,
+        effectivePathCandidates: diagnostics.effectivePathCandidates,
+        resolutionError: diagnostics.resolutionError,
         providerMetadata: configMeta,
       };
     }
@@ -844,10 +867,21 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
       .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
       .replace(/\bsk-[A-Za-z0-9_\-]{8,}\b/g, "sk-[REDACTED]");
 
+    let diagnostics: Awaited<ReturnType<typeof getOpenCodePathDiagnostics>> | null = null;
+    try {
+      diagnostics = await getOpenCodePathDiagnostics(buildSafeChildEnv());
+    } catch {
+      diagnostics = null;
+    }
+
     cachedAvailability = {
       available: false,
       version: null,
       error: safeMessage,
+      installMethod: diagnostics?.installMethod ?? null,
+      pathState: diagnostics?.pathState ?? "not-found",
+      effectivePathCandidates: diagnostics?.effectivePathCandidates ?? [],
+      resolutionError: diagnostics?.resolutionError ?? safeMessage,
     };
   }
 

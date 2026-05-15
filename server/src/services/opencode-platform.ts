@@ -1,8 +1,14 @@
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 type PlatformLike = NodeJS.Platform | string;
+
+export type PackageManagerName = "npm" | "pnpm" | "bun" | "corepack";
+export type OpenCodeInstallMethod = "npm" | "chocolatey" | "scoop" | "path" | "unknown";
+export type OpenCodePathState = "system-path" | "augmented-path" | "not-found";
 
 export interface ResolvedExecutable {
   command: string;
@@ -22,7 +28,33 @@ export interface ResolvedNpmCommand {
   command: string;
   argsPrefix: string[];
   env: Record<string, string | undefined>;
-  resolution: "plain" | "node-npm-cli" | "native-executable";
+  resolution: "plain" | "node-npm-cli" | "node-package-cli" | "native-executable";
+  packageManager?: PackageManagerName;
+}
+
+export type ResolvedPackageManagerCommand = ResolvedNpmCommand;
+
+export interface OpenCodePathDiagnostics {
+  pathState: OpenCodePathState;
+  installMethod: OpenCodeInstallMethod | null;
+  executablePath: string | null;
+  effectivePathCandidates: string[];
+  resolutionError: string | null;
+}
+
+const execFileAsync = promisify(execFile);
+let npmPrefixRunner: (file: string, args: string[], options: Record<string, unknown>) => Promise<{ stdout: string; stderr: string }> =
+  execFileAsync as unknown as (file: string, args: string[], options: Record<string, unknown>) => Promise<{ stdout: string; stderr: string }>;
+const npmGlobalPrefixCache = new Map<string, string | null>();
+
+export function _setNpmGlobalPrefixRunnerForTests(runner: typeof npmPrefixRunner): void {
+  npmPrefixRunner = runner;
+  npmGlobalPrefixCache.clear();
+}
+
+export function _resetOpenCodePlatformCachesForTests(): void {
+  npmPrefixRunner = execFileAsync as unknown as typeof npmPrefixRunner;
+  npmGlobalPrefixCache.clear();
 }
 
 function isWindows(platform: PlatformLike): boolean {
@@ -250,9 +282,61 @@ export function getWindowsNpmGlobalPathCandidates(env: Record<string, string | u
   const candidates: string[] = [];
   const appData = env.APPDATA?.trim();
   const localAppData = env.LOCALAPPDATA?.trim();
+  const home = env.HOME?.trim() || env.USERPROFILE?.trim();
+  const programData = env.ProgramData?.trim() || env.PROGRAMDATA?.trim();
+  const chocolateyInstall = env.ChocolateyInstall?.trim() || env.CHOCOLATEYINSTALL?.trim();
+  const scoop = env.SCOOP?.trim();
   if (appData) candidates.push(joinForBase(appData, "npm"));
   if (localAppData) candidates.push(joinForBase(localAppData, "npm"));
-  return candidates;
+  if (home) {
+    candidates.push(joinForBase(home, ".npm-global", "bin"));
+    candidates.push(joinForBase(home, "scoop", "shims"));
+  }
+  if (scoop) candidates.push(joinForBase(scoop, "shims"));
+  if (programData) candidates.push(joinForBase(programData, "chocolatey", "bin"));
+  if (chocolateyInstall) candidates.push(joinForBase(chocolateyInstall, "bin"));
+  return Array.from(new Set(candidates.map(normalizeForBase)));
+}
+
+function dynamicPrefixPathCandidates(prefix: string, platform: PlatformLike): string[] {
+  const normalized = normalizeForBase(prefix.trim());
+  if (!normalized || !isAbsoluteForPlatform(normalized, platform)) return [];
+  if (!isWindows(platform)) return [joinForBase(normalized, "bin")];
+  return [normalized, joinForBase(normalized, "bin")];
+}
+
+function npmPrefixCacheKey(safeEnv: Record<string, string | undefined>, platform: PlatformLike): string {
+  const pathKey = getPathKey(safeEnv);
+  return [platform, safeEnv[pathKey] ?? "", safeEnv.npm_execpath ?? "", safeEnv.APPDATA ?? "", safeEnv.LOCALAPPDATA ?? ""].join("\0");
+}
+
+export async function getNpmGlobalPrefix(
+  safeEnv: Record<string, string | undefined>,
+  platform: PlatformLike = process.platform,
+): Promise<string | null> {
+  const cacheKey = npmPrefixCacheKey(safeEnv, platform);
+  if (npmGlobalPrefixCache.has(cacheKey)) return npmGlobalPrefixCache.get(cacheKey) ?? null;
+
+  try {
+    const npmCommand = resolveNpmCommand(safeEnv, platform);
+    if (!npmCommand) {
+      npmGlobalPrefixCache.set(cacheKey, null);
+      return null;
+    }
+    const { stdout } = await npmPrefixRunner(npmCommand.command, [...npmCommand.argsPrefix, "prefix", "-g"], {
+      timeout: 10_000,
+      windowsHide: true,
+      shell: false,
+      env: npmCommand.env,
+    });
+    const prefix = stdout.trim().split(/\r?\n/)[0]?.trim() ?? "";
+    const valid = prefix && isAbsoluteForPlatform(prefix, platform) && !/[\0\r\n]/.test(prefix) ? normalizeForBase(prefix) : null;
+    npmGlobalPrefixCache.set(cacheKey, valid);
+    return valid;
+  } catch {
+    npmGlobalPrefixCache.set(cacheKey, null);
+    return null;
+  }
 }
 
 export function buildOpenCodeChildEnv(
@@ -262,6 +346,21 @@ export function buildOpenCodeChildEnv(
   if (!isWindows(platform)) return { ...safeEnv };
   const pathKey = getPathKey(safeEnv);
   const nextPath = appendUniquePathEntries(safeEnv[pathKey], getWindowsNpmGlobalPathCandidates(safeEnv), platform);
+  return withPathValue(safeEnv, nextPath, platform);
+}
+
+export async function buildOpenCodeChildEnvAsync(
+  safeEnv: Record<string, string | undefined>,
+  platform: PlatformLike = process.platform,
+): Promise<Record<string, string | undefined>> {
+  if (!isWindows(platform)) return { ...safeEnv };
+  const pathKey = getPathKey(safeEnv);
+  const prefix = await getNpmGlobalPrefix(safeEnv, platform);
+  const additions = [
+    ...getWindowsNpmGlobalPathCandidates(safeEnv),
+    ...(prefix ? dynamicPrefixPathCandidates(prefix, platform) : []),
+  ];
+  const nextPath = appendUniquePathEntries(safeEnv[pathKey], additions, platform);
   return withPathValue(safeEnv, nextPath, platform);
 }
 
@@ -341,6 +440,41 @@ export function resolveOpenCodeProcessContext(
   };
 }
 
+export async function resolveOpenCodeProcessContextAsync(
+  safeEnv: Record<string, string | undefined>,
+  platform: PlatformLike = process.platform,
+  nodeExecPath: string = process.execPath,
+): Promise<OpenCodeProcessContext> {
+  const env = await buildOpenCodeChildEnvAsync(safeEnv, platform);
+  if (!isWindows(platform)) {
+    return { file: "opencode", argsPrefix: [], env, resolved: false, executionMode: "plain" };
+  }
+  const resolved = resolveExecutableOnPath("opencode", env, platform);
+  if (resolved.resolved && isWindowsCommandShim(resolved.command)) {
+    const scriptTarget = resolveOpenCodeNodeShimTarget(resolved.command, platform);
+    if (!scriptTarget) {
+      throw new Error(
+        `Unable to resolve safe native OpenCode target from Windows command shim at ${resolved.command}; refusing to execute .cmd/.bat through cmd.exe /c`,
+      );
+    }
+    return {
+      file: nodeExecPath,
+      argsPrefix: [scriptTarget],
+      env,
+      resolved: true,
+      executionMode: "windows-node-shim",
+      shimPath: resolved.command,
+    };
+  }
+  return {
+    file: resolved.command,
+    argsPrefix: [],
+    env,
+    resolved: resolved.resolved,
+    executionMode: resolved.resolved ? "native-executable" : "plain",
+  };
+}
+
 function isSafeNpmCliPath(filePath: string, platform: PlatformLike): boolean {
   const base = basenameFor(filePath).toLowerCase();
   return isAbsoluteForPlatform(filePath, platform) && (base === "npm-cli.js" || base === "cli.js") && fileExists(filePath);
@@ -354,40 +488,201 @@ function npmCliCandidatesFromResolvedNpm(npmCommand: string): string[] {
   ];
 }
 
+function packageManagerCliBaseNames(manager: PackageManagerName): string[] {
+  if (manager === "npm") return ["npm-cli.js", "cli.js"];
+  if (manager === "pnpm") return ["pnpm.cjs", "pnpm.js", "pnpm-cli.js"];
+  if (manager === "corepack") return ["corepack.js"];
+  return ["bun.js", "cli.js"];
+}
+
+function packageManagerPackageNames(manager: PackageManagerName): string[] {
+  if (manager === "npm") return ["npm"];
+  if (manager === "pnpm") return ["pnpm"];
+  if (manager === "corepack") return ["corepack"];
+  return ["bun"];
+}
+
+function fixedPackageManagerCliCandidates(packageDir: string, manager: PackageManagerName): string[] {
+  if (manager === "npm") return [joinForBase(packageDir, "bin", "npm-cli.js")];
+  if (manager === "pnpm") return [
+    joinForBase(packageDir, "bin", "pnpm.cjs"),
+    joinForBase(packageDir, "pnpm.cjs"),
+    joinForBase(packageDir, "dist", "pnpm.cjs"),
+  ];
+  if (manager === "corepack") return [
+    joinForBase(packageDir, "dist", "corepack.js"),
+    joinForBase(packageDir, "corepack.js"),
+  ];
+  return [
+    joinForBase(packageDir, "bin", "bun.js"),
+    joinForBase(packageDir, "bun.js"),
+  ];
+}
+
+function packageManagerCliCandidatesFromResolvedCommand(commandPath: string, manager: PackageManagerName, nodeExecPath: string): string[] {
+  const commandDir = dirnameFor(commandPath);
+  const nodeDir = dirnameFor(nodeExecPath);
+  const roots = [
+    commandDir,
+    dirnameFor(commandDir),
+    nodeDir,
+    dirnameFor(nodeDir),
+  ];
+  const candidates: string[] = [];
+  for (const root of roots) {
+    for (const packageName of packageManagerPackageNames(manager)) {
+      const packageDirs = [
+        joinForBase(root, "node_modules", packageName),
+        joinForBase(root, packageName),
+      ];
+      for (const packageDir of packageDirs) candidates.push(...fixedPackageManagerCliCandidates(packageDir, manager));
+    }
+  }
+  return candidates;
+}
+
+function extractPackageManagerScriptCandidatesFromShim(shimPath: string, manager: PackageManagerName, platform: PlatformLike): string[] {
+  const shimContent = readTextFile(shimPath);
+  if (!shimContent) return [];
+  const allowedBaseNames = new Set(packageManagerCliBaseNames(manager));
+  const candidates: string[] = [];
+  const quotedPathPattern = /"([^"]+)"/g;
+  let match: RegExpExecArray | null;
+  while ((match = quotedPathPattern.exec(shimContent)) !== null) {
+    const expanded = normalizeForBase(expandNpmShimPathVariables(match[1], shimPath));
+    if (allowedBaseNames.has(basenameFor(expanded).toLowerCase()) && isSafeNodeScriptTarget(expanded, platform)) {
+      candidates.push(expanded);
+    }
+  }
+  return Array.from(new Set(candidates));
+}
+
+function isSafePackageManagerCliPath(filePath: string, manager: PackageManagerName, platform: PlatformLike): boolean {
+  const base = basenameFor(filePath).toLowerCase();
+  return packageManagerCliBaseNames(manager).includes(base) && isSafeNodeScriptTarget(filePath, platform);
+}
+
+export function resolvePackageManagerCommand(
+  manager: PackageManagerName,
+  safeEnv: Record<string, string | undefined>,
+  platform: PlatformLike = process.platform,
+  nodeExecPath: string = process.execPath,
+): ResolvedPackageManagerCommand | null {
+  const env = buildOpenCodeChildEnv(safeEnv, platform);
+
+  if (!isWindows(platform)) {
+    return { command: manager, argsPrefix: [], env, resolution: "plain", packageManager: manager };
+  }
+
+  const resolvedCommand = resolveExecutableOnPath(manager, env, platform);
+  const directCliCandidates = manager === "npm" && safeEnv.npm_execpath?.trim() ? [safeEnv.npm_execpath.trim()] : [];
+  const cliCandidates = [
+    ...directCliCandidates,
+    ...extractPackageManagerScriptCandidatesFromShim(resolvedCommand.command, manager, platform),
+    ...packageManagerCliCandidatesFromResolvedCommand(resolvedCommand.command, manager, nodeExecPath),
+  ];
+
+  for (const candidate of cliCandidates) {
+    if (isSafePackageManagerCliPath(candidate, manager, platform)) {
+      const resolution = manager === "npm" ? "node-npm-cli" : "node-package-cli";
+      return { command: nodeExecPath, argsPrefix: [normalizeForBase(candidate)], env, resolution, packageManager: manager };
+    }
+  }
+
+  if (resolvedCommand.resolved) {
+    const ext = extnameFor(resolvedCommand.command).toLowerCase();
+    if (manager === "bun" && ext === ".exe") {
+      return { command: resolvedCommand.command, argsPrefix: [], env, resolution: "native-executable", packageManager: manager };
+    }
+    if (ext !== ".cmd" && ext !== ".bat") {
+      return { command: resolvedCommand.command, argsPrefix: [], env, resolution: "native-executable", packageManager: manager };
+    }
+  }
+
+  return null;
+}
+
 export function resolveNpmCommand(
   safeEnv: Record<string, string | undefined>,
   platform: PlatformLike = process.platform,
   nodeExecPath: string = process.execPath,
 ): ResolvedNpmCommand | null {
-  const env = buildOpenCodeChildEnv(safeEnv, platform);
+  return resolvePackageManagerCommand("npm", safeEnv, platform, nodeExecPath);
+}
 
-  if (!isWindows(platform)) {
-    return { command: "npm", argsPrefix: [], env, resolution: "plain" };
+function normalizePathForDetection(filePath: string): string {
+  return filePath.replace(/\\/g, "/").toLowerCase();
+}
+
+export function detectInstallMethod(executablePath: string | null | undefined): OpenCodeInstallMethod | null {
+  if (!executablePath) return null;
+  const normalized = normalizePathForDetection(executablePath);
+  if (
+    normalized.includes("/node_modules/") ||
+    normalized.includes("/appdata/roaming/npm/") ||
+    normalized.includes("/appdata/local/npm/") ||
+    normalized.includes("/.npm-global/bin/") ||
+    normalized.endsWith("/.npm-global/bin/opencode") ||
+    normalized.endsWith("/.npm-global/bin/opencode.cmd")
+  ) {
+    return "npm";
   }
-
-  const npmExecPath = safeEnv.npm_execpath?.trim();
-  const cliCandidates = [
-    ...(npmExecPath ? [npmExecPath] : []),
-    joinForBase(dirnameFor(nodeExecPath), "node_modules", "npm", "bin", "npm-cli.js"),
-  ];
-
-  const resolvedNpm = resolveExecutableOnPath("npm", env, platform);
-  if (resolvedNpm.resolved) cliCandidates.push(...npmCliCandidatesFromResolvedNpm(resolvedNpm.command));
-
-  for (const candidate of cliCandidates) {
-    if (isSafeNpmCliPath(candidate, platform)) {
-      return { command: nodeExecPath, argsPrefix: [normalizeForBase(candidate)], env, resolution: "node-npm-cli" };
-    }
+  if (normalized.includes("/programdata/chocolatey/") || normalized.includes("/chocolatey/bin/")) {
+    return "chocolatey";
   }
-
-  if (resolvedNpm.resolved) {
-    const ext = extnameFor(resolvedNpm.command).toLowerCase();
-    if (ext !== ".cmd" && ext !== ".bat") {
-      return { command: resolvedNpm.command, argsPrefix: [], env, resolution: "native-executable" };
-    }
+  if (normalized.includes("/scoop/apps/") || normalized.includes("/scoop/shims/")) {
+    return "scoop";
   }
+  return "path";
+}
 
-  return null;
+export function getEffectiveOpenCodePathCandidates(
+  safeEnv: Record<string, string | undefined>,
+  platform: PlatformLike = process.platform,
+  npmGlobalPrefix?: string | null,
+): string[] {
+  if (!isWindows(platform)) return [];
+  return Array.from(new Set([
+    ...getWindowsNpmGlobalPathCandidates(safeEnv),
+    ...(npmGlobalPrefix ? dynamicPrefixPathCandidates(npmGlobalPrefix, platform) : []),
+  ].map(normalizeForBase)));
+}
+
+export async function getOpenCodePathDiagnostics(
+  safeEnv: Record<string, string | undefined>,
+  platform: PlatformLike = process.platform,
+): Promise<OpenCodePathDiagnostics> {
+  const systemResolved = resolveExecutableOnPath("opencode", safeEnv, platform);
+  const prefix = isWindows(platform) ? await getNpmGlobalPrefix(safeEnv, platform) : null;
+  const effectivePathCandidates = getEffectiveOpenCodePathCandidates(safeEnv, platform, prefix);
+  let resolutionError: string | null = null;
+
+  try {
+    const context = await resolveOpenCodeProcessContextAsync(safeEnv, platform);
+    const executablePath = context.shimPath ?? (context.resolved ? context.file : null);
+    const pathState: OpenCodePathState = systemResolved.resolved
+      ? "system-path"
+      : context.resolved
+        ? "augmented-path"
+        : "not-found";
+    return {
+      pathState,
+      installMethod: detectInstallMethod(executablePath),
+      executablePath,
+      effectivePathCandidates,
+      resolutionError,
+    };
+  } catch (error) {
+    resolutionError = error instanceof Error ? error.message : String(error);
+    const executablePath = systemResolved.resolved ? systemResolved.command : null;
+    return {
+      pathState: systemResolved.resolved ? "system-path" : "not-found",
+      installMethod: detectInstallMethod(executablePath),
+      executablePath,
+      effectivePathCandidates,
+      resolutionError,
+    };
+  }
 }
 
 export function getOpenCodeConfigPathCandidates(

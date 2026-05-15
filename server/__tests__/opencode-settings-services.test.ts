@@ -17,7 +17,9 @@ import {
   _setInstallProcessRunner,
   _setNpmCheckRunner,
   _setPostInstallAvailabilityChecker,
+  checkPackageManagersAvailability,
   createOpenCodeInstallPlan,
+  getLatestOpenCodeVersion,
   installOpenCodeControlled,
 } from "../src/services/opencode-install-service.js";
 import { resolveNpmCommand } from "../src/services/opencode-platform.js";
@@ -237,5 +239,47 @@ describe("OpenCode settings backend services", () => {
     expect(installs[0].file).toBe(process.execPath);
     expect(installs[0].args).toEqual([npmCli, ...OPENCODE_INSTALL_ARGS]);
     expect(installs[0].options.shell).toBe(false);
+  });
+
+  it("falls back from npm to pnpm and returns sanitized attempt records", async () => {
+    _setNpmCheckRunner(async () => ({ stdout: "10.0.0\n", stderr: "" }));
+    _setPostInstallAvailabilityChecker(async () => ({ available: true, version: "v1.0.0", error: null }));
+
+    const installs: Array<{ file: string; args: readonly string[]; options: Record<string, unknown> }> = [];
+    _setInstallProcessRunner(async (file, args, options) => {
+      installs.push({ file, args, options });
+      if (file === "npm") return { exitCode: 1, timedOut: false, stdout: "", stderr: "failed sk-secret-value-123456" };
+      if (file === "pnpm") return { exitCode: 0, timedOut: false, stdout: "installed", stderr: "" };
+      throw new Error(`unexpected install command ${file}`);
+    });
+
+    const plan = await createOpenCodeInstallPlan();
+    const result = await installOpenCodeControlled({ nonce: plan.nonce, confirmationPhrase: "INSTALL_OPENCODE", confirm: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.packageManager).toBe("pnpm");
+    expect(installs.map((item) => item.file)).toEqual(["npm", "pnpm"]);
+    expect(installs[0].args).toEqual(["install", "-g", "opencode-ai@latest"]);
+    expect(installs[1].args).toEqual(["add", "-g", "opencode-ai@latest"]);
+    expect(installs.every((item) => item.options.shell === false)).toBe(true);
+    expect(result.attempts[0].stderrTail).not.toContain("sk-secret-value-123456");
+  });
+
+  it("reports package manager availability and latest OpenCode version without throwing on failures", async () => {
+    const calls: Array<{ file: string; args: string[] }> = [];
+    _setNpmCheckRunner(async (file, args) => {
+      calls.push({ file, args });
+      if (args.join(" ") === "view opencode-ai version") return { stdout: "1.2.3\n", stderr: "" };
+      if (args.join(" ") === "--version") return { stdout: `${file}-1.0.0\n`, stderr: "" };
+      throw new Error("unexpected args");
+    });
+
+    const managers = await checkPackageManagersAvailability();
+    const latest = await getLatestOpenCodeVersion();
+
+    expect(managers.npm.available).toBe(true);
+    expect(managers.pnpm.available).toBe(true);
+    expect(latest).toBe("1.2.3");
+    expect(calls.some((call) => call.args.join(" ") === "view opencode-ai version")).toBe(true);
   });
 });

@@ -31,8 +31,10 @@ import {
 import {
   OPENCODE_INSTALL_CONFIRMATION_PHRASE,
   OpenCodeInstallError,
+  checkPackageManagersAvailability,
   checkNpmAvailability,
   createOpenCodeInstallPlan,
+  getLatestOpenCodeVersion,
   installOpenCodeControlled,
 } from "../services/opencode-install-service.js";
 
@@ -338,13 +340,18 @@ app.get("/api/settings/opencode/status", async (c) => {
       capabilities,
       availability: null,
       npm: null,
+      packageManagers: null,
+      latestVersion: null,
+      pathState: "not-found",
       message: capabilities.reason ?? "当前运行环境不支持本地 OpenCode 检测。",
     });
   }
 
-  const [availability, npm] = await Promise.all([
+  const [availability, npm, packageManagers, latestVersion] = await Promise.all([
     checkOpenCodeAvailability(),
     checkNpmAvailability(),
+    checkPackageManagersAvailability(),
+    getLatestOpenCodeVersion(),
   ]);
 
   return c.json({
@@ -355,11 +362,18 @@ app.get("/api/settings/opencode/status", async (c) => {
       available: availability.available,
       version: availability.version,
       error: availability.error,
+      installMethod: availability.installMethod ?? null,
+      pathState: availability.pathState ?? "not-found",
+      effectivePathCandidates: availability.effectivePathCandidates ?? [],
+      resolutionError: availability.resolutionError ?? null,
       providerMetadata: availability.providerMetadata ?? { hasConfig: false, providerCount: 0, modelCount: 0 },
       checkedAt: new Date().toISOString(),
       cacheTtlMs: 60_000,
     },
     npm,
+    packageManagers,
+    latestVersion,
+    pathState: availability.pathState ?? "not-found",
     message: null,
   });
 });
