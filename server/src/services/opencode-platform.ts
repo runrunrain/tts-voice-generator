@@ -135,6 +135,14 @@ function isSafeNodeScriptTarget(filePath: string, platform: PlatformLike): boole
   return ext !== ".cmd" && ext !== ".bat" && ext !== ".exe" && ext !== ".com";
 }
 
+function isSafeNativeNodeExecutable(filePath: string | undefined, platform: PlatformLike): boolean {
+  if (!filePath) return false;
+  const normalized = normalizeForBase(filePath);
+  if (!isSafeShimDerivedPath(normalized, platform) || !fileExists(normalized)) return false;
+  const base = basenameFor(normalized).toLowerCase();
+  return base === "node.exe" || base === "node";
+}
+
 function trailingSeparatorForBase(base: string): string {
   if (base.endsWith("/") || base.endsWith("\\")) return "";
   return usesWinSeparators(base) ? "\\" : path.sep;
@@ -149,21 +157,79 @@ function expandNpmShimPathVariables(input: string, shimPath: string): string {
     .replace(/\$basedir[\\/]?/gi, dp0);
 }
 
+function pushShimPathCandidate(candidates: string[], rawCandidate: string, shimPath: string, platform: PlatformLike): void {
+  const cleaned = rawCandidate.trim();
+  if (!cleaned) return;
+  const remainingVariables = cleaned.replace(/%~dp0|%dp0%|\$basedir/gi, "");
+  if (/[%!][a-z_][a-z0-9_]*[%!]?/i.test(remainingVariables)) return;
+  const expanded = normalizeForBase(expandNpmShimPathVariables(cleaned, shimPath));
+  if (isSafeShimDerivedPath(expanded, platform)) candidates.push(expanded);
+}
+
+function extractQuotedPathCandidatesFromShim(shimContent: string, shimPath: string, platform: PlatformLike): string[] {
+  const candidates: string[] = [];
+  const quotedPathPattern = /"([^"]+)"/g;
+  let match: RegExpExecArray | null;
+  while ((match = quotedPathPattern.exec(shimContent)) !== null) {
+    const raw = match[1];
+    const assignmentValue = raw.match(/^[A-Za-z_][A-Za-z0-9_]*=(.+)$/)?.[1] ?? raw;
+    pushShimPathCandidate(candidates, assignmentValue, shimPath, platform);
+  }
+  return candidates;
+}
+
+function extractSetAssignmentPathCandidatesFromShim(shimContent: string, shimPath: string, platform: PlatformLike): string[] {
+  const candidates: string[] = [];
+  const setAssignmentPattern = /\bSET\s+"?[A-Za-z_][A-Za-z0-9_]*=([^"\r\n]+)"?/gi;
+  let match: RegExpExecArray | null;
+  while ((match = setAssignmentPattern.exec(shimContent)) !== null) {
+    pushShimPathCandidate(candidates, match[1], shimPath, platform);
+  }
+  return candidates;
+}
+
+function extractUnquotedPathCandidatesFromShim(shimContent: string, shimPath: string, platform: PlatformLike): string[] {
+  const candidates: string[] = [];
+  const unquotedPathPattern = /((?:%~dp0|%dp0%|\$basedir)[^\s"'()<>|&]+)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = unquotedPathPattern.exec(shimContent)) !== null) {
+    pushShimPathCandidate(candidates, match[1], shimPath, platform);
+  }
+  return candidates;
+}
+
 function extractNodeScriptCandidatesFromShim(shimPath: string, platform: PlatformLike): string[] {
   const shimContent = readTextFile(shimPath);
   if (!shimContent) return [];
 
   const candidates: string[] = [];
-  const quotedPathPattern = /"([^"]*(?:node_modules|bin)[^"]*(?:opencode|open-code)[^"]*)"/gi;
-  let match: RegExpExecArray | null;
-  while ((match = quotedPathPattern.exec(shimContent)) !== null) {
-    const expanded = normalizeForBase(expandNpmShimPathVariables(match[1], shimPath));
+  const rawCandidates = [
+    ...extractQuotedPathCandidatesFromShim(shimContent, shimPath, platform),
+    ...extractSetAssignmentPathCandidatesFromShim(shimContent, shimPath, platform),
+    ...extractUnquotedPathCandidatesFromShim(shimContent, shimPath, platform),
+  ];
+
+  for (const expanded of rawCandidates) {
     const base = basenameFor(expanded).toLowerCase();
     if (base === "node.exe" || base === "node") continue;
     if (isSafeNodeScriptTarget(expanded, platform)) candidates.push(expanded);
   }
 
   return Array.from(new Set(candidates));
+}
+
+function extractNodeExecutableCandidatesFromShim(shimPath: string, platform: PlatformLike): string[] {
+  const shimContent = readTextFile(shimPath);
+  if (!shimContent) return [];
+  const rawCandidates = [
+    ...extractQuotedPathCandidatesFromShim(shimContent, shimPath, platform),
+    ...extractSetAssignmentPathCandidatesFromShim(shimContent, shimPath, platform),
+    ...extractUnquotedPathCandidatesFromShim(shimContent, shimPath, platform),
+  ];
+  return Array.from(new Set(rawCandidates.filter((candidate) => {
+    const base = basenameFor(candidate).toLowerCase();
+    return base === "node.exe" || base === "node";
+  })));
 }
 
 function parsePackageJsonBinCandidates(packageDir: string, platform: PlatformLike): string[] {
@@ -405,6 +471,39 @@ export function resolveExecutableOnPath(
   return { command, resolved: false };
 }
 
+function resolveNativeNodeOnPath(env: Record<string, string | undefined>, platform: PlatformLike): string | null {
+  const pathKey = getPathKey(env);
+  const names = isWindows(platform) ? ["node.exe", "node"] : ["node"];
+  for (const directory of splitPathList(env[pathKey], platform)) {
+    for (const name of names) {
+      const candidate = normalizeForBase(joinForBase(directory, name));
+      if (isSafeNativeNodeExecutable(candidate, platform)) return candidate;
+    }
+  }
+  return null;
+}
+
+function resolveSafeNodeExecutableForShim(
+  shimPath: string,
+  env: Record<string, string | undefined>,
+  platform: PlatformLike,
+  preferredNodeExecPath?: string,
+): string | null {
+  const shimDir = dirnameFor(shimPath);
+  const pathNode = resolveNativeNodeOnPath(env, platform);
+  const candidates = [
+    joinForBase(shimDir, "node.exe"),
+    ...extractNodeExecutableCandidatesFromShim(shimPath, platform),
+    ...(pathNode ? [pathNode] : []),
+    preferredNodeExecPath ?? "",
+  ];
+
+  for (const candidate of Array.from(new Set(candidates.map((value) => value ? normalizeForBase(value) : value)))) {
+    if (isSafeNativeNodeExecutable(candidate, platform)) return candidate;
+  }
+  return null;
+}
+
 export function resolveOpenCodeProcessContext(
   safeEnv: Record<string, string | undefined>,
   platform: PlatformLike = process.platform,
@@ -422,8 +521,14 @@ export function resolveOpenCodeProcessContext(
         `Unable to resolve safe native OpenCode target from Windows command shim at ${resolved.command}; refusing to execute .cmd/.bat through cmd.exe /c`,
       );
     }
+    const nodeCommand = resolveSafeNodeExecutableForShim(resolved.command, env, platform, nodeExecPath);
+    if (!nodeCommand) {
+      throw new Error(
+        `Unable to resolve safe Node executable for OpenCode Windows command shim at ${resolved.command}; refusing to execute .cmd/.bat through cmd.exe /c`,
+      );
+    }
     return {
-      file: nodeExecPath,
+      file: nodeCommand,
       argsPrefix: [scriptTarget],
       env,
       resolved: true,
@@ -457,8 +562,14 @@ export async function resolveOpenCodeProcessContextAsync(
         `Unable to resolve safe native OpenCode target from Windows command shim at ${resolved.command}; refusing to execute .cmd/.bat through cmd.exe /c`,
       );
     }
+    const nodeCommand = resolveSafeNodeExecutableForShim(resolved.command, env, platform, nodeExecPath);
+    if (!nodeCommand) {
+      throw new Error(
+        `Unable to resolve safe Node executable for OpenCode Windows command shim at ${resolved.command}; refusing to execute .cmd/.bat through cmd.exe /c`,
+      );
+    }
     return {
-      file: nodeExecPath,
+      file: nodeCommand,
       argsPrefix: [scriptTarget],
       env,
       resolved: true,
@@ -584,8 +695,10 @@ export function resolvePackageManagerCommand(
 
   for (const candidate of cliCandidates) {
     if (isSafePackageManagerCliPath(candidate, manager, platform)) {
+      const nodeCommand = resolveSafeNodeExecutableForShim(resolvedCommand.command, env, platform, nodeExecPath);
+      if (!nodeCommand) return null;
       const resolution = manager === "npm" ? "node-npm-cli" : "node-package-cli";
-      return { command: nodeExecPath, argsPrefix: [normalizeForBase(candidate)], env, resolution, packageManager: manager };
+      return { command: nodeCommand, argsPrefix: [normalizeForBase(candidate)], env, resolution, packageManager: manager };
     }
   }
 

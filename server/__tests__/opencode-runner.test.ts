@@ -64,15 +64,15 @@ function cleanupDir(dir: string) {
   }
 }
 
-function createOpenCodePackageFixture(appDataNpm: string): string {
+function createOpenCodePackageFixture(appDataNpm: string, binName = "opencode.js"): string {
   const packageDir = path.join(appDataNpm, "node_modules", "opencode-ai");
   const binDir = path.join(packageDir, "bin");
   fs.mkdirSync(binDir, { recursive: true });
-  const binPath = path.join(binDir, "opencode.js");
+  const binPath = path.join(binDir, binName);
   fs.writeFileSync(binPath, "#!/usr/bin/env node\n", "utf8");
   fs.writeFileSync(
     path.join(packageDir, "package.json"),
-    JSON.stringify({ name: "opencode-ai", bin: { opencode: "bin/opencode.js" } }, null, 2),
+    JSON.stringify({ name: "opencode-ai", bin: { opencode: `bin/${binName}` } }, null, 2),
     "utf8",
   );
   return binPath;
@@ -315,6 +315,92 @@ describe("OpenCode Windows platform helpers", () => {
     expect(plan.file.toLowerCase()).not.toMatch(/\.cmd$|\.bat$/);
     expect(plan.file.toLowerCase()).not.toMatch(/cmd\.exe$/);
     expect(plan.argsPrefix).not.toContain("/c");
+  });
+
+  it("parses npm cmd-shim patterns with %dp0%, _prog, CALL :find_dp0, backslashes, and extensionless bin", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-npm10-cmd-plan-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    const cmdShim = path.join(appDataNpm, "opencode.cmd");
+    const extensionlessBin = createOpenCodePackageFixture(appDataNpm, "opencode");
+    const nodeExe = path.join(appDataNpm, "node.exe");
+    fs.writeFileSync(nodeExe, "", "utf8");
+    fs.writeFileSync(cmdShim, [
+      "@ECHO off",
+      "GOTO start",
+      ":find_dp0",
+      "SET dp0=%~dp0",
+      "EXIT /b %ERRORLEVEL%",
+      ":start",
+      "SETLOCAL",
+      "CALL :find_dp0",
+      "IF EXIST \"%dp0%\\node.exe\" (",
+      "  SET \"_prog=%dp0%\\node.exe\"",
+      ") ELSE (",
+      "  SET \"_prog=node\"",
+      ")",
+      "endLocal & goto #_undefined_# 1>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\opencode-ai\\bin\\opencode\" %*",
+    ].join("\r\n"), "utf8");
+
+    const plan = resolveOpenCodeProcessContext({ PATH: "C:\\Windows\\System32", APPDATA: appData }, "win32", path.join(fixtureDir, "Electron.exe"));
+
+    expect(plan.file).toBe(nodeExe);
+    expect(plan.argsPrefix).toEqual([extensionlessBin]);
+    expect(plan.executionMode).toBe("windows-node-shim");
+    expect(plan.argsPrefix.join(" ")).not.toContain("/c");
+  });
+
+  it("parses unquoted %~dp0 script paths without falling back to cmd.exe", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-unquoted-cmd-plan-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    const extensionlessBin = createOpenCodePackageFixture(appDataNpm, "opencode");
+    const nodeExe = path.join(appDataNpm, "node.exe");
+    fs.writeFileSync(nodeExe, "", "utf8");
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\nnode %~dp0\\node_modules\\opencode-ai\\bin\\opencode %*\r\n", "utf8");
+
+    const plan = resolveOpenCodeProcessContext({ PATH: "C:\\Windows\\System32", APPDATA: appData }, "win32", path.join(fixtureDir, "Electron.exe"));
+
+    expect(plan.file).toBe(nodeExe);
+    expect(plan.argsPrefix).toEqual([extensionlessBin]);
+    expect(plan.file.toLowerCase()).not.toMatch(/cmd\.exe$|\.cmd$|\.bat$/);
+  });
+
+  it("uses PATH node.exe instead of a packaged Electron process executable", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-path-node-plan-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    const nodeDir = path.join(fixtureDir, "nodejs");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    fs.mkdirSync(nodeDir, { recursive: true });
+    const extensionlessBin = createOpenCodePackageFixture(appDataNpm, "opencode");
+    const nodeExe = path.join(nodeDir, "node.exe");
+    const electronExe = path.join(fixtureDir, "TTS Voice Generator.exe");
+    fs.writeFileSync(nodeExe, "", "utf8");
+    fs.writeFileSync(electronExe, "", "utf8");
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\n\"%_prog%\" \"%dp0%\\node_modules\\opencode-ai\\bin\\opencode\" %*\r\n", "utf8");
+
+    const plan = resolveOpenCodeProcessContext({ PATH: nodeDir, APPDATA: appData }, "win32", electronExe);
+
+    expect(plan.file).toBe(nodeExe);
+    expect(plan.argsPrefix).toEqual([extensionlessBin]);
+    expect(plan.file).not.toBe(electronExe);
+  });
+
+  it("fails closed with a clear diagnostic when script resolves but no safe node executable exists", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-no-node-plan-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    createOpenCodePackageFixture(appDataNpm, "opencode");
+    const electronExe = path.join(fixtureDir, "Electron.exe");
+    fs.writeFileSync(electronExe, "", "utf8");
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\n\"%_prog%\" \"%dp0%\\node_modules\\opencode-ai\\bin\\opencode\" %*\r\n", "utf8");
+
+    expect(() => resolveOpenCodeProcessContext({ PATH: "C:\\Windows\\System32", APPDATA: appData }, "win32", electronExe))
+      .toThrow(/Unable to resolve safe Node executable/);
   });
 
   it("fails closed when a Windows .cmd shim cannot be resolved to a native node target", () => {
