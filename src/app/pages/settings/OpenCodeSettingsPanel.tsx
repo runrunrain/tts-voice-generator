@@ -29,6 +29,8 @@ type InstallPhase = "idle" | "planning" | "installing" | "success" | "error";
 type OpenPhase = "idle" | "opening" | "success" | "error";
 
 const OPENCODE_SETTINGS_SECTION_IDS = ["cli-status", "config-file", "visual-config", "controlled-install"] as const;
+const OPENCODE_ALREADY_AVAILABLE_MESSAGE = "OpenCode 已安装且可用，无需重新安装。";
+const OPENCODE_CLI_ALREADY_INSTALLED_MESSAGE = "OpenCode CLI 已安装，无需重新安装。请根据上方提示补齐凭据或自动化运行要求。";
 
 type OpenConfigResponse = {
   ok: true;
@@ -165,6 +167,15 @@ function availabilityDiagnosticMessage(status: OpenCodeStatusResponse | null): s
     return "OpenCode CLI 只读检测可用，但自动化 run 安全解析不可用。应用不会放宽 Windows .cmd/.bat 执行边界，请检查 Node/OpenCode 安装路径。";
   }
   return `OpenCode 自动化不可用：${availability.error}`;
+}
+
+function isOpenCodeCliInstalled(status: OpenCodeStatusResponse | null): boolean {
+  const availability = status?.availability;
+  return !!availability?.available || availability?.cliAvailable === true;
+}
+
+function alreadyInstalledInstallMessage(status: OpenCodeStatusResponse | null): string {
+  return status?.availability?.available ? OPENCODE_ALREADY_AVAILABLE_MESSAGE : OPENCODE_CLI_ALREADY_INSTALLED_MESSAGE;
 }
 
 function compareSemver(a: string | null | undefined, b: string | null | undefined): number {
@@ -342,6 +353,13 @@ export function OpenCodeSettingsPanel() {
   }, [loadOpenCodeSettings]);
 
   const startInstallPlan = useCallback(async () => {
+    if (isOpenCodeCliInstalled(status)) {
+      setInstallPhase("success");
+      setInstallPlan(null);
+      setInstallResult(null);
+      setInstallMessage(alreadyInstalledInstallMessage(status));
+      return;
+    }
     if (!capabilities?.canInstall) {
       setInstallPhase("error");
       setInstallMessage(localDisabledReason);
@@ -354,13 +372,19 @@ export function OpenCodeSettingsPanel() {
     try {
       const plan = await readJson<OpenCodeInstallPlanResponse>("/api/settings/opencode/install-plan", { method: "POST" });
       setInstallPlan(plan);
+      if (!plan.controlledInstallAvailable || plan.installCandidates.length === 0) {
+        setInstallPhase("success");
+        setInstallMessage(plan.warnings[0] ?? OPENCODE_ALREADY_AVAILABLE_MESSAGE);
+        setInstallPlan(null);
+        return;
+      }
       await runControlledInstall(plan);
     } catch (error) {
       setInstallPhase("error");
       setInstallPlan(null);
       setInstallMessage(error instanceof Error ? error.message : "OpenCode 受控安装启动失败");
     }
-  }, [capabilities?.canInstall, localDisabledReason, runControlledInstall]);
+  }, [capabilities?.canInstall, localDisabledReason, runControlledInstall, status]);
 
   const openConfigFile = useCallback(async () => {
     if (!capabilities?.canOpenConfig && !capabilities?.canReturnConfigPathForCopy) {
@@ -406,7 +430,8 @@ export function OpenCodeSettingsPanel() {
   const packageManagerRows = status?.packageManagers ? (Object.entries(status.packageManagers) as Array<["npm" | "pnpm" | "bun" | "corepack", { available: boolean; version: string | null; resolution?: string | null }]>) : [];
   const availabilityDiagnostic = availabilityDiagnosticMessage(status);
   const saveDisabled = savePhase === "saving" || !canEditConfig || providers.length === 0;
-  const installDisabled = installPhase === "planning" || installPhase === "installing" || !capabilities?.canInstall;
+  const opencodeCliInstalled = isOpenCodeCliInstalled(status);
+  const installDisabled = installPhase === "planning" || installPhase === "installing" || (!capabilities?.canInstall && !opencodeCliInstalled);
   const openDisabled = openPhase === "opening" || (!capabilities?.canOpenConfig && !capabilities?.canReturnConfigPathForCopy);
 
   return (
@@ -453,7 +478,7 @@ export function OpenCodeSettingsPanel() {
             </div>
 
             {updateAvailable && (
-              <InlineMessage tone="warning" message={`检测到 OpenCode 新版本 ${status?.latestVersion}，可通过下方受控安装执行固定更新命令。`} />
+              <InlineMessage tone="warning" message={`检测到 OpenCode 新版本 ${status?.latestVersion}。当前 CLI 已可用时不会重复触发受控安装；如需更新，请先按项目策略卸载或升级 OpenCode。`} />
             )}
 
             {status?.availability?.pathState === "augmented-path" && (
@@ -649,10 +674,10 @@ export function OpenCodeSettingsPanel() {
                 className="px-3 py-1.5 bg-bg-base border border-border rounded-md text-xs font-medium hover:bg-bg-hover active:bg-bg-active transition-colors flex items-center gap-1.5 disabled:opacity-50"
                 onClick={startInstallPlan}
                 disabled={installDisabled}
-                title={!capabilities?.canInstall ? localDisabledReason : undefined}
+                title={!capabilities?.canInstall && !opencodeCliInstalled ? localDisabledReason : undefined}
               >
                 {installPhase === "planning" || installPhase === "installing" ? <Loader2 size={12} className="animate-spin" /> : <Terminal size={12} />}
-                安装 OpenCode
+                {opencodeCliInstalled ? "无需安装" : "安装 OpenCode"}
               </button>
             </div>
 

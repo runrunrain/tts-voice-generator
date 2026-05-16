@@ -58,6 +58,10 @@ describe("OpenCode settings backend services", () => {
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-settings-"));
     process.env.XDG_CONFIG_HOME = path.join(tmpDir, "xdg");
+    process.env.HOME = path.join(tmpDir, "home");
+    process.env.USERPROFILE = path.join(tmpDir, "home");
+    process.env.APPDATA = path.join(tmpDir, "AppData", "Roaming");
+    process.env.LOCALAPPDATA = path.join(tmpDir, "AppData", "Local");
     process.env.NODE_ENV = "test";
     delete process.env.OPENCODE_CONFIG;
     delete process.env.OPENCODE_LOCAL_CAPABILITIES;
@@ -200,24 +204,86 @@ describe("OpenCode settings backend services", () => {
 
   it("uses a fixed npm install allowlist with no shell and requires confirmation", async () => {
     _setNpmCheckRunner(async () => ({ stdout: "10.0.0\n", stderr: "" }));
-    _setPostInstallAvailabilityChecker(async () => ({ available: true, version: "v1.0.0", error: null }));
+    const availabilityResults = [
+      { available: false, version: null, error: "not installed" },
+      { available: false, version: null, error: "not installed" },
+      { available: false, version: null, error: "not installed" },
+      { available: true, version: "v1.0.0", error: null },
+    ];
+    _setPostInstallAvailabilityChecker(async () => availabilityResults.shift() ?? { available: true, version: "v1.0.0", error: null });
     const captured: Array<{ file: string; args: readonly string[]; options: Record<string, unknown> }> = [];
     _setInstallProcessRunner(async (file, args, options) => {
       captured.push({ file, args, options });
       return { exitCode: 0, timedOut: false, stdout: "installed sk-secret-value-123456", stderr: "" };
     });
 
-    const plan = await createOpenCodeInstallPlan();
+    const plan = await withProcessPlatform("linux", async () => createOpenCodeInstallPlan());
     await expect(installOpenCodeControlled({ nonce: plan.nonce, confirmationPhrase: "INSTALL_OPENCODE", confirm: false as true })).rejects.toMatchObject({ status: 400 });
 
-    const plan2 = await createOpenCodeInstallPlan();
-    const result = await installOpenCodeControlled({ nonce: plan2.nonce, confirmationPhrase: "INSTALL_OPENCODE", confirm: true });
+    const { result } = await withProcessPlatform("linux", async () => {
+      const plan2 = await createOpenCodeInstallPlan();
+      return { result: await installOpenCodeControlled({ nonce: plan2.nonce, confirmationPhrase: "INSTALL_OPENCODE", confirm: true }) };
+    });
     expect(result.ok).toBe(true);
     expect(result.stdoutTail).not.toContain("sk-secret-value-123456");
     expect(captured).toHaveLength(1);
     expect(captured[0].file).toBe("npm");
     expect(captured[0].args).toEqual(OPENCODE_INSTALL_ARGS);
     expect(captured[0].options.shell).toBe(false);
+  });
+
+  it("returns a no-install plan when OpenCode CLI is already executable", async () => {
+    let npmChecked = false;
+    _setNpmCheckRunner(async () => {
+      npmChecked = true;
+      return { stdout: "10.0.0\n", stderr: "" };
+    });
+    _setPostInstallAvailabilityChecker(async () => ({
+      available: false,
+      cliAvailable: true,
+      runAvailable: false,
+      version: "v1.0.0",
+      error: "provider credentials are not configured",
+    }));
+
+    const plan = await createOpenCodeInstallPlan();
+
+    expect(plan.ok).toBe(true);
+    expect(plan.controlledInstallAvailable).toBe(false);
+    expect(plan.installCandidates).toEqual([]);
+    expect(plan.warnings.join(" ")).toContain("无需重新安装");
+    expect(npmChecked).toBe(false);
+  });
+
+  it("short-circuits controlled install after nonce when OpenCode CLI is already executable", async () => {
+    _setNpmCheckRunner(async () => ({ stdout: "10.0.0\n", stderr: "" }));
+    const availabilityResults = [
+      { available: false, version: null, error: "not installed" },
+      {
+        available: false,
+        cliAvailable: true,
+        runAvailable: false,
+        version: "v1.0.0",
+        error: "provider credentials are not configured",
+      },
+    ];
+    _setPostInstallAvailabilityChecker(async () => availabilityResults.shift() ?? { available: true, version: "v1.0.0", error: null });
+    const captured: Array<{ file: string; args: readonly string[]; options: Record<string, unknown> }> = [];
+    _setInstallProcessRunner(async (file, args, options) => {
+      captured.push({ file, args, options });
+      throw new Error("install runner should not be called when OpenCode is already available");
+    });
+
+    const plan = await createOpenCodeInstallPlan();
+    const result = await installOpenCodeControlled({ nonce: plan.nonce, confirmationPhrase: "INSTALL_OPENCODE", confirm: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.exitCode).toBe(0);
+    expect(result.packageManager).toBeNull();
+    expect(result.availabilityAfterInstall?.available).toBe(false);
+    expect(result.availabilityAfterInstall?.cliAvailable).toBe(true);
+    expect(result.attempts).toEqual([]);
+    expect(captured).toEqual([]);
   });
 
   it("resolves Windows npm through node plus npm-cli.js instead of npm.cmd", () => {
@@ -251,7 +317,12 @@ describe("OpenCode settings backend services", () => {
       npmChecks.push({ file, args });
       return { stdout: "10.0.0\n", stderr: "" };
     });
-    _setPostInstallAvailabilityChecker(async () => ({ available: true, version: "v1.0.0", error: null }));
+    const availabilityResults = [
+      { available: false, version: null, error: "not installed" },
+      { available: false, version: null, error: "not installed" },
+      { available: true, version: "v1.0.0", error: null },
+    ];
+    _setPostInstallAvailabilityChecker(async () => availabilityResults.shift() ?? { available: true, version: "v1.0.0", error: null });
 
     const installs: Array<{ file: string; args: readonly string[]; options: Record<string, unknown> }> = [];
     _setInstallProcessRunner(async (file, args, options) => {
@@ -266,9 +337,8 @@ describe("OpenCode settings backend services", () => {
       expect(result.ok).toBe(true);
     });
 
-    expect(npmChecks).toHaveLength(1);
-    expect(npmChecks[0].file).toBe(process.execPath);
-    expect(npmChecks[0].args).toEqual([npmCli, "--version"]);
+    const npmVersionChecks = npmChecks.filter((call) => call.file === process.execPath && call.args.join("\0") === [npmCli, "--version"].join("\0"));
+    expect(npmVersionChecks).toHaveLength(1);
     expect(installs).toHaveLength(1);
     expect(installs[0].file).toBe(process.execPath);
     expect(installs[0].args).toEqual([npmCli, ...OPENCODE_INSTALL_ARGS]);
@@ -277,7 +347,12 @@ describe("OpenCode settings backend services", () => {
 
   it("falls back from npm to pnpm and returns sanitized attempt records", async () => {
     _setNpmCheckRunner(async () => ({ stdout: "10.0.0\n", stderr: "" }));
-    _setPostInstallAvailabilityChecker(async () => ({ available: true, version: "v1.0.0", error: null }));
+    const availabilityResults = [
+      { available: false, version: null, error: "not installed" },
+      { available: false, version: null, error: "not installed" },
+      { available: true, version: "v1.0.0", error: null },
+    ];
+    _setPostInstallAvailabilityChecker(async () => availabilityResults.shift() ?? { available: true, version: "v1.0.0", error: null });
 
     const installs: Array<{ file: string; args: readonly string[]; options: Record<string, unknown> }> = [];
     _setInstallProcessRunner(async (file, args, options) => {
@@ -287,8 +362,10 @@ describe("OpenCode settings backend services", () => {
       throw new Error(`unexpected install command ${file}`);
     });
 
-    const plan = await createOpenCodeInstallPlan();
-    const result = await installOpenCodeControlled({ nonce: plan.nonce, confirmationPhrase: "INSTALL_OPENCODE", confirm: true });
+    const { result } = await withProcessPlatform("linux", async () => {
+      const plan = await createOpenCodeInstallPlan();
+      return { result: await installOpenCodeControlled({ nonce: plan.nonce, confirmationPhrase: "INSTALL_OPENCODE", confirm: true }) };
+    });
 
     expect(result.ok).toBe(true);
     expect(result.packageManager).toBe("pnpm");
@@ -308,8 +385,10 @@ describe("OpenCode settings backend services", () => {
       throw new Error("unexpected args");
     });
 
-    const managers = await checkPackageManagersAvailability();
-    const latest = await getLatestOpenCodeVersion();
+    const { managers, latest } = await withProcessPlatform("linux", async () => ({
+      managers: await checkPackageManagersAvailability(),
+      latest: await getLatestOpenCodeVersion(),
+    }));
 
     expect(managers.npm.available).toBe(true);
     expect(managers.pnpm.available).toBe(true);

@@ -150,6 +150,10 @@ function emptyPackageManagersAvailability(): PackageManagersAvailability {
   };
 }
 
+function isOpenCodeCliInstalled(availability: OpenCodeAvailability): boolean {
+  return availability.available || availability.cliAvailable === true;
+}
+
 function installArgsFor(packageManager: PackageManagerName): readonly string[] {
   if (packageManager === "npm") return OPENCODE_INSTALL_ARGS;
   if (packageManager === "pnpm") return OPENCODE_PNPM_INSTALL_ARGS;
@@ -263,6 +267,27 @@ export async function getLatestOpenCodeVersion(): Promise<string | null> {
 }
 
 export async function createOpenCodeInstallPlan(): Promise<OpenCodeInstallPlanResponse> {
+  const currentAvailability = await availabilityChecker();
+  if (isOpenCodeCliInstalled(currentAvailability)) {
+    const nonce = crypto.randomBytes(24).toString("base64url");
+    const expiresAt = Date.now() + NONCE_TTL_MS;
+    nonces.set(nonce, expiresAt);
+    const packageManagers = emptyPackageManagersAvailability();
+    return {
+      ok: true,
+      controlledInstallAvailable: false,
+      packageName: OPENCODE_INSTALL_PACKAGE,
+      commandPreview: OPENCODE_INSTALL_COMMAND_PREVIEW,
+      confirmationPhrase: OPENCODE_INSTALL_CONFIRMATION_PHRASE,
+      nonce,
+      nonceExpiresAt: new Date(expiresAt).toISOString(),
+      npm: packageManagers.npm,
+      packageManagers,
+      installCandidates: [],
+      warnings: ["OpenCode CLI 已安装且可执行，无需重新安装。"],
+    };
+  }
+
   const packageManagers = await checkPackageManagersAvailability();
   const npm = packageManagers.npm;
   const installCandidates = (["npm", "pnpm", "bun"] as PackageManagerName[])
@@ -299,13 +324,30 @@ export async function installOpenCodeControlled(input: ControlledInstallRequest)
     throw new OpenCodeInstallError(400, "CONFIRMATION_REQUIRED", "必须确认固定安装命令后才能执行安装。");
   }
   consumeNonce(input.nonce);
+  const startedAt = Date.now();
+
+  const currentAvailability = await availabilityChecker();
+  if (isOpenCodeCliInstalled(currentAvailability)) {
+    return {
+      ok: true,
+      durationMs: Date.now() - startedAt,
+      commandPreview: OPENCODE_INSTALL_COMMAND_PREVIEW,
+      exitCode: 0,
+      timedOut: false,
+      stdoutTail: "",
+      stderrTail: "",
+      availabilityAfterInstall: currentAvailability,
+      packageManager: null,
+      attempts: [],
+      error: null,
+    };
+  }
 
   if (installInProgress) {
     throw new OpenCodeInstallError(409, "INSTALL_IN_PROGRESS", "已有 OpenCode 安装任务正在执行。");
   }
 
   installInProgress = true;
-  const startedAt = Date.now();
   const attempts: OpenCodeInstallAttempt[] = [];
 
   const recordAttempt = (attempt: OpenCodeInstallAttempt) => {
