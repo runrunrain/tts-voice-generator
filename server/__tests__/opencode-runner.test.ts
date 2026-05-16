@@ -23,6 +23,7 @@ import {
   detectProviderConfig,
   detectOpenCodeAuthStoreMetadata,
   checkOpenCodeAvailability,
+  runOpenCodeChat,
   runOpenCodeNormalize,
   fallbackNormalize,
   invalidateAvailabilityCache,
@@ -31,6 +32,7 @@ import {
   _resetExecRunner,
   _setSpawnRunner,
   _resetSpawnRunner,
+  _spawnOpenCodeRunForTests,
   parseOpenCodeCredentialCount,
 } from "../src/services/opencode-runner.js";
 import {
@@ -1835,8 +1837,15 @@ describe("fallbackNormalize (unchanged behavior)", () => {
 import { spawn as realSpawn, type ChildProcess } from "node:child_process";
 
 describe("spawn runner stdin/timeout/parse behavior", () => {
+  let spawnFixtureDir: string | null = null;
+
   afterEach(() => {
     _resetSpawnRunner();
+    _resetOpenCodePlatformCachesForTests();
+    if (spawnFixtureDir) {
+      cleanupDir(spawnFixtureDir);
+      spawnFixtureDir = null;
+    }
   });
 
   /**
@@ -2017,5 +2026,156 @@ describe("spawn runner stdin/timeout/parse behavior", () => {
 
     await expect(runOpenCodeNormalize(input)).rejects.toThrow("OPENCODE_RUN_FAILED");
     await expect(runOpenCodeNormalize(input)).rejects.toThrow("exited with code 1");
+  });
+
+  it("keeps runOpenCodeChat timeout as a hard absolute max", async () => {
+    const originalChatTimeout = process.env.OPENCODE_CHAT_TIMEOUT_MS;
+    process.env.OPENCODE_CHAT_TIMEOUT_MS = "5000";
+    _setNpmGlobalPrefixRunnerForTests(async () => ({ stdout: "", stderr: "" }));
+
+    let capturedOptions: Record<string, unknown> | undefined;
+    _setSpawnRunner(async (_file: string, _args: string[], options: Record<string, unknown>) => {
+      capturedOptions = options;
+      return {
+        stdout: `${JSON.stringify({ type: "text", part: { text: "chat response" } })}\n`,
+        stderr: "",
+      };
+    });
+
+    try {
+      const result = await runOpenCodeChat({
+        sessionId: crypto.randomUUID(),
+        userMessage: "hello",
+      });
+
+      expect(result.status).toBe("succeeded");
+      expect(capturedOptions?.timeout).toBe(5000);
+      expect(capturedOptions?.absoluteMaxMs).toBe(5000);
+    } finally {
+      if (originalChatTimeout === undefined) delete process.env.OPENCODE_CHAT_TIMEOUT_MS;
+      else process.env.OPENCODE_CHAT_TIMEOUT_MS = originalChatTimeout;
+    }
+  });
+
+  it("does not kill or reject when child is alive past the soft timeout", async () => {
+    const result = await _spawnOpenCodeRunForTests(process.execPath, [
+      "-e",
+      [
+        "setTimeout(() => process.stdout.write(JSON.stringify({ content: 'completed after soft timeout' })), 150);",
+        "setTimeout(() => process.exit(0), 180);",
+      ].join(""),
+    ], {
+      timeout: 30,
+      absoluteMaxMs: 1000,
+      maxOutputBytes: 1024 * 1024,
+      env: process.env,
+      draftReadyPollIntervalMs: 20,
+      absoluteKillGraceMs: 20,
+    });
+
+    expect(result.stdout).toContain("completed after soft timeout");
+    expect(result.stderr).not.toMatch(/timed out|SIGKILL|SIGTERM/i);
+  });
+
+  it("kills an active child at absolute max when no draft is available", async () => {
+    try {
+      await _spawnOpenCodeRunForTests(process.execPath, ["-e", "setInterval(() => {}, 1000);"], {
+        timeout: 30,
+        absoluteMaxMs: 120,
+        maxOutputBytes: 1024 * 1024,
+        env: process.env,
+        draftReadyPollIntervalMs: 20,
+        absoluteKillGraceMs: 20,
+      });
+      throw new Error("expected absolute timeout rejection");
+    } catch (err) {
+      const error = err as Error & { code?: string; monitor?: Record<string, unknown> };
+      expect(error.code).toBe("OPENCODE_RUN_ABSOLUTE_TIMEOUT");
+      expect(error.message).toMatch(/timed out/i);
+      expect(error.monitor).toMatchObject({
+        state: "absolute_max_exceeded",
+        killedByRunner: true,
+        killReason: "absolute_timeout",
+      });
+    }
+  });
+
+  it("resolves early when a parseable draft appears", async () => {
+    spawnFixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-draft-ready-"));
+    const draftPath = path.join(spawnFixtureDir, "draft.json");
+    fs.writeFileSync(draftPath, JSON.stringify({ lines: [], promptProfiles: [] }), "utf8");
+
+    const result = await _spawnOpenCodeRunForTests(process.execPath, ["-e", "setInterval(() => {}, 1000);"], {
+      timeout: 500,
+      absoluteMaxMs: 2000,
+      maxOutputBytes: 1024 * 1024,
+      env: process.env,
+      draftPath,
+      draftReadyPollIntervalMs: 20,
+      absoluteKillGraceMs: 20,
+    });
+
+    expect(result.stderr).toContain("OPENCODE_DRAFT_READY");
+  });
+
+  it("updates monitor diagnostics from stdout NDJSON, stderr, and draft mtime", async () => {
+    spawnFixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-monitor-diagnostics-"));
+    const draftPath = path.join(spawnFixtureDir, "draft.json");
+
+    try {
+      await _spawnOpenCodeRunForTests(process.execPath, [
+        "-e",
+        [
+          "const fs = require('node:fs');",
+          `fs.writeFileSync(${JSON.stringify(draftPath)}, '{', 'utf8');`,
+          "process.stdout.write(JSON.stringify({ type: 'step_start', timestamp: Date.now() }) + '\\n');",
+          "process.stderr.write('warning token=diagnostic-token-value\\n');",
+          "setInterval(() => {}, 1000);",
+        ].join(""),
+      ], {
+        timeout: 30,
+        absoluteMaxMs: 180,
+        maxOutputBytes: 1024 * 1024,
+        env: process.env,
+        draftPath,
+        draftReadyPollIntervalMs: 20,
+        absoluteKillGraceMs: 20,
+      });
+      throw new Error("expected absolute timeout rejection");
+    } catch (err) {
+      const error = err as Error & { code?: string; monitor?: Record<string, unknown> };
+      expect(error.code).toBe("OPENCODE_RUN_ABSOLUTE_TIMEOUT");
+      expect(error.monitor).toMatchObject({
+        lastNdjsonEventType: "step_start",
+        draftState: { exists: true, parseable: false },
+      });
+      expect(error.monitor?.lastStderrAt).toBeTypeOf("string");
+      expect(error.monitor?.lastDraftSignalAt).toBeTypeOf("string");
+      expect(String(error.monitor?.stderrTail)).not.toContain("diagnostic-token-value");
+      expect(String(error.monitor?.stderrTail)).toContain("[REDACTED]");
+    }
+  });
+
+  it("fails when child exits non-zero without a recoverable draft", async () => {
+    try {
+      await _spawnOpenCodeRunForTests(process.execPath, ["-e", "process.stderr.write('failed without draft'); process.exit(7);"], {
+        timeout: 1000,
+        absoluteMaxMs: 2000,
+        maxOutputBytes: 1024 * 1024,
+        env: process.env,
+        draftReadyPollIntervalMs: 20,
+        absoluteKillGraceMs: 20,
+      });
+      throw new Error("expected non-zero rejection");
+    } catch (err) {
+      const error = err as Error & { code?: string; monitor?: Record<string, unknown> };
+      expect(error.code).toBe("OPENCODE_RUN_EXITED_NON_ZERO");
+      expect(error.message).toContain("exited with code 7");
+      expect(error.monitor).toMatchObject({
+        state: "exited_evaluating",
+        processStatus: "exited",
+        exitCode: 7,
+      });
+    }
   });
 });

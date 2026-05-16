@@ -14,7 +14,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import crypto from "node:crypto";
 import type { VoiceLine } from "../domain/validators.js";
@@ -93,9 +93,18 @@ function spawnOpenCodeRun(
     cwd?: string;
     draftPath?: string;
     draftReadyPollIntervalMs?: number;
+    idleTimeoutMs?: number;
+    absoluteMaxMs?: number;
+    absoluteKillGraceMs?: number;
   },
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
+    const startedAtMs = Date.now();
+    const softTimeoutMs = Math.max(1, Math.floor(options.timeout));
+    const idleTimeoutMs = Math.max(1, Math.floor(options.idleTimeoutMs ?? getOpenCodeRunIdleTimeoutMs()));
+    const absoluteMaxMs = Math.max(softTimeoutMs, Math.floor(options.absoluteMaxMs ?? computeOpenCodeRunAbsoluteMaxMs(softTimeoutMs)));
+    const absoluteKillGraceMs = Math.max(1, Math.floor(options.absoluteKillGraceMs ?? 1500));
+    const pollIntervalMs = Math.max(100, Math.min(options.draftReadyPollIntervalMs ?? 1000, 1000));
     const child = spawn(command, args, {
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
@@ -114,78 +123,257 @@ function spawnOpenCodeRun(
     let settled = false;
     let earlyDraftReady = false;
     let outputBytes = 0;
-    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    let monitorTimer: ReturnType<typeof setInterval> | null = null;
     let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+    let state: OpenCodeRunMonitorSnapshot["state"] = "running_active";
+    let lastProgressAtMs = startedAtMs;
+    let lastSignalKind: OpenCodeRunMonitorSnapshot["lastSignalKind"] = "start";
+    let lastStdoutAtMs: number | undefined;
+    let lastStderrAtMs: number | undefined;
+    let lastNdjsonEventAtMs: number | undefined;
+    let lastNdjsonEventType: string | undefined;
+    let lastDraftSignalAtMs: number | undefined;
+    let lastDraftMtimeMs: number | undefined;
+    let lastDraftSizeBytes: number | undefined;
+    let softTimeoutExceededAtMs: number | undefined;
+    let killedByRunner = false;
+    let killReason: OpenCodeRunMonitorSnapshot["killReason"];
+    let closeCode: number | null | undefined;
+    let closeSignal: NodeJS.Signals | null | undefined;
+    let stdoutLineRemainder = "";
+
+    const toIso = (value: number | undefined): string | undefined => value === undefined ? undefined : new Date(value).toISOString();
+
+    const inspectDraft = (): OpenCodeRunMonitorSnapshot["draftState"] => {
+      const draftPath = options.draftPath;
+      if (!draftPath || !existsSync(draftPath)) {
+        return { path: draftPath, exists: false, parseable: false };
+      }
+      let mtimeMs: number | undefined;
+      let sizeBytes: number | undefined;
+      try {
+        const stat = statSync(draftPath);
+        mtimeMs = stat.mtimeMs;
+        sizeBytes = stat.size;
+        if (mtimeMs !== lastDraftMtimeMs || sizeBytes !== lastDraftSizeBytes) {
+          lastDraftMtimeMs = mtimeMs;
+          lastDraftSizeBytes = sizeBytes;
+          lastDraftSignalAtMs = Date.now();
+          lastProgressAtMs = lastDraftSignalAtMs;
+          lastSignalKind = "draft-mtime";
+          if (state === "running_quiet") state = "running_active";
+        }
+      } catch {
+        return { path: draftPath, exists: true, parseable: false };
+      }
+      try {
+        const content = readFileSync(draftPath, "utf8").trim();
+        if (!content) return { path: draftPath, exists: true, parseable: false, mtimeMs, sizeBytes };
+        const parsed = JSON.parse(content);
+        return { path: draftPath, exists: true, parseable: typeof parsed === "object" && parsed !== null, mtimeMs, sizeBytes };
+      } catch {
+        return { path: draftPath, exists: true, parseable: false, mtimeMs, sizeBytes };
+      }
+    };
+
+    const isChildRunning = (): boolean => child.exitCode === null && child.signalCode === null && !child.killed;
+
+    const buildMonitorSnapshot = (overrideState?: OpenCodeRunMonitorSnapshot["state"]): OpenCodeRunMonitorSnapshot => {
+      const now = Date.now();
+      const childRunning = isChildRunning();
+      const processStatus: OpenCodeRunMonitorSnapshot["processStatus"] = killedByRunner
+        ? "killed"
+        : closeCode !== undefined || closeSignal !== undefined
+          ? "exited"
+          : childRunning
+            ? "running"
+            : "exited";
+      return {
+        state: overrideState ?? state,
+        startedAt: new Date(startedAtMs).toISOString(),
+        elapsedMs: now - startedAtMs,
+        softTimeoutMs,
+        idleTimeoutMs,
+        absoluteMaxMs,
+        softTimeoutExceededAt: toIso(softTimeoutExceededAtMs),
+        processStatus,
+        exitCode: closeCode ?? child.exitCode,
+        signal: closeSignal ?? child.signalCode,
+        killedByRunner,
+        killReason,
+        lastProgressAt: new Date(lastProgressAtMs).toISOString(),
+        lastSignalKind,
+        lastStdoutAt: toIso(lastStdoutAtMs),
+        lastStderrAt: toIso(lastStderrAtMs),
+        lastNdjsonEventAt: toIso(lastNdjsonEventAtMs),
+        lastNdjsonEventType,
+        lastDraftSignalAt: toIso(lastDraftSignalAtMs),
+        draftState: inspectDraft(),
+        outputBytes,
+        stdoutTail: sanitizeError(stdout.slice(-1000)),
+        stderrTail: sanitizeError(stderr.slice(-1000)),
+      };
+    };
+
+    const makeMonitorError = (
+      code: OpenCodeRunMonitorErrorFields["code"],
+      message: string,
+      snapshotState: OpenCodeRunMonitorSnapshot["state"],
+      retryable: boolean,
+      recoverableDraftPossible: boolean,
+      httpStatusHint: OpenCodeRunMonitorErrorFields["httpStatusHint"],
+    ): Error & OpenCodeRunMonitorErrorFields => {
+      const error = new Error(message) as Error & OpenCodeRunMonitorErrorFields;
+      error.code = code;
+      error.retryable = retryable;
+      error.recoverableDraftPossible = recoverableDraftPossible;
+      error.httpStatusHint = httpStatusHint;
+      error.monitor = buildMonitorSnapshot(snapshotState);
+      return error;
+    };
+
+    const cleanupNonKillTimers = () => {
+      if (draftReadyTimer) clearInterval(draftReadyTimer);
+      if (monitorTimer) clearInterval(monitorTimer);
+    };
 
     const cleanupTimers = () => {
-      if (draftReadyTimer) clearInterval(draftReadyTimer);
-      if (timeoutTimer) clearTimeout(timeoutTimer);
+      cleanupNonKillTimers();
       if (forceKillTimer) clearTimeout(forceKillTimer);
     };
 
-    timeoutTimer = setTimeout(() => {
+    const killFor = (reason: NonNullable<OpenCodeRunMonitorSnapshot["killReason"]>, signal: NodeJS.Signals = "SIGTERM") => {
+      killedByRunner = true;
+      killReason = reason;
+      child.kill(signal);
+      if (signal !== "SIGKILL") {
+        forceKillTimer = setTimeout(() => child.kill("SIGKILL"), absoluteKillGraceMs);
+      }
+    };
+
+    const checkMonitor = () => {
       if (settled) return;
       if (isDraftReady()) {
         resolveAfterDraftReady();
         return;
       }
-      settled = true;
-      child.kill("SIGTERM");
-      forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 1500);
-      reject(new Error(`opencode run timed out after ${options.timeout}ms`));
-    }, options.timeout);
+      const now = Date.now();
+      const elapsedMs = now - startedAtMs;
+      if (elapsedMs >= absoluteMaxMs) {
+        state = "absolute_max_exceeded";
+        settled = true;
+        killFor("absolute_timeout");
+        cleanupNonKillTimers();
+        reject(makeMonitorError(
+          "OPENCODE_RUN_ABSOLUTE_TIMEOUT",
+          `opencode run timed out after ${absoluteMaxMs}ms absolute maximum (soft budget ${softTimeoutMs}ms exceeded while process was ${isChildRunning() ? "running" : "not running"})`,
+          "absolute_max_exceeded",
+          true,
+          true,
+          504,
+        ));
+        return;
+      }
+      if (elapsedMs >= softTimeoutMs && isChildRunning()) {
+        if (softTimeoutExceededAtMs === undefined) softTimeoutExceededAtMs = now;
+        state = "soft_budget_exceeded_running";
+        return;
+      }
+      if (now - lastProgressAtMs >= idleTimeoutMs && isChildRunning()) {
+        state = "running_quiet";
+      }
+    };
 
     const isDraftReady = (): boolean => {
-      const draftPath = options.draftPath;
-      if (!draftPath || !existsSync(draftPath)) return false;
-      try {
-        const content = readFileSync(draftPath, "utf8").trim();
-        if (!content) return false;
-        const parsed = JSON.parse(content);
-        return typeof parsed === "object" && parsed !== null;
-      } catch {
-        return false;
-      }
+      return inspectDraft().parseable;
     };
 
     const resolveAfterDraftReady = () => {
       if (settled) return;
       settled = true;
       earlyDraftReady = true;
-      if (draftReadyTimer) clearInterval(draftReadyTimer);
+      state = "draft_ready";
+      lastProgressAtMs = Date.now();
+      lastSignalKind = "draft-ready";
+      cleanupNonKillTimers();
       stderr += `${stderr ? "\n" : ""}OPENCODE_DRAFT_READY: parseable JSON draft detected at ${options.draftPath}; terminated opencode run early.`;
-      child.kill("SIGTERM");
-      forceKillTimer = setTimeout(() => {
-        child.kill("SIGKILL");
-      }, 1500);
+      killFor("draft_ready");
     };
 
     const draftReadyTimer = options.draftPath
       ? setInterval(() => {
           if (isDraftReady()) resolveAfterDraftReady();
-        }, Math.max(100, options.draftReadyPollIntervalMs ?? 1000))
+        }, pollIntervalMs)
       : null;
+
+    monitorTimer = setInterval(checkMonitor, pollIntervalMs);
+
+    const observeNdjsonDiagnostics = (chunkText: string) => {
+      stdoutLineRemainder += chunkText;
+      const lines = stdoutLineRemainder.split(/\r?\n/);
+      stdoutLineRemainder = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+          if (typeof parsed.type === "string") {
+            lastNdjsonEventAtMs = Date.now();
+            lastNdjsonEventType = parsed.type.slice(0, 80);
+            lastSignalKind = "ndjson";
+            lastProgressAtMs = lastNdjsonEventAtMs;
+          }
+        } catch {
+          // Non-NDJSON stdout is still useful output but not a structured event.
+        }
+      }
+    };
 
     child.stdout.on("data", (chunk: Buffer) => {
       if (settled && !earlyDraftReady) return;
       outputBytes += chunk.length;
       if (outputBytes > options.maxOutputBytes) {
         if (settled) return;
+        state = "output_limit_exceeded";
         settled = true;
-        child.kill("SIGKILL");
+        killFor("output_limit", "SIGKILL");
         cleanupTimers();
-        reject(new Error(`opencode run output exceeded ${options.maxOutputBytes} bytes`));
+        reject(makeMonitorError(
+          "OPENCODE_RUN_OUTPUT_LIMIT",
+          `opencode run output exceeded ${options.maxOutputBytes} bytes`,
+          "output_limit_exceeded",
+          false,
+          false,
+          502,
+        ));
         return;
       }
-      stdout += chunk.toString("utf8");
+      const text = chunk.toString("utf8");
+      stdout += text;
+      if (chunk.length > 0) {
+        lastStdoutAtMs = Date.now();
+        lastProgressAtMs = lastStdoutAtMs;
+        lastSignalKind = "stdout";
+        if (state === "running_quiet") state = "running_active";
+        observeNdjsonDiagnostics(text);
+      }
     });
 
     child.stderr.on("data", (chunk: Buffer) => {
       if (settled && !earlyDraftReady) return;
-      stderr += chunk.toString("utf8");
+      const text = chunk.toString("utf8");
+      stderr += text;
+      if (text.trim().length > 0) {
+        lastStderrAtMs = Date.now();
+        lastProgressAtMs = lastStderrAtMs;
+        lastSignalKind = "stderr";
+        if (state === "running_quiet") state = "running_active";
+      }
     });
 
-    child.on("close", (code: number | null) => {
+    child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      closeCode = code;
+      closeSignal = signal;
       cleanupTimers();
       if (earlyDraftReady) {
         resolve({ stdout, stderr });
@@ -194,7 +382,15 @@ function spawnOpenCodeRun(
       if (settled) return; // Already rejected via timeout or output limit
       settled = true;
       if (code !== 0) {
-        reject(new Error(`opencode run exited with code ${code}: ${sanitizeError(stderr.slice(0, 200))}`));
+        state = "exited_evaluating";
+        reject(makeMonitorError(
+          "OPENCODE_RUN_EXITED_NON_ZERO",
+          `opencode run exited with code ${code}: ${sanitizeError(stderr.slice(0, 200))}`,
+          "exited_evaluating",
+          true,
+          Boolean(options.draftPath),
+          502,
+        ));
         return;
       }
       resolve({ stdout, stderr });
@@ -204,9 +400,70 @@ function spawnOpenCodeRun(
       cleanupTimers();
       if (settled) return;
       settled = true;
-      reject(err);
+      state = "exited_evaluating";
+      reject(makeMonitorError(
+        "OPENCODE_RUN_SPAWN_ERROR",
+        sanitizeError(err),
+        "exited_evaluating",
+        true,
+        false,
+        502,
+      ));
     });
   });
+}
+
+export interface OpenCodeRunMonitorSnapshot {
+  state: "starting" | "running_active" | "running_quiet" | "soft_budget_exceeded_running" | "draft_ready" | "exited_evaluating" | "absolute_max_exceeded" | "output_limit_exceeded";
+  startedAt: string;
+  elapsedMs: number;
+  softTimeoutMs: number;
+  idleTimeoutMs: number;
+  absoluteMaxMs: number;
+  softTimeoutExceededAt?: string;
+  processStatus: "starting" | "running" | "exited" | "killed" | "error";
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
+  killedByRunner: boolean;
+  killReason?: "draft_ready" | "absolute_timeout" | "output_limit";
+  lastProgressAt: string;
+  lastSignalKind: "start" | "stdout" | "stderr" | "ndjson" | "draft-mtime" | "draft-ready";
+  lastStdoutAt?: string;
+  lastStderrAt?: string;
+  lastNdjsonEventAt?: string;
+  lastNdjsonEventType?: string;
+  lastDraftSignalAt?: string;
+  draftState: {
+    path?: string;
+    exists: boolean;
+    parseable: boolean;
+    mtimeMs?: number;
+    sizeBytes?: number;
+  };
+  outputBytes: number;
+  stdoutTail?: string;
+  stderrTail?: string;
+}
+
+export interface OpenCodeRunMonitorErrorFields {
+  code:
+    | "OPENCODE_RUN_ABSOLUTE_TIMEOUT"
+    | "OPENCODE_RUN_EXITED_NON_ZERO"
+    | "OPENCODE_RUN_EMPTY_DRAFT"
+    | "OPENCODE_RUN_OUTPUT_LIMIT"
+    | "OPENCODE_RUN_SPAWN_ERROR";
+  retryable: boolean;
+  recoverableDraftPossible: boolean;
+  httpStatusHint: 502 | 504;
+  monitor: OpenCodeRunMonitorSnapshot;
+}
+
+export function _spawnOpenCodeRunForTests(
+  command: string,
+  args: string[],
+  options: Parameters<typeof spawnOpenCodeRun>[2],
+): Promise<{ stdout: string; stderr: string }> {
+  return spawnOpenCodeRun(command, args, options);
 }
 
 /** Type signature for the spawn runner (matches execRunner for easy mocking) */
@@ -224,6 +481,9 @@ let _spawnRunner: SpawnRunner = async (file, args, options) => {
     cwd: typeof options.cwd === "string" ? options.cwd : undefined,
     draftPath: typeof options.draftPath === "string" ? options.draftPath : undefined,
     draftReadyPollIntervalMs: typeof options.draftReadyPollIntervalMs === "number" ? options.draftReadyPollIntervalMs : undefined,
+    idleTimeoutMs: typeof options.idleTimeoutMs === "number" ? options.idleTimeoutMs : undefined,
+    absoluteMaxMs: typeof options.absoluteMaxMs === "number" ? options.absoluteMaxMs : undefined,
+    absoluteKillGraceMs: typeof options.absoluteKillGraceMs === "number" ? options.absoluteKillGraceMs : undefined,
   });
 };
 
@@ -246,6 +506,9 @@ export function _resetSpawnRunner(): void {
       cwd: typeof options.cwd === "string" ? options.cwd : undefined,
       draftPath: typeof options.draftPath === "string" ? options.draftPath : undefined,
       draftReadyPollIntervalMs: typeof options.draftReadyPollIntervalMs === "number" ? options.draftReadyPollIntervalMs : undefined,
+      idleTimeoutMs: typeof options.idleTimeoutMs === "number" ? options.idleTimeoutMs : undefined,
+      absoluteMaxMs: typeof options.absoluteMaxMs === "number" ? options.absoluteMaxMs : undefined,
+      absoluteKillGraceMs: typeof options.absoluteKillGraceMs === "number" ? options.absoluteKillGraceMs : undefined,
     });
   };
 }
@@ -431,6 +694,8 @@ const OPENCODE_NORMALIZE_TIMEOUT_MS_MIN = 30_000;
 const OPENCODE_NORMALIZE_TIMEOUT_MS_MAX = 300_000;
 /** Quality-priority bundle normalize ceiling; intentionally higher than 300s. */
 const OPENCODE_NORMALIZE_QUALITY_PRIORITY_TIMEOUT_MS_MAX = 900_000;
+const OPENCODE_NORMALIZE_IDLE_TIMEOUT_MS_DEFAULT = 180_000;
+const OPENCODE_NORMALIZE_ABSOLUTE_CAP_MS_DEFAULT = 1_800_000;
 
 /** Maximum stdout size from opencode run (1MB) */
 const OPENCODE_MAX_OUTPUT_BYTES = 1_024 * 1_024;
@@ -462,6 +727,30 @@ function getQualityPriorityMaxTimeout(): number {
     60_000,
     OPENCODE_NORMALIZE_QUALITY_PRIORITY_TIMEOUT_MS_MAX,
   );
+}
+
+function getOpenCodeRunIdleTimeoutMs(): number {
+  return parseEnvInt(
+    process.env.OPENCODE_NORMALIZE_IDLE_TIMEOUT_MS,
+    OPENCODE_NORMALIZE_IDLE_TIMEOUT_MS_DEFAULT,
+    120_000,
+    600_000,
+  );
+}
+
+function getOpenCodeRunAbsoluteCapMs(): number {
+  return parseEnvInt(
+    process.env.OPENCODE_NORMALIZE_ABSOLUTE_CAP_MS,
+    OPENCODE_NORMALIZE_ABSOLUTE_CAP_MS_DEFAULT,
+    300_000,
+    3_600_000,
+  );
+}
+
+function computeOpenCodeRunAbsoluteMaxMs(softTimeoutMs: number): number {
+  const safeSoftTimeoutMs = Math.max(OPENCODE_NORMALIZE_TIMEOUT_MS_MIN, Math.floor(softTimeoutMs));
+  const derived = Math.max(safeSoftTimeoutMs + 300_000, Math.ceil(safeSoftTimeoutMs * 1.5));
+  return Math.min(derived, getOpenCodeRunAbsoluteCapMs());
 }
 
 function normalizeNonNegativeInteger(value: number | undefined): number {
@@ -674,6 +963,7 @@ export async function runOpenCodeChat(input: OpenCodeChatRunInput): Promise<Open
       [...opencodeProcess.argsPrefix, "run", "--format", "json", "--dir", cwd, prompt],
       {
         timeout: timeoutMs,
+        absoluteMaxMs: timeoutMs,
         windowsHide: true,
         maxBuffer: OPENCODE_MAX_OUTPUT_BYTES,
         env: opencodeProcess.env,
@@ -1849,6 +2139,8 @@ export async function runOpenCodeNormalize(
         windowsHide: true,
         maxBuffer: OPENCODE_MAX_OUTPUT_BYTES,
         env: opencodeProcess.env,
+        idleTimeoutMs: getOpenCodeRunIdleTimeoutMs(),
+        absoluteMaxMs: computeOpenCodeRunAbsoluteMaxMs(timeoutMs),
       },
     );
 
@@ -2146,6 +2438,8 @@ export async function runBundleOpenCodeNormalize(
         env: opencodeProcess.env,
         draftPath: input.draftPath,
         draftReadyPollIntervalMs: 1000,
+        idleTimeoutMs: getOpenCodeRunIdleTimeoutMs(),
+        absoluteMaxMs: computeOpenCodeRunAbsoluteMaxMs(timeoutMs),
       },
     );
 
@@ -2219,7 +2513,16 @@ export async function runBundleOpenCodeNormalize(
     };
   } catch (err) {
     const safeMessage = sanitizeError(err);
-    throw new Error(`OPENCODE_BUNDLE_RUN_FAILED: ${safeMessage}`);
+    const wrapped = new Error(`OPENCODE_BUNDLE_RUN_FAILED: ${safeMessage}`) as Error & Partial<OpenCodeRunMonitorErrorFields> & { cause?: unknown };
+    wrapped.cause = err;
+    if (isRecord(err)) {
+      if (typeof err.code === "string") wrapped.code = err.code as OpenCodeRunMonitorErrorFields["code"];
+      if (err.httpStatusHint === 502 || err.httpStatusHint === 504) wrapped.httpStatusHint = err.httpStatusHint;
+      if (typeof err.retryable === "boolean") wrapped.retryable = err.retryable;
+      if (typeof err.recoverableDraftPossible === "boolean") wrapped.recoverableDraftPossible = err.recoverableDraftPossible;
+      if (isRecord(err.monitor)) wrapped.monitor = err.monitor as unknown as OpenCodeRunMonitorSnapshot;
+    }
+    throw wrapped;
   }
 }
 

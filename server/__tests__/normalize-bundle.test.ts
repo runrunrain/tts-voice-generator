@@ -915,6 +915,47 @@ describe("runBundleOpenCodeNormalize", () => {
     ).rejects.toThrow(/OPENCODE_BUNDLE_RUN_FAILED/);
   });
 
+  it("preserves structured runner fields when wrapping opencode failure", async () => {
+    const monitor = {
+      state: "absolute_max_exceeded",
+      processStatus: "killed",
+      killReason: "absolute_timeout",
+      softTimeoutMs: 123_456,
+      absoluteMaxMs: 423_456,
+      draftState: { exists: false, parseable: false },
+    };
+    _setSpawnRunner(async () => {
+      const error = new Error("opencode run timed out after 423456ms") as Error & Record<string, unknown>;
+      error.code = "OPENCODE_RUN_ABSOLUTE_TIMEOUT";
+      error.httpStatusHint = 504;
+      error.retryable = true;
+      error.recoverableDraftPossible = true;
+      error.monitor = monitor;
+      throw error;
+    });
+
+    const runId = crypto.randomUUID();
+    const paths = makeRunPaths(TASK_ID, runId);
+
+    try {
+      await runBundleOpenCodeNormalize({
+        normalizeRequestPath: paths.requestPath,
+        schemaPath: paths.schemaPath,
+        draftPath: paths.draftPath,
+      });
+      throw new Error("expected bundle wrapper rejection");
+    } catch (err) {
+      const error = err as Error & Record<string, unknown>;
+      expect(error.message).toMatch(/OPENCODE_BUNDLE_RUN_FAILED/);
+      expect(error.code).toBe("OPENCODE_RUN_ABSOLUTE_TIMEOUT");
+      expect(error.httpStatusHint).toBe(504);
+      expect(error.retryable).toBe(true);
+      expect(error.recoverableDraftPossible).toBe(true);
+      expect(error.monitor).toEqual(monitor);
+      expect(error.cause).toBeInstanceOf(Error);
+    }
+  });
+
   it("prompt does not contain document content or API keys", async () => {
     let capturedPrompt = "";
     _setSpawnRunner(async (file, args, options) => {
@@ -991,6 +1032,9 @@ describe("runBundleOpenCodeNormalize", () => {
     expect(capturedOptions.timeout).toBe(123_456);
     expect(capturedOptions.draftPath).toBe(paths.draftPath);
     expect(capturedOptions.draftReadyPollIntervalMs).toBeTypeOf("number");
+    expect(capturedOptions.idleTimeoutMs).toBeTypeOf("number");
+    expect(capturedOptions.absoluteMaxMs).toBeTypeOf("number");
+    expect(capturedOptions.absoluteMaxMs as number).toBeGreaterThan(123_456);
   });
 
   it("prompt is NOT absorbed into --file array (B-MAJOR-01 regression guard)", async () => {
