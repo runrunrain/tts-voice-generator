@@ -1,10 +1,50 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { Search, Filter, Play, Loader2, AlertTriangle, AlertCircle, RefreshCw } from "lucide-react";
 import { useAppState } from "../state/AppContext";
-import type { VoiceStatus } from "../types";
+import type { VoiceAuditionResult, VoiceStatus } from "../types";
 import { formatVoiceCompactLabel, getVoiceDisplayMeta, voiceMatchesQuery } from "../utils/voiceDisplay";
 
 type TabFilter = "all" | "verified" | "candidate" | "custom" | "failed";
+type AuditionPhase = "idle" | "loading" | "playing" | "success" | "error";
+
+interface AuditionUiState {
+  phase: AuditionPhase;
+  message?: string;
+  code?: string;
+  latencyMs?: number;
+}
+
+function statusDotClass(status: VoiceStatus) {
+  switch (status) {
+    case "success": return "bg-success";
+    case "warning": return "bg-warning";
+    case "error": return "bg-error";
+    case "pending":
+    default: return "bg-text-tertiary/60";
+  }
+}
+
+function statusLabel(status: VoiceStatus) {
+  switch (status) {
+    case "success": return "已验证";
+    case "warning": return "需关注";
+    case "error": return "验证失败";
+    case "pending":
+    default: return "未验证";
+  }
+}
+
+function formatAuditionFailure(error: VoiceAuditionResult["error"] | undefined) {
+  const code = error?.code ?? "UNKNOWN";
+  if (code === "MISSING_API_KEY") return "未配置 OpenRouter API Key，请前往设置页配置后重试。";
+  if (code === "INVALID_API_KEY" || code === "FORBIDDEN") return "OpenRouter API Key 无效或无权限，请检查设置。";
+  if (code === "INSUFFICIENT_CREDITS") return "OpenRouter 额度不足，无法生成试听音频。";
+  if (code === "RATE_LIMITED") return "OpenRouter 请求过于频繁，请稍后重试。";
+  if (code === "NETWORK_ERROR") return "无法连接后端服务，请检查网络或服务状态。";
+  if (code === "REQUEST_TIMEOUT") return "上游试听请求超时，请稍后重试。";
+  if (error?.category === "upstream") return `上游试听失败：${error.message}`;
+  return error?.message || "试听失败，请稍后重试。";
+}
 
 export function VoicesPage() {
   const { voices, adapter, voicesLoading, voicesError, refreshVoices, voicesLoaded, voiceStats } = useAppState();
@@ -14,6 +54,54 @@ export function VoicesPage() {
   const [probeStatuses, setProbeStatuses] = useState<Record<string, "idle" | "loading" | "success" | "error">>({});
   const [probeErrors, setProbeErrors] = useState<Record<string, string | null>>({});
   const [probeMeta, setProbeMeta] = useState<Record<string, { cached?: boolean; cacheTtlSeconds?: number | null; lastVerified?: string | null }>>({});
+  const [auditionStates, setAuditionStates] = useState<Record<string, AuditionUiState>>({});
+  const auditionStatesRef = useRef<Record<string, AuditionUiState>>({});
+  const auditionLoadingRef = useRef<Set<string>>(new Set());
+  const auditionResetTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const activeAuditionRef = useRef<{ voiceName: string; cleanup: () => void } | null>(null);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    auditionStatesRef.current = auditionStates;
+  }, [auditionStates]);
+
+  const clearAuditionResetTimer = useCallback((voiceName: string) => {
+    const timer = auditionResetTimersRef.current[voiceName];
+    if (timer) {
+      clearTimeout(timer);
+      delete auditionResetTimersRef.current[voiceName];
+    }
+  }, []);
+
+  const scheduleAuditionReset = useCallback((voiceName: string) => {
+    clearAuditionResetTimer(voiceName);
+    auditionResetTimersRef.current[voiceName] = setTimeout(() => {
+      setAuditionStates((prev) => ({ ...prev, [voiceName]: { phase: "idle" } }));
+      delete auditionResetTimersRef.current[voiceName];
+    }, 5000);
+  }, [clearAuditionResetTimer]);
+
+  const cleanupActiveAudition = useCallback((nextState?: AuditionUiState) => {
+    const active = activeAuditionRef.current;
+    if (!active) return;
+    active.cleanup();
+    activeAuditionRef.current = null;
+    if (nextState) {
+      setAuditionStates((prev) => ({ ...prev, [active.voiceName]: nextState }));
+      scheduleAuditionReset(active.voiceName);
+    }
+  }, [scheduleAuditionReset]);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      cleanupActiveAudition();
+      Object.values(auditionResetTimersRef.current).forEach(clearTimeout);
+      auditionResetTimersRef.current = {};
+      auditionLoadingRef.current.clear();
+    };
+  }, [cleanupActiveAudition]);
 
   // Filter voices
   const filteredVoices = voices.filter((v) => {
@@ -41,18 +129,137 @@ export function VoicesPage() {
   const handleProbe = useCallback(async (voiceName: string, force = false) => {
     setProbeStatuses((prev) => ({ ...prev, [voiceName]: "loading" }));
     setProbeErrors((prev) => ({ ...prev, [voiceName]: null }));
-    const result = await adapter.probeVoice(voiceName, force || undefined);
-    setProbeMeta((prev) => ({ ...prev, [voiceName]: { cached: result.cached, cacheTtlSeconds: result.cacheTtlSeconds, lastVerified: result.lastVerified } }));
-    if (result.status === "success") {
-      setProbeStatuses((prev) => ({ ...prev, [voiceName]: "success" }));
-    } else {
+    try {
+      const result = await adapter.probeVoice(voiceName, force || undefined);
+      setProbeMeta((prev) => ({ ...prev, [voiceName]: { cached: result.cached, cacheTtlSeconds: result.cacheTtlSeconds, lastVerified: result.lastVerified } }));
+      if (result.status === "success") {
+        setProbeStatuses((prev) => ({ ...prev, [voiceName]: "success" }));
+      } else {
+        setProbeStatuses((prev) => ({ ...prev, [voiceName]: "error" }));
+        setProbeErrors((prev) => ({ ...prev, [voiceName]: result.error || null }));
+      }
+      refreshVoices();
+    } catch {
       setProbeStatuses((prev) => ({ ...prev, [voiceName]: "error" }));
-      setProbeErrors((prev) => ({ ...prev, [voiceName]: result.error || null }));
+      setProbeErrors((prev) => ({ ...prev, [voiceName]: "NETWORK_ERROR" }));
     }
     setTimeout(() => {
       setProbeStatuses((prev) => ({ ...prev, [voiceName]: "idle" }));
     }, 5000);
-  }, [adapter]);
+  }, [adapter, refreshVoices]);
+
+  const playAuditionUrl = useCallback(async (voiceName: string, objectUrl: string, latencyMs?: number) => {
+    cleanupActiveAudition({ phase: "success", message: "已切换到新的试听音色" });
+
+    const audio = new Audio(objectUrl);
+    let cleaned = false;
+
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      audio.removeEventListener("ended", handleEnded);
+      audio.removeEventListener("error", handleError);
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+      URL.revokeObjectURL(objectUrl);
+    };
+
+    const clearActiveIfCurrent = () => {
+      if (activeAuditionRef.current?.voiceName === voiceName) activeAuditionRef.current = null;
+    };
+
+    const handleEnded = () => {
+      cleanup();
+      clearActiveIfCurrent();
+      setAuditionStates((prev) => ({ ...prev, [voiceName]: { phase: "success", message: "试听完成", latencyMs } }));
+      scheduleAuditionReset(voiceName);
+    };
+
+    const handleError = () => {
+      cleanup();
+      clearActiveIfCurrent();
+      setAuditionStates((prev) => ({ ...prev, [voiceName]: { phase: "error", code: "PLAYBACK_ERROR", message: "音频播放失败，请重试。" } }));
+      scheduleAuditionReset(voiceName);
+    };
+
+    audio.addEventListener("ended", handleEnded, { once: true });
+    audio.addEventListener("error", handleError, { once: true });
+    activeAuditionRef.current = { voiceName, cleanup };
+    setAuditionStates((prev) => ({ ...prev, [voiceName]: { phase: "playing", message: "正在播放试听", latencyMs } }));
+
+    try {
+      await audio.play();
+    } catch {
+      cleanup();
+      clearActiveIfCurrent();
+      if (!isMountedRef.current) return;
+      setAuditionStates((prev) => ({ ...prev, [voiceName]: { phase: "error", code: "PLAYBACK_BLOCKED", message: "浏览器阻止了音频播放，请再次点击试听。" } }));
+      scheduleAuditionReset(voiceName);
+    }
+  }, [cleanupActiveAudition, scheduleAuditionReset]);
+
+  const handleAudition = useCallback(async (voiceName: string) => {
+    const currentState = auditionStatesRef.current[voiceName];
+    if (currentState?.phase === "playing" && activeAuditionRef.current?.voiceName === voiceName) {
+      cleanupActiveAudition({ phase: "success", message: "试听已停止" });
+      return;
+    }
+    if (auditionLoadingRef.current.has(voiceName)) return;
+
+    if (!adapter.auditionVoice) {
+      setAuditionStates((prev) => ({ ...prev, [voiceName]: { phase: "error", code: "UNSUPPORTED", message: "当前适配器不支持音色试听。" } }));
+      scheduleAuditionReset(voiceName);
+      return;
+    }
+
+    auditionLoadingRef.current.add(voiceName);
+    clearAuditionResetTimer(voiceName);
+    setAuditionStates((prev) => ({ ...prev, [voiceName]: { phase: "loading", message: "正在生成试听音频" } }));
+
+    try {
+      const result = await adapter.auditionVoice(voiceName);
+      if (!isMountedRef.current) {
+        if (result.ok && result.objectUrl) URL.revokeObjectURL(result.objectUrl);
+        return;
+      }
+      if (!result.ok) {
+        setAuditionStates((prev) => ({
+          ...prev,
+          [voiceName]: {
+            phase: "error",
+            code: result.error?.code ?? "AUDITION_ERROR",
+            message: formatAuditionFailure(result.error),
+            latencyMs: result.latencyMs,
+          },
+        }));
+        scheduleAuditionReset(voiceName);
+        return;
+      }
+
+      const objectUrl = result.objectUrl ?? (result.audioBlob ? URL.createObjectURL(result.audioBlob) : undefined);
+      if (!objectUrl) {
+        setAuditionStates((prev) => ({ ...prev, [voiceName]: { phase: "error", code: "NO_AUDIO_URL", message: "后端已返回音频，但浏览器无法创建试听链接。", latencyMs: result.latencyMs } }));
+        scheduleAuditionReset(voiceName);
+        return;
+      }
+
+      await playAuditionUrl(voiceName, objectUrl, result.latencyMs);
+    } catch (err) {
+      if (!isMountedRef.current) return;
+      setAuditionStates((prev) => ({
+        ...prev,
+        [voiceName]: {
+          phase: "error",
+          code: "UNEXPECTED",
+          message: err instanceof Error ? err.message : "试听过程中发生未知错误。",
+        },
+      }));
+      scheduleAuditionReset(voiceName);
+    } finally {
+      auditionLoadingRef.current.delete(voiceName);
+    }
+  }, [adapter, cleanupActiveAudition, clearAuditionResetTimer, playAuditionUrl, scheduleAuditionReset]);
 
   return (
     <div className="flex flex-col h-full">
@@ -111,10 +318,10 @@ export function VoicesPage() {
               <span className="text-text-secondary">失败 <span className="text-error font-semibold">{voiceStats.failed}</span></span>
             )}
             {voiceStats.unknown > 0 && (
-              <span className="text-text-secondary">未知 <span className="text-warning font-semibold">{voiceStats.unknown}</span></span>
+              <span className="text-text-secondary">未知 <span className="text-text-tertiary font-semibold">{voiceStats.unknown}</span></span>
             )}
             {voiceStats.neverVerified > 0 && (
-              <span className="text-text-secondary">未验证 <span className="text-warning font-semibold">{voiceStats.neverVerified}</span></span>
+              <span className="text-text-secondary">未验证 <span className="text-text-tertiary font-semibold">{voiceStats.neverVerified}</span></span>
             )}
             {voiceStats.staleVerified > 0 && (
               <span className="text-text-secondary">过期 <span className="text-warning font-semibold">{voiceStats.staleVerified}</span></span>
@@ -201,6 +408,9 @@ export function VoicesPage() {
               <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">
             {filteredVoices.map((v) => {
               const displayMeta = getVoiceDisplayMeta(v.name);
+              const auditionState = auditionStates[v.name] ?? { phase: "idle" };
+              const isAuditionLoading = auditionState.phase === "loading";
+              const isAuditionPlaying = auditionState.phase === "playing";
               return <div
                  key={v.name}
                  className={`p-3 rounded-lg border cursor-pointer transition-colors ${
@@ -212,15 +422,21 @@ export function VoicesPage() {
               >
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
-                    <div className={`w-2 h-2 rounded-full ${
-                      v.status === "success" ? "bg-success" : v.status === "warning" ? "bg-warning" : "bg-error"
-                    }`} />
+                    <div className={`w-2 h-2 rounded-full ${statusDotClass(v.status)}`} />
                     <span className="font-semibold text-text-primary">{formatVoiceCompactLabel(v.name)}</span>
                     {v.isDefault && (
                       <span className="px-1.5 py-0.5 rounded text-[10px] bg-bg-sunken text-text-secondary border border-border-subtle">
                         默认
                       </span>
                     )}
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] border ${
+                      v.status === "success" ? "bg-success-muted/20 text-success border-success/20"
+                        : v.status === "warning" ? "bg-warning-muted/20 text-warning border-warning/20"
+                          : v.status === "error" ? "bg-error-muted/20 text-error border-error/20"
+                            : "bg-bg-sunken text-text-tertiary border-border-subtle"
+                    }`}>
+                      {statusLabel(v.status)}
+                    </span>
                   </div>
                   {selectedVoice === v.name && <span className="text-[10px] text-accent">当前选中</span>}
                 </div>
@@ -272,14 +488,42 @@ export function VoicesPage() {
                       <RefreshCw size={11} />
                     </button>
                     <button
-                      className="flex items-center gap-1 text-xs font-medium text-accent hover:text-accent-hover transition-colors"
-                      onClick={(e) => { e.stopPropagation(); }}
+                      className={`flex items-center gap-1 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                        auditionState.phase === "error" ? "text-error hover:text-error" : isAuditionPlaying ? "text-success hover:text-success" : "text-accent hover:text-accent-hover"
+                      }`}
+                      onClick={(e) => { e.stopPropagation(); void handleAudition(v.name); }}
+                      disabled={isAuditionLoading}
+                      title={isAuditionLoading ? "正在生成试听音频" : isAuditionPlaying ? "点击停止试听" : "试听该音色"}
+                      aria-label={`${formatVoiceCompactLabel(v.name)} ${isAuditionPlaying ? "停止试听" : "试听"}`}
                     >
-                      <Play size={12} fill="currentColor" />
-                      试听
+                      {isAuditionLoading ? (
+                        <Loader2 size={12} className="animate-spin" />
+                      ) : (
+                        <Play size={12} fill="currentColor" />
+                      )}
+                      {isAuditionLoading ? "生成中" : isAuditionPlaying ? "播放中" : auditionState.phase === "error" ? "重试试听" : "试听"}
                     </button>
                   </div>
                 </div>
+                {auditionState.phase !== "idle" && auditionState.message && (
+                  <div
+                    role={auditionState.phase === "error" ? "alert" : "status"}
+                    className={`mt-2 flex items-start gap-1.5 rounded border px-2 py-1 text-[10px] leading-snug ${
+                      auditionState.phase === "error"
+                        ? "bg-error-muted/30 border-error/20 text-error"
+                        : auditionState.phase === "playing"
+                          ? "bg-success-muted/20 border-success/15 text-success"
+                          : "bg-bg-sunken border-border-subtle text-text-tertiary"
+                    }`}
+                  >
+                    {auditionState.phase === "loading" ? <Loader2 size={11} className="mt-0.5 shrink-0 animate-spin" /> : auditionState.phase === "error" ? <AlertTriangle size={11} className="mt-0.5 shrink-0" /> : <Play size={11} className="mt-0.5 shrink-0" />}
+                    <span className="min-w-0 flex-1">
+                      {auditionState.message}
+                      {auditionState.latencyMs != null && auditionState.phase !== "error" ? ` · ${(auditionState.latencyMs / 1000).toFixed(1)}s` : ""}
+                      {auditionState.code && auditionState.phase === "error" ? ` (${auditionState.code})` : ""}
+                    </span>
+                  </div>
+                )}
               </div>;
             })}
               </div>

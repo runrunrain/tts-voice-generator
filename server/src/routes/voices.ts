@@ -2,10 +2,12 @@
  * Voices routes.
  * GET  /api/voices        - List all voice profiles with stats
  * POST /api/voices/probe  - Probe a specific voice for availability
+ * POST /api/voices/audition - Generate a transient audition clip without history writes
  * GET  /api/voices/refresh - Refresh voice list (re-read from DB)
  */
 
 import { Hono } from "hono";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { getDb } from "../db/index.js";
 import { voiceProfile } from "../db/schema.js";
@@ -13,10 +15,13 @@ import { eq, sql } from "drizzle-orm";
 import { resolveApiKey } from "../services/key-resolver.js";
 import { OpenRouterProvider } from "../services/openrouter-provider.js";
 import { sanitizeText } from "../services/openrouter-provider.js";
+import { classifyErrorCategory } from "../services/tts-generator.js";
 import { canonicalizeVoice } from "../utils/voice.js";
-import { resolveTtsFormat, type AudioFormat } from "../utils/audio-format.js";
+import { resolveTtsFormat, wrapPcm16LeToWav, type AudioFormat } from "../utils/audio-format.js";
 
 const app = new Hono();
+const DEFAULT_TTS_MODEL = "google/gemini-3.1-flash-tts-preview";
+const AUDITION_TEXT = "Hello, this is a voice audition.";
 const PROBE_CACHE_TTL_SECONDS = 30;
 const STALE_VERIFICATION_MS = 24 * 60 * 60 * 1000;
 const inFlightProbes = new Map<string, Promise<ProbeResponse>>();
@@ -98,7 +103,7 @@ app.get("/api/voices", (c) => {
 
 const ProbeSchema = z.object({
   voice: z.string().min(1),
-  model: z.string().optional().default("google/gemini-3.1-flash-tts-preview"),
+  model: z.string().optional().default(DEFAULT_TTS_MODEL),
   format: z.enum(["wav", "pcm", "mp3"]).optional().default("wav"),
   force: z.boolean().optional().default(false),
 });
@@ -144,6 +149,111 @@ app.post("/api/voices/probe", async (c) => {
     return c.json(await probePromise);
   } finally {
     inFlightProbes.delete(inFlightKey);
+  }
+});
+
+// ─── POST /api/voices/audition ───────────────────────────────────────────────
+
+const AuditionSchema = z.object({
+  voice: z.string().trim().min(1).max(100),
+  model: z.string().trim().min(1).max(200).optional().default(DEFAULT_TTS_MODEL),
+  format: z.enum(["wav", "pcm", "mp3"]).optional().default("wav"),
+});
+
+app.post("/api/voices/audition", async (c) => {
+  const requestId = randomUUID();
+  let rawBody: unknown;
+
+  try {
+    rawBody = await c.req.json();
+  } catch {
+    return c.json(buildAuditionError({
+      requestId,
+      code: "VALIDATION_ERROR",
+      message: "Request body must be valid JSON.",
+      category: "validation",
+      retryable: false,
+    }), 400);
+  }
+
+  const parsed = AuditionSchema.safeParse(rawBody);
+  if (!parsed.success) {
+    return c.json(buildAuditionError({
+      requestId,
+      code: "VALIDATION_ERROR",
+      message: "Request validation failed.",
+      category: "validation",
+      retryable: false,
+      metadata: { issues: parsed.error.flatten() },
+    }), 400);
+  }
+
+  const { voice: voiceName, model, format } = parsed.data;
+  const canonicalName = canonicalizeVoice(voiceName);
+  const apiKey = resolveApiKey();
+
+  if (!apiKey) {
+    return c.json(buildAuditionError({
+      requestId,
+      voice: canonicalName,
+      code: "MISSING_API_KEY",
+      message: "OpenRouter API Key is not configured. Please go to Settings and configure your API key.",
+      category: "auth",
+      retryable: false,
+    }), 401);
+  }
+
+  const formatPlan = resolveTtsFormat(model, format as AudioFormat);
+
+  try {
+    const provider = new OpenRouterProvider(apiKey);
+    const result = await provider.generateSpeech({
+      model,
+      input: AUDITION_TEXT,
+      voice: canonicalName,
+      responseFormat: formatPlan.upstreamFormat,
+    });
+
+    if (!result.ok) {
+      const safeCode = sanitizeText(result.errorCode || "UPSTREAM_ERROR");
+      return c.json(buildAuditionError({
+        requestId,
+        voice: canonicalName,
+        code: safeCode,
+        message: sanitizeText(result.errorMessage),
+        category: classifyErrorCategory(safeCode),
+        retryable: result.retryable,
+        metadata: result.errorMetadata,
+      }), auditionHttpStatus(safeCode, result.statusCode));
+    }
+
+    let audioBuffer = result.audioBuffer;
+    if (formatPlan.wrapPcmToWav) audioBuffer = wrapPcm16LeToWav(audioBuffer, formatPlan.pcmParams);
+    const responseBody = audioBuffer.buffer.slice(
+      audioBuffer.byteOffset,
+      audioBuffer.byteOffset + audioBuffer.byteLength,
+    ) as ArrayBuffer;
+
+    return new Response(responseBody, {
+      status: 200,
+      headers: {
+        "Content-Type": formatPlan.mimeType,
+        "Content-Length": String(audioBuffer.byteLength),
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        "X-Audition-Voice": canonicalName,
+        "X-Audio-Format": formatPlan.outputFormat,
+      },
+    });
+  } catch (err) {
+    return c.json(buildAuditionError({
+      requestId,
+      voice: canonicalName,
+      code: "INTERNAL_ERROR",
+      message: sanitizeText(err instanceof Error ? err.message : "Audition failed"),
+      category: "internal",
+      retryable: false,
+    }), 500);
   }
 });
 
@@ -279,6 +389,64 @@ function buildCachedProbeResponse(profile: VoiceProfileRow | undefined): ProbeRe
 
 function classifyVoiceError(errorMessage: string): string {
   return errorMessage === "MISSING_API_KEY" ? "MISSING_API_KEY" : "VOICE_PROBE_FAILED";
+}
+
+function buildAuditionError(input: {
+  requestId: string;
+  voice?: string;
+  code: string;
+  message: string;
+  category: "validation" | "auth" | "throttle" | "upstream" | "internal" | "unknown";
+  retryable: boolean;
+  metadata?: Record<string, unknown>;
+}): {
+  ok: false;
+  requestId: string;
+  voice?: string;
+  error: {
+    code: string;
+    message: string;
+    category: "validation" | "auth" | "throttle" | "upstream" | "internal" | "unknown";
+    retryable: boolean;
+    metadata?: Record<string, unknown>;
+  };
+} {
+  return {
+    ok: false,
+    requestId: input.requestId,
+    ...(input.voice ? { voice: input.voice } : {}),
+    error: {
+      code: sanitizeText(input.code),
+      message: sanitizeText(input.message),
+      category: input.category,
+      retryable: input.retryable,
+      ...(input.metadata ? { metadata: input.metadata } : {}),
+    },
+  };
+}
+
+function auditionHttpStatus(code: string, providerStatusCode: number): 400 | 401 | 402 | 429 | 502 | 504 {
+  switch (code) {
+    case "BAD_REQUEST":
+    case "MODEL_NOT_FOUND":
+      return 400;
+    case "INVALID_API_KEY":
+    case "FORBIDDEN":
+      return 401;
+    case "INSUFFICIENT_CREDITS":
+      return 402;
+    case "RATE_LIMITED":
+      return 429;
+    case "REQUEST_TIMEOUT":
+      return 504;
+    default:
+      if (providerStatusCode === 400 || providerStatusCode === 404) return 400;
+      if (providerStatusCode === 401 || providerStatusCode === 403) return 401;
+      if (providerStatusCode === 402) return 402;
+      if (providerStatusCode === 429) return 429;
+      if (providerStatusCode === 504) return 504;
+      return 502;
+  }
 }
 
 function isOlderThan(value: Date | null, nowMs: number, thresholdMs: number): boolean {

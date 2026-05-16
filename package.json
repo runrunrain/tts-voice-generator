@@ -1,7 +1,7 @@
 {
   "name": "tts-voice-generator",
   "private": true,
-  "version": "0.0.83",
+  "version": "0.0.84",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {

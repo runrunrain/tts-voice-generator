@@ -21,6 +21,7 @@ import type {
   HistoryStatus,
   HistorySource,
   VoiceProfile,
+  VoiceAuditionResult,
   VoiceStats,
   VoiceStatus,
   TtsServiceAdapter,
@@ -180,6 +181,88 @@ function mapHistorySource(source: string | null | undefined): HistorySource {
   if (source === "Agent") return "agent";
   if (source === "用户") return "user";
   return "user";
+}
+
+interface BackendVoiceListResponse {
+  voices: Array<{
+    id: number;
+    name: string;
+    provider: string;
+    model: string | null;
+    role: string | null;
+    source: string;
+    verifiedStatus: string;
+    lastVerified: number | null;
+    verifyDuration: number | null;
+    verifyError: string | null;
+  }>;
+  stats: {
+    total: number;
+    verified: number;
+    failed: number;
+    unknown: number;
+    staleVerified: number;
+    neverVerified: number;
+    avgLatencyMs: number | null;
+    errorSummary: Array<{
+      voice?: string;
+      errorCode?: string;
+      errorMessage?: string;
+      error?: string;
+      count: number;
+      lastOccurrence?: string;
+    }>;
+  };
+}
+
+async function fetchVoiceProfiles(): Promise<{ voices: VoiceProfile[]; stats: VoiceStats }> {
+  const result = await apiFetch<BackendVoiceListResponse>("/api/voices");
+
+  return {
+    voices: result.voices.map((v) => ({
+      name: v.name,
+      displayName: getVoiceDisplayMeta(v.name).displayName,
+      toneDescription: getVoiceDisplayMeta(v.name).toneDescription,
+      isDefault: v.source === "default",
+      role: v.role || "",
+      provider: v.provider === "openrouter" ? "OpenRouter" : v.provider,
+      status: mapVoiceStatus(v.verifiedStatus),
+      lastVerified: v.lastVerified ? new Date(v.lastVerified).toISOString().split("T")[0] : "",
+      verifyDuration: v.verifyDuration ? `${(v.verifyDuration / 1000).toFixed(1)}s` : undefined,
+      verifyError: v.verifyError || undefined,
+    })),
+    stats: {
+      ...result.stats,
+      errorSummary: result.stats.errorSummary.map((e) => ({
+        voice: e.voice,
+        errorCode: e.errorCode,
+        errorMessage: e.errorMessage || e.error || "未知错误",
+        count: e.count,
+        lastOccurrence: e.lastOccurrence,
+      })),
+    },
+  };
+}
+
+function extractAuditionError(body: unknown, status: number): VoiceAuditionResult["error"] {
+  if (body && typeof body === "object") {
+    const record = body as Record<string, unknown>;
+    const error = record.error;
+    if (error && typeof error === "object") {
+      const errorRecord = error as Record<string, unknown>;
+      return {
+        code: typeof errorRecord.code === "string" ? errorRecord.code : `HTTP_${status}`,
+        message: typeof errorRecord.message === "string" ? errorRecord.message : `试听请求失败 (HTTP ${status})`,
+        category: typeof errorRecord.category === "string" ? errorRecord.category : undefined,
+        retryable: typeof errorRecord.retryable === "boolean" ? errorRecord.retryable : undefined,
+      };
+    }
+  }
+
+  return {
+    code: `HTTP_${status}`,
+    message: errorMessageFromBody(status, body),
+  };
 }
 
 // ─── Format Resolution ────────────────────────────────────────────────────────
@@ -369,6 +452,79 @@ export const httpAdapter: TtsServiceAdapter = {
     }
   },
 
+  async auditionVoice(voiceName: string): Promise<VoiceAuditionResult> {
+    const voice = voiceName.trim();
+    if (!voice) {
+      return {
+        ok: false,
+        voice: voiceName,
+        format: "wav",
+        contentType: "",
+        error: {
+          code: "EMPTY_VOICE",
+          message: "音色名称不能为空。",
+          category: "validation",
+          retryable: false,
+        },
+      };
+    }
+
+    const start = Date.now();
+    try {
+      const response = await apiRequest("/api/voices/audition", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          voice,
+          model: "google/gemini-3.1-flash-tts-preview",
+          format: "wav",
+        }),
+      });
+
+      if (!response.ok) {
+        const body = await readResponseBody(response);
+        return {
+          ok: false,
+          voice,
+          format: "wav",
+          contentType: response.headers.get("content-type") || "application/json",
+          latencyMs: Date.now() - start,
+          error: extractAuditionError(body, response.status),
+        };
+      }
+
+      const audioBlob = await response.blob();
+      const contentType = response.headers.get("content-type") || audioBlob.type || "audio/wav";
+      const objectUrl = typeof URL !== "undefined" && typeof URL.createObjectURL === "function"
+        ? URL.createObjectURL(audioBlob)
+        : undefined;
+
+      return {
+        ok: true,
+        voice: response.headers.get("x-audition-voice") || voice,
+        format: resolveActualFormat(response.headers.get("x-audio-format") as AudioFormat | undefined, contentType, "wav"),
+        contentType,
+        audioBlob,
+        objectUrl,
+        latencyMs: Date.now() - start,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        voice,
+        format: "wav",
+        contentType: "",
+        latencyMs: Date.now() - start,
+        error: {
+          code: "NETWORK_ERROR",
+          message: err instanceof Error ? err.message : "Cannot reach backend server",
+          category: "internal",
+          retryable: true,
+        },
+      };
+    }
+  },
+
   async probeVoice(voiceName: string, force?: boolean): Promise<{ status: VoiceStatus; latency: string; cached?: boolean; cacheTtlSeconds?: number | null; lastVerified?: string | null }> {
     try {
       const result = await apiFetch<{
@@ -431,62 +587,11 @@ export const httpAdapter: TtsServiceAdapter = {
   },
 
   async listVoicesAsync(): Promise<{ voices: VoiceProfile[]; stats: VoiceStats }> {
-    const result = await apiFetch<{
-      voices: Array<{
-        id: number;
-        name: string;
-        provider: string;
-        model: string | null;
-        role: string | null;
-        source: string;
-        verifiedStatus: string;
-        lastVerified: number | null;
-        verifyDuration: number | null;
-        verifyError: string | null;
-      }>;
-      stats: {
-        total: number;
-        verified: number;
-        failed: number;
-        unknown: number;
-        staleVerified: number;
-        neverVerified: number;
-        avgLatencyMs: number | null;
-        errorSummary: Array<{
-          voice?: string;
-          errorCode?: string;
-          errorMessage?: string;
-          error?: string;
-          count: number;
-          lastOccurrence?: string;
-        }>;
-      };
-    }>("/api/voices");
+    return fetchVoiceProfiles();
+  },
 
-    return {
-      voices: result.voices.map((v) => ({
-        name: v.name,
-        displayName: getVoiceDisplayMeta(v.name).displayName,
-        toneDescription: getVoiceDisplayMeta(v.name).toneDescription,
-        isDefault: v.source === "default",
-        role: v.role || "",
-        provider: v.provider === "openrouter" ? "OpenRouter" : v.provider,
-        status: mapVoiceStatus(v.verifiedStatus),
-        lastVerified: v.lastVerified ? new Date(v.lastVerified).toISOString().split("T")[0] : "",
-        verifyDuration: v.verifyDuration ? `${(v.verifyDuration / 1000).toFixed(1)}s` : undefined,
-        verifyError: v.verifyError || undefined,
-      })),
-      stats: {
-        ...result.stats,
-        errorSummary: result.stats.errorSummary.map((e) => ({
-          voice: e.voice,
-          errorCode: e.errorCode,
-          errorMessage: e.errorMessage || e.error || "未知错误",
-          count: e.count,
-          lastOccurrence: e.lastOccurrence,
-        })),
-      },
-    };
+  async refreshVoices(): Promise<{ voices: VoiceProfile[]; stats: VoiceStats }> {
+    return fetchVoiceProfiles();
   },
 
   listHistory(filter: HistoryFilter): { records: HistoryRecord[]; totalPages: number } {

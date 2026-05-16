@@ -45,6 +45,22 @@ export interface VoiceStats {
   errorSummary: VoiceErrorSummary[];
 }
 
+export interface VoiceAuditionResult {
+  ok: boolean;
+  voice: string;
+  format: AudioFormat;
+  contentType: string;
+  audioBlob?: Blob;
+  objectUrl?: string;
+  latencyMs?: number;
+  error?: {
+    code: string;
+    message: string;
+    category?: string;
+    retryable?: boolean;
+  };
+}
+
 // ─── Generation Request / Result ─────────────────────────────────────────────
 
 export type AudioFormat = "wav" | "pcm" | "mp3";
@@ -972,11 +988,14 @@ export interface Diagnostics {
 
 export interface TtsServiceAdapter {
   generateSpeech(req: GenerateRequest): Promise<GenerateResult>;
+  auditionVoice?(voiceName: string): Promise<VoiceAuditionResult>;
   probeVoice(voiceName: string, force?: boolean): Promise<{ status: VoiceStatus; latency: string; cached?: boolean; cacheTtlSeconds?: number | null; lastVerified?: string | null; error?: string }>;
   testConnection(): Promise<ConnectionStatus>;
   listVoices(): VoiceProfile[];
   /** Async voice list for backend-backed adapters */
   listVoicesAsync?(): Promise<{ voices: VoiceProfile[]; stats: VoiceStats }>;
+  /** Refresh voice list for UI flows that need the latest probe status */
+  refreshVoices?(): Promise<{ voices: VoiceProfile[]; stats: VoiceStats }>;
   listHistory(filter: HistoryFilter): { records: HistoryRecord[]; totalPages: number };
   /** Async history list for backend-backed adapters */
   listHistoryAsync?(filter: HistoryFilter): Promise<{ records: HistoryRecord[]; totalPages: number; totalRecords?: number }>;

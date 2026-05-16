@@ -67,7 +67,7 @@ vi.mock("../src/config/env.js", async () => {
 });
 
 import { initSchema, closeDb, getDb } from "../src/db/index.js";
-import { settings, voiceProfile } from "../src/db/schema.js";
+import { audioAsset, generationJob, settings, voiceProfile } from "../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import settingsRoutes from "../src/routes/settings.js";
 import voicesRoutes from "../src/routes/voices.js";
@@ -104,6 +104,10 @@ function seedVoice(name = "Zephyr") {
 }
 
 function probeBody(overrides: Record<string, unknown> = {}) {
+  return JSON.stringify({ voice: "Zephyr", ...overrides });
+}
+
+function auditionBody(overrides: Record<string, unknown> = {}) {
   return JSON.stringify({ voice: "Zephyr", ...overrides });
 }
 
@@ -316,6 +320,81 @@ describe("Voices API probe and availability stats", () => {
     const body = await res.json();
     expect(body.verifiedStatus).toBe("verified");
     expect(body.cached).toBe(false);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("audition succeeds with playable wav bytes and does not write generation history", async () => {
+    seedVoice();
+    await seedKey(app);
+    mockFetch.mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3, 4]), {
+      status: 200,
+      headers: { "content-type": "audio/pcm", "x-generation-id": "gen-audition" },
+    }));
+
+    const res = await r(app, "/api/voices/audition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: auditionBody(),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("audio/wav");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-audition-voice")).toBe("Zephyr");
+    const audioBytes = Buffer.from(await res.arrayBuffer());
+    expect(audioBytes.subarray(0, 4).toString("ascii")).toBe("RIFF");
+    expect(audioBytes.subarray(8, 12).toString("ascii")).toBe("WAVE");
+    expect(audioBytes.length).toBe(48);
+    expect(getDb().select().from(generationJob).all()).toHaveLength(0);
+    expect(getDb().select().from(audioAsset).all()).toHaveLength(0);
+    expect(getDb().select().from(voiceProfile).where(eq(voiceProfile.name, "Zephyr")).get()?.verifiedStatus).toBe("unknown");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("audition without API key returns structured missing-key error and does not call fetch", async () => {
+    seedVoice();
+
+    const res = await r(app, "/api/voices/audition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: auditionBody(),
+    });
+
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.voice).toBe("Zephyr");
+    expect(body.error).toMatchObject({
+      code: "MISSING_API_KEY",
+      category: "auth",
+      retryable: false,
+    });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("audition upstream failure returns sanitized structured error", async () => {
+    seedVoice();
+    await seedKey(app);
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "voice denied Bearer sk-secretvalue123", code: "BAD_REQUEST" } }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    }));
+
+    const res = await r(app, "/api/voices/audition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: auditionBody(),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("BAD_REQUEST");
+    expect(body.error.category).toBe("validation");
+    expect(body.error.message).toContain("Bearer [REDACTED]");
+    expect(body.error.message).not.toContain("sk-secretvalue123");
+    expect(getDb().select().from(generationJob).all()).toHaveLength(0);
+    expect(getDb().select().from(audioAsset).all()).toHaveLength(0);
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
