@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check, Copy, ExternalLink, FileJson, Loader2, RefreshCw, Shield, Terminal, Wrench } from "lucide-react";
 import { apiRequest, ApiError } from "../../services/httpAdapter";
 import { SettingsSection } from "../../components/SettingsSection";
+import { usePersistentSingleOpenSection } from "../../hooks/usePersistentSingleOpenSection";
 import type {
   ControlledInstallResponse,
   OpenCodeConfigDisplayResponse,
@@ -24,8 +25,10 @@ type ProviderForm = {
 
 type LoadPhase = "idle" | "loading" | "success" | "error";
 type SavePhase = "idle" | "dirty" | "saving" | "success" | "error" | "conflict";
-type InstallPhase = "idle" | "planning" | "confirming" | "installing" | "success" | "error";
+type InstallPhase = "idle" | "planning" | "installing" | "success" | "error";
 type OpenPhase = "idle" | "opening" | "success" | "error";
+
+const OPENCODE_SETTINGS_SECTION_IDS = ["cli-status", "config-file", "visual-config", "controlled-install"] as const;
 
 type OpenConfigResponse = {
   ok: true;
@@ -186,13 +189,16 @@ export function OpenCodeSettingsPanel() {
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [installPhase, setInstallPhase] = useState<InstallPhase>("idle");
   const [installPlan, setInstallPlan] = useState<OpenCodeInstallPlanResponse | null>(null);
-  const [installConfirmation, setInstallConfirmation] = useState("");
   const [installResult, setInstallResult] = useState<ControlledInstallResponse | null>(null);
   const [installMessage, setInstallMessage] = useState<string | null>(null);
   const [openPhase, setOpenPhase] = useState<OpenPhase>("idle");
   const [openMessage, setOpenMessage] = useState<string | null>(null);
   const [copiedPath, setCopiedPath] = useState(false);
   const requestIdRef = useRef(0);
+  const accordion = usePersistentSingleOpenSection({
+    storageKey: "settings/opencode",
+    sectionIds: OPENCODE_SETTINGS_SECTION_IDS,
+  });
 
   const capabilities = status?.capabilities ?? null;
   const localDisabledReason = capabilities?.reason ?? "当前运行环境无法访问本机 OpenCode 能力。";
@@ -311,43 +317,16 @@ export function OpenCodeSettingsPanel() {
     }
   }, [capabilities?.canWriteConfig, config, localDisabledReason, model, providers]);
 
-  const startInstallPlan = useCallback(async () => {
-    if (!capabilities?.canInstall) {
-      setInstallPhase("error");
-      setInstallMessage(localDisabledReason);
-      return;
-    }
-    setInstallPhase("planning");
-    setInstallMessage("正在生成受控安装确认信息...");
-    setInstallResult(null);
-    setInstallConfirmation("");
-    try {
-      const plan = await readJson<OpenCodeInstallPlanResponse>("/api/settings/opencode/install-plan", { method: "POST" });
-      setInstallPlan(plan);
-      setInstallPhase("confirming");
-      setInstallMessage("请确认固定安装命令。前端不会传入任意命令或参数。 ");
-    } catch (error) {
-      setInstallPhase("error");
-      setInstallMessage(error instanceof Error ? error.message : "生成安装确认失败");
-    }
-  }, [capabilities?.canInstall, localDisabledReason]);
-
-  const runControlledInstall = useCallback(async () => {
-    if (!installPlan) return;
-    if (installConfirmation.trim() !== installPlan.confirmationPhrase) {
-      setInstallPhase("error");
-      setInstallMessage(`请输入确认短语 ${installPlan.confirmationPhrase} 后再安装。`);
-      return;
-    }
+  const runControlledInstall = useCallback(async (plan: OpenCodeInstallPlanResponse) => {
     setInstallPhase("installing");
-    setInstallMessage("正在执行受控安装，命令由后端 allowlist 固定。 ");
+    setInstallMessage("后端已签发一次性安装计划，正在执行固定 allowlist 受控安装。 ");
     try {
       const result = await readJson<ControlledInstallResponse>("/api/settings/opencode/install", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          nonce: installPlan.nonce,
-          confirmationPhrase: installPlan.confirmationPhrase,
+          nonce: plan.nonce,
+          confirmationPhrase: plan.confirmationPhrase,
           confirm: true,
         }),
       });
@@ -355,13 +334,33 @@ export function OpenCodeSettingsPanel() {
       setInstallPhase(result.ok ? "success" : "error");
       setInstallMessage(result.ok ? "OpenCode 安装流程已完成，并已重新检测 CLI 状态。" : (result.error ?? "OpenCode 安装未成功。"));
       setInstallPlan(null);
-      setInstallConfirmation("");
       await loadOpenCodeSettings();
     } catch (error) {
       setInstallPhase("error");
       setInstallMessage(error instanceof Error ? error.message : "OpenCode 安装失败");
     }
-  }, [installConfirmation, installPlan, loadOpenCodeSettings]);
+  }, [loadOpenCodeSettings]);
+
+  const startInstallPlan = useCallback(async () => {
+    if (!capabilities?.canInstall) {
+      setInstallPhase("error");
+      setInstallMessage(localDisabledReason);
+      return;
+    }
+    setInstallPhase("planning");
+    setInstallMessage("正在向后端申请一次性受控安装计划...");
+    setInstallPlan(null);
+    setInstallResult(null);
+    try {
+      const plan = await readJson<OpenCodeInstallPlanResponse>("/api/settings/opencode/install-plan", { method: "POST" });
+      setInstallPlan(plan);
+      await runControlledInstall(plan);
+    } catch (error) {
+      setInstallPhase("error");
+      setInstallPlan(null);
+      setInstallMessage(error instanceof Error ? error.message : "OpenCode 受控安装启动失败");
+    }
+  }, [capabilities?.canInstall, localDisabledReason, runControlledInstall]);
 
   const openConfigFile = useCallback(async () => {
     if (!capabilities?.canOpenConfig && !capabilities?.canReturnConfigPathForCopy) {
@@ -430,7 +429,7 @@ export function OpenCodeSettingsPanel() {
 
       <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-5">
         <div className="grid grid-cols-1 xl:grid-cols-[1fr_1.35fr] gap-4">
-          <SettingsSection title="CLI 状态" description="检测本机 OpenCode、npm、Provider 与运行时能力。" icon={<Terminal size={14} />} defaultOpen contentClassName="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
+          <SettingsSection title="CLI 状态" description="检测本机 OpenCode、npm、Provider 与运行时能力。" icon={<Terminal size={14} />} open={accordion.isSectionOpen("cli-status")} onOpenChange={(open) => accordion.setSectionOpen("cli-status", open)} contentClassName="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
             <div className="flex items-start justify-between gap-3">
               <div className="flex flex-col gap-1">
                 <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">CLI 状态</span>
@@ -504,7 +503,7 @@ export function OpenCodeSettingsPanel() {
             )}
           </SettingsSection>
 
-          <SettingsSection title="配置文件" description="查看固定 opencode.json 路径，并按运行环境打开或复制。" icon={<FileJson size={14} />} defaultOpen contentClassName="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
+          <SettingsSection title="配置文件" description="查看固定 opencode.json 路径，并按运行环境打开或复制。" icon={<FileJson size={14} />} open={accordion.isSectionOpen("config-file")} onOpenChange={(open) => accordion.setSectionOpen("config-file", open)} contentClassName="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
             <div className="flex items-start justify-between gap-3">
               <div className="flex flex-col gap-1">
                 <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">配置文件</span>
@@ -540,7 +539,7 @@ export function OpenCodeSettingsPanel() {
         </div>
 
         <div className="grid grid-cols-1 2xl:grid-cols-[1.5fr_1fr] gap-4">
-          <SettingsSection title="可视化配置" description="编辑 model、provider baseURL 与 API Key 动作；不会回显明文密钥。" icon={<FileJson size={14} />} defaultOpen contentClassName="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
+          <SettingsSection title="可视化配置" description="编辑 model、provider baseURL 与 API Key 动作；不会回显明文密钥。" icon={<FileJson size={14} />} open={accordion.isSectionOpen("visual-config")} onOpenChange={(open) => accordion.setSectionOpen("visual-config", open)} contentClassName="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <FileJson size={14} className="text-accent" />
@@ -640,7 +639,7 @@ export function OpenCodeSettingsPanel() {
             )}
           </SettingsSection>
 
-          <SettingsSection title="受控安装" description="低频且高风险操作，默认收起；命令由后端 allowlist 固定。" icon={<Wrench size={14} />} defaultOpen={false} contentClassName="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
+          <SettingsSection title="受控安装" description="低频且高风险操作；点击后由后端 nonce 与 allowlist 执行受控安装。" icon={<Wrench size={14} />} open={accordion.isSectionOpen("controlled-install")} onOpenChange={(open) => accordion.setSectionOpen("controlled-install", open)} contentClassName="border border-border-subtle rounded-md bg-bg-sunken p-4 flex flex-col gap-4">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <Wrench size={14} className="text-accent" />
@@ -657,42 +656,20 @@ export function OpenCodeSettingsPanel() {
               </button>
             </div>
 
-            <p className="text-xs leading-5 text-text-tertiary">安装只走后端固定 allowlist：不接收包名、命令、参数、cwd 或 env。web/remote 环境按钮会被禁用。</p>
+            <p className="text-xs leading-5 text-text-tertiary">安装只走后端固定 allowlist：不接收包名、命令、参数、cwd 或 env。点击安装后，前端仅申请一次性 nonce 并提交确认标记，web/remote 环境按钮会被禁用。</p>
 
-            {installPlan && installPhase === "confirming" && (
-              <div className="border border-warning/25 bg-warning-muted/10 rounded-md p-3 flex flex-col gap-3">
-                <div className="flex items-center gap-2 text-xs text-warning font-medium">
-                  <AlertTriangle size={13} />
-                  二次确认固定命令
+            {installPlan && (installPhase === "planning" || installPhase === "installing") && (
+              <div className="border border-accent/25 bg-accent-muted/10 rounded-md p-3 flex flex-col gap-2 text-xs text-accent">
+                <div className="flex items-center gap-2 font-medium">
+                  <Shield size={13} />
+                  正在执行受控安装流程
                 </div>
-                <code className="bg-bg-base border border-border rounded px-3 py-2 text-xs font-mono text-text-primary select-all">{installPlan.commandPreview}</code>
-                {installPlan.installCandidates.length > 0 && (
-                  <div className="flex flex-col gap-1 text-[11px] text-text-tertiary">
-                    <span>可用安装候选：</span>
-                    {installPlan.installCandidates.map((candidate) => <code key={candidate} className="font-mono">{candidate}</code>)}
-                  </div>
-                )}
-                <input
-                  value={installConfirmation}
-                  onChange={(event) => setInstallConfirmation(event.target.value)}
-                  placeholder={`输入 ${installPlan.confirmationPhrase} 确认`}
-                  className="w-full bg-bg-base border border-border rounded px-3 py-2 text-sm outline-none focus:border-border-focus font-mono text-text-primary placeholder:text-text-tertiary"
-                />
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-[11px] text-text-tertiary">nonce 有效至 {new Date(installPlan.nonceExpiresAt).toLocaleString("zh-CN")}</span>
-                  <button
-                    className="px-3 py-1.5 bg-accent text-bg-base rounded-md text-xs font-medium hover:bg-accent/90 transition-colors disabled:opacity-50"
-                    onClick={runControlledInstall}
-                    disabled={installConfirmation.trim() !== installPlan.confirmationPhrase}
-                  >
-                    确认安装
-                  </button>
-                </div>
+                <span className="text-[11px] leading-5 text-text-tertiary">已获取后端一次性安装计划，有效至 {new Date(installPlan.nonceExpiresAt).toLocaleString("zh-CN")}。界面不展示固定命令，也不要求复制确认短语。</span>
               </div>
             )}
 
             {installMessage && (
-              <InlineMessage tone={installPhase === "success" ? "success" : installPhase === "error" ? "error" : installPhase === "confirming" ? "warning" : "neutral"} message={installMessage} />
+              <InlineMessage tone={installPhase === "success" ? "success" : installPhase === "error" ? "error" : "neutral"} message={installMessage} />
             )}
 
             {installResult && (
@@ -704,7 +681,7 @@ export function OpenCodeSettingsPanel() {
                     <span>尝试记录：</span>
                     {installResult.attempts.map((attempt, index) => (
                       <code key={`${attempt.packageManager}-${index}`} className="font-mono break-all">
-                        {attempt.commandPreview} | resolved={String(attempt.resolved)} | exit={attempt.exitCode ?? "null"} | error={attempt.error ?? "none"}
+                        packageManager={attempt.packageManager} | resolved={String(attempt.resolved)} | exit={attempt.exitCode ?? "null"} | error={attempt.error ?? "none"}
                       </code>
                     ))}
                   </div>

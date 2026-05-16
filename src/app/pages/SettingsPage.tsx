@@ -6,6 +6,7 @@ import { apiRequest, getDiagnostics } from "../services/httpAdapter";
 import { hasSavedOpenRouterKey, isSuccessfulSettingsConnection } from "../services/settingsKeyStatus";
 import type { AppSettings, AudioFormat, ConnectionStatus, AgentAuthMode, Diagnostics, DiagnosticsPhase, AudioDirInfo, OpenCodeConfigDisplayResponse, OpenCodeStatusResponse } from "../types";
 import { SettingsSection } from "../components/SettingsSection";
+import { usePersistentSingleOpenSection } from "../hooks/usePersistentSingleOpenSection";
 import { ApplicationUpdateSection } from "./settings/ApplicationUpdateSection";
 
 type SettingsConnectionTestResponse = {
@@ -276,6 +277,15 @@ export function SettingsPage() {
   const fingerprint = settings.agent.localPluginTokenFingerprint;
   const activeSection = getSettingsSectionFromPath(location.pathname);
   const currentSection = activeSection ? SECTION_COPY[activeSection] : null;
+  const subpageAccordion = usePersistentSingleOpenSection({
+    storageKey: activeSection ? `settings/${activeSection}` : "settings/hub",
+    sectionIds: activeSection ? [activeSection] : [],
+  });
+
+  const sectionAccordionProps = useCallback((sectionId: SettingsSectionId) => ({
+    open: subpageAccordion.isSectionOpen(sectionId),
+    onOpenChange: (open: boolean) => subpageAccordion.setSectionOpen(sectionId, open),
+  }), [subpageAccordion]);
 
   // ── Diagnostics State ────────────────────────────────────────────────────
   const [diagPhase, setDiagPhase] = useState<DiagnosticsPhase>("idle");
@@ -518,7 +528,7 @@ export function SettingsPage() {
 
         <div className="w-full flex flex-col gap-6">
 
-            {activeSection === "api-key" && <SettingsSection title="API Key 配置" description="OpenRouter 认证信息，仅通过后端 token-aware helper 保存和验证。" icon={<Shield size={16} />} defaultOpen>
+            {activeSection === "api-key" && <SettingsSection title="API Key 配置" description="OpenRouter 认证信息，仅通过后端 token-aware helper 保存和验证。" icon={<Shield size={16} />} {...sectionAccordionProps("api-key")}>
               <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm text-text-secondary">OpenRouter API Key</label>
@@ -582,7 +592,7 @@ export function SettingsPage() {
               </div>
             </SettingsSection>}
 
-            {activeSection === "defaults" && <SettingsSection title="默认参数" description="生成模型、音色、格式与输出目录。" icon={<FileAudio size={16} />} defaultOpen>
+            {activeSection === "defaults" && <SettingsSection title="默认参数" description="生成模型、音色、格式与输出目录。" icon={<FileAudio size={16} />} {...sectionAccordionProps("defaults")}>
               <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-4">
                 <div className="flex items-center justify-between">
                   <label className="text-sm text-text-secondary w-32">默认模型:</label>
@@ -638,7 +648,7 @@ export function SettingsPage() {
               </div>
             </SettingsSection>}
 
-            {activeSection === "limits" && <SettingsSection title="请求限制" description="低频调整项，默认收起以降低页面噪音。" icon={<Clock size={16} />} defaultOpen>
+            {activeSection === "limits" && <SettingsSection title="请求限制" description="低频调整项，默认收起以降低页面噪音。" icon={<Clock size={16} />} {...sectionAccordionProps("limits")}>
               <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm text-text-secondary">单次最大字符数</label>
@@ -661,7 +671,7 @@ export function SettingsPage() {
               </div>
             </SettingsSection>}
 
-            {activeSection === "plugin-token" && <SettingsSection title="插件 Token" description="本地插件访问凭证，仅显示指纹或一次性明文。" icon={<Shield size={16} />} defaultOpen>
+            {activeSection === "plugin-token" && <SettingsSection title="插件 Token" description="本地插件访问凭证，仅显示指纹或一次性明文。" icon={<Shield size={16} />} {...sectionAccordionProps("plugin-token")}>
               <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm text-text-secondary">本地 Plugin Token</label>
@@ -757,7 +767,7 @@ export function SettingsPage() {
             </SettingsSection>}
 
         {/* Agent Auth (Full Width) */}
-        {activeSection === "agent" && <SettingsSection title="Agent 授权" description="控制 Agent 会话自动批准策略与费用上限。" icon={<Bot size={16} />} defaultOpen>
+        {activeSection === "agent" && <SettingsSection title="Agent 授权" description="控制 Agent 会话自动批准策略与费用上限。" icon={<Bot size={16} />} {...sectionAccordionProps("agent")}>
           <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-6">
 
             <div className="flex items-center gap-6">

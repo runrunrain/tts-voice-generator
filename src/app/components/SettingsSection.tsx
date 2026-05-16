@@ -5,6 +5,7 @@ interface SettingsSectionProps {
   title: string;
   description?: string;
   icon?: ReactNode;
+  open?: boolean;
   defaultOpen?: boolean;
   children: ReactNode;
   actions?: ReactNode;
@@ -17,6 +18,7 @@ export function SettingsSection({
   title,
   description,
   icon,
+  open: controlledOpen,
   defaultOpen = true,
   children,
   actions,
@@ -25,11 +27,15 @@ export function SettingsSection({
   onOpenChange,
 }: SettingsSectionProps) {
   const contentId = useId();
-  const [open, setOpen] = useState(defaultOpen);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen);
+  const isControlled = controlledOpen !== undefined;
+  const open = controlledOpen ?? uncontrolledOpen;
 
   const toggle = () => {
     const nextOpen = !open;
-    setOpen(nextOpen);
+    if (!isControlled) {
+      setUncontrolledOpen(nextOpen);
+    }
     onOpenChange?.(nextOpen);
   };
 

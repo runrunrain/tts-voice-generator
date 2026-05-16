@@ -146,6 +146,47 @@ function isSafeNativeNodeExecutable(filePath: string | undefined, platform: Plat
   return base === "node.exe" || base === "node";
 }
 
+function containsNonAscii(input: string): boolean {
+  return /[^\x00-\x7F]/.test(input);
+}
+
+function windowsNodeExecutableCandidatesFromEnv(env: Record<string, string | undefined>, platform: PlatformLike): string[] {
+  if (!isWindows(platform)) return [];
+  const candidates: string[] = [];
+  const explicitNodePaths = [
+    env.npm_node_execpath,
+    env.NPM_NODE_EXECPATH,
+    env.NODE_EXE,
+  ];
+  for (const candidate of explicitNodePaths) {
+    const trimmed = candidate?.trim();
+    if (trimmed && basenameFor(trimmed).toLowerCase() === "node.exe") candidates.push(trimmed);
+  }
+
+  const appData = env.APPDATA?.trim();
+  const localAppData = env.LOCALAPPDATA?.trim();
+  const programFiles = env.ProgramFiles?.trim() || env.PROGRAMFILES?.trim();
+  const programFilesX86 = env["ProgramFiles(x86)"]?.trim() || env["PROGRAMFILES(X86)"]?.trim();
+  const programW6432 = env.ProgramW6432?.trim() || env.PROGRAMW6432?.trim();
+  const chocolateyInstall = env.ChocolateyInstall?.trim() || env.CHOCOLATEYINSTALL?.trim();
+  const scoop = env.SCOOP?.trim();
+
+  for (const directory of [
+    appData ? joinForBase(appData, "npm") : "",
+    localAppData ? joinForBase(localAppData, "npm") : "",
+    localAppData ? joinForBase(localAppData, "Programs", "nodejs") : "",
+    programFiles ? joinForBase(programFiles, "nodejs") : "",
+    programFilesX86 ? joinForBase(programFilesX86, "nodejs") : "",
+    programW6432 ? joinForBase(programW6432, "nodejs") : "",
+    chocolateyInstall ? joinForBase(chocolateyInstall, "bin") : "",
+    scoop ? joinForBase(scoop, "apps", "nodejs", "current") : "",
+  ]) {
+    if (directory) candidates.push(joinForBase(directory, "node.exe"));
+  }
+
+  return Array.from(new Set(candidates.map(normalizeForBase)));
+}
+
 function trailingSeparatorForBase(base: string): string {
   if (base.endsWith("/") || base.endsWith("\\")) return "";
   return usesWinSeparators(base) ? "\\" : path.sep;
@@ -547,10 +588,13 @@ function resolveSafeNodeExecutableForShim(
 ): string | null {
   const shimDir = dirnameFor(shimPath);
   const pathNode = resolveNativeNodeOnPath(env, platform);
+  const preferredNodeDir = preferredNodeExecPath ? dirnameFor(preferredNodeExecPath) : "";
   const candidates = [
     joinForBase(shimDir, "node.exe"),
     ...extractNodeExecutableCandidatesFromShim(shimPath, platform),
     ...(pathNode ? [pathNode] : []),
+    ...windowsNodeExecutableCandidatesFromEnv(env, platform),
+    preferredNodeDir ? joinForBase(preferredNodeDir, "node.exe") : "",
     preferredNodeExecPath ?? "",
   ];
 
@@ -558,6 +602,25 @@ function resolveSafeNodeExecutableForShim(
     if (isSafeNativeNodeExecutable(candidate, platform)) return candidate;
   }
   return null;
+}
+
+function resolveWindowsCommandShimPath(
+  env: Record<string, string | undefined>,
+  platform: PlatformLike,
+): string | null {
+  if (!isWindows(platform)) return null;
+  const resolved = resolveExecutableOnPath("opencode", env, platform);
+  if (!resolved.resolved || !isWindowsCommandShim(resolved.command)) return null;
+  const shimPath = normalizeForBase(resolved.command);
+  return isSafeShimDerivedPath(shimPath, platform) && fileExists(shimPath) ? shimPath : null;
+}
+
+function buildNonAsciiWindowsShimProbeError(strictError: unknown, shimPath: string): Error {
+  const strictMessage = strictError instanceof Error ? strictError.message : String(strictError);
+  return new Error(
+    `${strictMessage}; Windows command-shim probe skipped because the OpenCode shim path contains non-ASCII characters (${shimPath}). ` +
+      "cmd.exe may corrupt such paths under legacy Windows code pages. Install or expose a native node.exe so the app can run the npm bin target directly with shell:false.",
+  );
 }
 
 function isSafeWindowsCommandInterpreter(filePath: string | undefined, platform: PlatformLike): boolean {
@@ -610,10 +673,8 @@ function resolveWindowsCommandShimProbeContext(
   platform: PlatformLike,
 ): OpenCodeProcessContext | null {
   if (!isWindows(platform)) return null;
-  const resolved = resolveExecutableOnPath("opencode", env, platform);
-  if (!resolved.resolved || !isWindowsCommandShim(resolved.command)) return null;
-  const shimPath = normalizeForBase(resolved.command);
-  if (!isSafeShimDerivedPath(shimPath, platform) || !fileExists(shimPath) || !isSafeWindowsShimProbeToken(shimPath)) return null;
+  const shimPath = resolveWindowsCommandShimPath(env, platform);
+  if (!shimPath || containsNonAscii(shimPath) || !isSafeWindowsShimProbeToken(shimPath)) return null;
   const commandInterpreter = resolveWindowsCommandInterpreterForProbe(env, platform);
   if (!commandInterpreter) return null;
   return {
@@ -741,6 +802,10 @@ export async function resolveOpenCodeProbeContextAsync(
     return await resolveOpenCodeProcessContextAsync(safeEnv, platform, nodeExecPath);
   } catch (strictError) {
     const env = await buildOpenCodeChildEnvAsync(safeEnv, platform);
+    const shimPath = resolveWindowsCommandShimPath(env, platform);
+    if (shimPath && containsNonAscii(shimPath)) {
+      throw buildNonAsciiWindowsShimProbeError(strictError, shimPath);
+    }
     const probeContext = resolveWindowsCommandShimProbeContext(env, platform);
     if (probeContext) return probeContext;
     throw strictError;

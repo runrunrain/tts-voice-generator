@@ -12,6 +12,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { SettingsSection } from "../../components/SettingsSection";
+import { usePersistentSingleOpenSection } from "../../hooks/usePersistentSingleOpenSection";
 import {
   getDesktopBridge,
   hasDesktopUpdateBridge,
@@ -39,6 +40,8 @@ const PHASE_COPY: Record<DesktopUpdatePhase, { label: string; description: strin
   installing: { label: "准备重启", description: "正在交给主进程安装更新，请勿强制关闭。", tone: "warning" },
   error: { label: "更新失败", description: "检查或下载遇到问题，可重试或打开下载页。", tone: "error" },
 };
+
+const UPDATE_SETTINGS_SECTION_IDS = ["application-update"] as const;
 
 function formatPlatform(capabilities: DesktopPlatformCapabilities | null) {
   if (!capabilities) return "浏览器预览";
@@ -180,6 +183,10 @@ export function ApplicationUpdateSection() {
   const [updateState, setUpdateState] = useState<DesktopUpdateState | null>(null);
   const [actionPhase, setActionPhase] = useState<ActionPhase>(null);
   const [actionMessage, setActionMessage] = useState<{ tone: Tone; text: string } | null>(null);
+  const accordion = usePersistentSingleOpenSection({
+    storageKey: "settings/updates",
+    sectionIds: UPDATE_SETTINGS_SECTION_IDS,
+  });
 
   useEffect(() => {
     const bridge = getDesktopBridge();
@@ -329,7 +336,8 @@ export function ApplicationUpdateSection() {
       title="应用更新 / 版本升级"
       description="桌面安装包的手动检查、下载、安装重启，以及托盘常驻行为说明。"
       icon={<MonitorUp size={16} />}
-      defaultOpen
+      open={accordion.isSectionOpen("application-update")}
+      onOpenChange={(open) => accordion.setSectionOpen("application-update", open)}
     >
       <div className="bg-bg-surface border border-border rounded-lg p-5 flex flex-col gap-5">
         <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-4">

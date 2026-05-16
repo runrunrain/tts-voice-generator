@@ -45,6 +45,7 @@ import {
   getOpenCodePathDiagnostics,
   resolveExecutableOnPath,
   getOpenCodeConfigPathCandidates,
+  resolveOpenCodeProbeContextAsync,
   resolveOpenCodeProcessContext,
   resolvePackageManagerCommand,
 } from "../src/services/opencode-platform.js";
@@ -480,6 +481,45 @@ describe("OpenCode Windows platform helpers", () => {
     expect(plan.file).not.toBe(electronExe);
   });
 
+  it("resolves a Chinese Windows user npm shim through native node argv without cmd.exe", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-中文-opencode-plan-"));
+    const userRoot = path.join(fixtureDir, "Users", "毛润");
+    const appData = path.join(userRoot, "AppData", "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    const cmdShim = path.join(appDataNpm, "opencode.cmd");
+    const extensionlessBin = createOpenCodePackageFixture(appDataNpm, "opencode");
+    const nodeExe = path.join(appDataNpm, "node.exe");
+    const electronExe = path.join(fixtureDir, "TTS Voice Generator.exe");
+    fs.writeFileSync(nodeExe, "", "utf8");
+    fs.writeFileSync(electronExe, "", "utf8");
+    fs.writeFileSync(cmdShim, [
+      "@ECHO off",
+      "GOTO start",
+      ":find_dp0",
+      "SET dp0=%~dp0",
+      "EXIT /b %ERRORLEVEL%",
+      ":start",
+      "SETLOCAL",
+      "CALL :find_dp0",
+      "IF EXIST \"%dp0%\\node.exe\" (",
+      "  SET \"_prog=%dp0%\\node.exe\"",
+      ") ELSE (",
+      "  SET \"_prog=node\"",
+      ")",
+      "endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\opencode-ai\\bin\\opencode\" %*",
+    ].join("\r\n"), "utf8");
+
+    const plan = resolveOpenCodeProcessContext({ PATH: "C:\\Windows\\System32", APPDATA: appData }, "win32", electronExe);
+
+    expect(plan.file).toBe(nodeExe);
+    expect(plan.argsPrefix).toEqual([extensionlessBin]);
+    expect(plan.executionMode).toBe("windows-node-shim");
+    expect(plan.shimPath).toBe(cmdShim);
+    expect(plan.file.toLowerCase()).not.toMatch(/cmd\.exe$|\.cmd$|\.bat$/);
+    expect(plan.argsPrefix.join(" ")).not.toContain("/c");
+  });
+
   it("discovers Program Files nodejs while resolving an npm opencode cmd-shim", () => {
     fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-program-files-node-plan-"));
     const appData = path.join(fixtureDir, "Roaming");
@@ -496,6 +536,27 @@ describe("OpenCode Windows platform helpers", () => {
     fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\n\"%_prog%\" \"%dp0%\\node_modules\\opencode-ai\\bin\\opencode\" %*\r\n", "utf8");
 
     const plan = resolveOpenCodeProcessContext({ PATH: "C:\\Windows\\System32", APPDATA: appData, ProgramFiles: programFiles }, "win32", electronExe);
+
+    expect(plan.file).toBe(nodeExe);
+    expect(plan.argsPrefix).toEqual([extensionlessBin]);
+    expect(plan.executionMode).toBe("windows-node-shim");
+  });
+
+  it("discovers an explicit npm_node_execpath node.exe candidate when Electron execPath is not node", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-npm-node-execpath-plan-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    const nodeDir = path.join(fixtureDir, "node-from-npm-env");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    fs.mkdirSync(nodeDir, { recursive: true });
+    const extensionlessBin = createOpenCodePackageFixture(appDataNpm, "opencode");
+    const nodeExe = path.join(nodeDir, "node.exe");
+    const electronExe = path.join(fixtureDir, "TTS Voice Generator.exe");
+    fs.writeFileSync(nodeExe, "", "utf8");
+    fs.writeFileSync(electronExe, "", "utf8");
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\n\"%_prog%\" \"%dp0%\\node_modules\\opencode-ai\\bin\\opencode\" %*\r\n", "utf8");
+
+    const plan = resolveOpenCodeProcessContext({ PATH: "C:\\Windows\\System32", APPDATA: appData, npm_node_execpath: nodeExe }, "win32", electronExe);
 
     expect(plan.file).toBe(nodeExe);
     expect(plan.argsPrefix).toEqual([extensionlessBin]);
@@ -525,6 +586,26 @@ describe("OpenCode Windows platform helpers", () => {
 
     expect(() => resolveOpenCodeProcessContext({ PATH: "C:\\Windows\\System32", APPDATA: appData }, "win32"))
       .toThrow(/Unable to resolve safe native OpenCode target/);
+  });
+
+  it("skips cmd.exe probe for non-ASCII Windows shim paths and returns an explainable error", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-中文-probe-skip-"));
+    const userRoot = path.join(fixtureDir, "Users", "毛润");
+    const appData = path.join(userRoot, "AppData", "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    const cmdDir = path.join(fixtureDir, "System32");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    fs.mkdirSync(cmdDir, { recursive: true });
+    const cmdShim = path.join(appDataNpm, "opencode.cmd");
+    createOpenCodePackageFixture(appDataNpm, "opencode");
+    fs.writeFileSync(cmdShim, "@echo off\r\n\"%_prog%\" \"%dp0%\\node_modules\\opencode-ai\\bin\\opencode\" %*\r\n", "utf8");
+    const cmdExe = path.join(cmdDir, "cmd.exe");
+    const electronExe = path.join(fixtureDir, "TTS Voice Generator.exe");
+    fs.writeFileSync(cmdExe, "", "utf8");
+    fs.writeFileSync(electronExe, "", "utf8");
+
+    await expect(resolveOpenCodeProbeContextAsync({ PATH: cmdDir, APPDATA: appData, ComSpec: cmdExe }, "win32", electronExe))
+      .rejects.toThrow(/command-shim probe skipped.*non-ASCII characters.*cmd\.exe may corrupt/s);
   });
 
   it("uses a native Windows executable directly when opencode.exe is resolved", () => {
