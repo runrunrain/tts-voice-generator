@@ -1,6 +1,7 @@
 import { vi, describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { Hono } from "hono";
 import fs from "node:fs";
+import path from "node:path";
 
 const testState = vi.hoisted(() => ({ tmpDir: "", dbFilePath: "" }));
 
@@ -111,6 +112,29 @@ function auditionBody(overrides: Record<string, unknown> = {}) {
   return JSON.stringify({ voice: "Zephyr", ...overrides });
 }
 
+function resetAudioDir() {
+  const audioDir = path.join(testState.tmpDir, "audio");
+  fs.rmSync(audioDir, { recursive: true, force: true });
+  fs.mkdirSync(audioDir, { recursive: true });
+}
+
+function listRelativeFiles(root: string): string[] {
+  if (!fs.existsSync(root)) return [];
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(fullPath);
+      } else {
+        files.push(path.relative(root, fullPath).replace(/\\/g, "/"));
+      }
+    }
+  };
+  walk(root);
+  return files.sort();
+}
+
 function deferredResponse() {
   let resolve!: (value: Response) => void;
   const promise = new Promise<Response>((r) => { resolve = r; });
@@ -124,6 +148,7 @@ describe("Voices API probe and availability stats", () => {
   beforeEach(() => {
     closeDb();
     if (fs.existsSync(testState.dbFilePath)) fs.unlinkSync(testState.dbFilePath);
+    resetAudioDir();
     initSchema();
     app = createApp();
     mockFetch = vi.fn();
@@ -341,6 +366,8 @@ describe("Voices API probe and availability stats", () => {
     expect(res.headers.get("content-type")).toContain("audio/wav");
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(res.headers.get("x-audition-voice")).toBe("Zephyr");
+    expect(res.headers.get("x-tts-audition-cache")).toBe("miss");
+    expect(res.headers.get("x-tts-audition-cache-key")).toMatch(/^sha256:[a-f0-9]{64}$/);
     const audioBytes = Buffer.from(await res.arrayBuffer());
     expect(audioBytes.subarray(0, 4).toString("ascii")).toBe("RIFF");
     expect(audioBytes.subarray(8, 12).toString("ascii")).toBe("WAVE");
@@ -395,6 +422,149 @@ describe("Voices API probe and availability stats", () => {
     expect(body.error.message).not.toContain("sk-secretvalue123");
     expect(getDb().select().from(generationJob).all()).toHaveLength(0);
     expect(getDb().select().from(audioAsset).all()).toHaveLength(0);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("audition cache hit returns cached audio without another OpenRouter call", async () => {
+    seedVoice();
+    await seedKey(app);
+    mockFetch.mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3, 4]), {
+      status: 200,
+      headers: { "content-type": "audio/pcm" },
+    }));
+
+    const first = await r(app, "/api/voices/audition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: auditionBody(),
+    });
+    const firstBytes = Buffer.from(await first.arrayBuffer());
+
+    const second = await r(app, "/api/voices/audition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: auditionBody(),
+    });
+    const secondBytes = Buffer.from(await second.arrayBuffer());
+
+    expect(first.status).toBe(200);
+    expect(first.headers.get("x-tts-audition-cache")).toBe("miss");
+    expect(second.status).toBe(200);
+    expect(second.headers.get("x-tts-audition-cache")).toBe("hit");
+    expect(secondBytes.equals(firstBytes)).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(getDb().select().from(generationJob).all()).toHaveLength(0);
+    expect(getDb().select().from(audioAsset).all()).toHaveLength(0);
+  });
+
+  it("audition forceRefresh regenerates and replaces the active cache", async () => {
+    seedVoice();
+    await seedKey(app);
+    mockFetch
+      .mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3, 4]), {
+        status: 200,
+        headers: { "content-type": "audio/pcm" },
+      }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([5, 6, 7, 8]), {
+        status: 200,
+        headers: { "content-type": "audio/pcm" },
+      }));
+
+    const first = await r(app, "/api/voices/audition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: auditionBody(),
+    });
+    const firstBytes = Buffer.from(await first.arrayBuffer());
+
+    const refreshed = await r(app, "/api/voices/audition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: auditionBody({ forceRefresh: true }),
+    });
+    const refreshedBytes = Buffer.from(await refreshed.arrayBuffer());
+
+    const hit = await r(app, "/api/voices/audition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: auditionBody(),
+    });
+    const hitBytes = Buffer.from(await hit.arrayBuffer());
+
+    expect(first.headers.get("x-tts-audition-cache")).toBe("miss");
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.headers.get("x-tts-audition-cache")).toBe("refresh");
+    expect(refreshedBytes.equals(firstBytes)).toBe(false);
+    expect(hit.headers.get("x-tts-audition-cache")).toBe("hit");
+    expect(hitBytes.equals(refreshedBytes)).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("audition refresh failure preserves the old cache for subsequent hits", async () => {
+    seedVoice();
+    await seedKey(app);
+    mockFetch
+      .mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3, 4]), {
+        status: 200,
+        headers: { "content-type": "audio/pcm" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "temporary upstream failure", code: "BAD_REQUEST" } }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }));
+
+    const first = await r(app, "/api/voices/audition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: auditionBody(),
+    });
+    const firstBytes = Buffer.from(await first.arrayBuffer());
+    const firstContentSha = first.headers.get("x-tts-audition-content-sha256");
+
+    const failedRefresh = await r(app, "/api/voices/audition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: auditionBody({ forceRefresh: true }),
+    });
+    const errorBody = await failedRefresh.json();
+
+    const hit = await r(app, "/api/voices/audition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: auditionBody(),
+    });
+    const hitBytes = Buffer.from(await hit.arrayBuffer());
+
+    expect(failedRefresh.status).toBe(400);
+    expect(errorBody.error.metadata.cachePreserved).toBe(true);
+    expect(errorBody.error.metadata.existingGeneratedAt).toEqual(expect.any(String));
+    expect(hit.status).toBe(200);
+    expect(hit.headers.get("x-tts-audition-cache")).toBe("hit");
+    expect(hit.headers.get("x-tts-audition-content-sha256")).toBe(firstContentSha);
+    expect(hitBytes.equals(firstBytes)).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("audition cache path uses hashed directories without raw voice names", async () => {
+    await seedKey(app);
+    const unsafeVoice = "../Unsafe/音色";
+    mockFetch.mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3, 4]), {
+      status: 200,
+      headers: { "content-type": "audio/pcm" },
+    }));
+
+    const res = await r(app, "/api/voices/audition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: auditionBody({ voice: unsafeVoice }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-tts-audition-cache")).toBe("miss");
+    const files = listRelativeFiles(path.join(testState.tmpDir, "audio"));
+    expect(files.length).toBeGreaterThanOrEqual(3);
+    expect(files.every((file) => /^voice-auditions\/v1\/[a-f0-9]{64}\//.test(file))).toBe(true);
+    expect(files.some((file) => file.includes("Unsafe") || file.includes("音色") || file.includes(".."))).toBe(false);
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 

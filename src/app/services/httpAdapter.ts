@@ -21,6 +21,8 @@ import type {
   HistoryStatus,
   HistorySource,
   VoiceProfile,
+  VoiceAuditionCacheStatus,
+  VoiceAuditionOptions,
   VoiceAuditionResult,
   VoiceStats,
   VoiceStatus,
@@ -255,6 +257,9 @@ function extractAuditionError(body: unknown, status: number): VoiceAuditionResul
         message: typeof errorRecord.message === "string" ? errorRecord.message : `试听请求失败 (HTTP ${status})`,
         category: typeof errorRecord.category === "string" ? errorRecord.category : undefined,
         retryable: typeof errorRecord.retryable === "boolean" ? errorRecord.retryable : undefined,
+        metadata: errorRecord.metadata && typeof errorRecord.metadata === "object" && !Array.isArray(errorRecord.metadata)
+          ? errorRecord.metadata as NonNullable<VoiceAuditionResult["error"]>["metadata"]
+          : undefined,
       };
     }
   }
@@ -263,6 +268,11 @@ function extractAuditionError(body: unknown, status: number): VoiceAuditionResul
     code: `HTTP_${status}`,
     message: errorMessageFromBody(status, body),
   };
+}
+
+function readAuditionCacheStatus(headers: Headers): VoiceAuditionCacheStatus | undefined {
+  const value = headers.get("x-tts-audition-cache");
+  return value === "hit" || value === "miss" || value === "refresh" ? value : undefined;
 }
 
 // ─── Format Resolution ────────────────────────────────────────────────────────
@@ -452,7 +462,7 @@ export const httpAdapter: TtsServiceAdapter = {
     }
   },
 
-  async auditionVoice(voiceName: string): Promise<VoiceAuditionResult> {
+  async auditionVoice(voiceName: string, options: VoiceAuditionOptions = {}): Promise<VoiceAuditionResult> {
     const voice = voiceName.trim();
     if (!voice) {
       return {
@@ -478,6 +488,7 @@ export const httpAdapter: TtsServiceAdapter = {
           voice,
           model: "google/gemini-3.1-flash-tts-preview",
           format: "wav",
+          forceRefresh: options.forceRefresh === true,
         }),
       });
 
@@ -507,6 +518,9 @@ export const httpAdapter: TtsServiceAdapter = {
         audioBlob,
         objectUrl,
         latencyMs: Date.now() - start,
+        cacheStatus: readAuditionCacheStatus(response.headers),
+        generatedAt: response.headers.get("x-tts-audition-generated-at") || undefined,
+        cacheKey: response.headers.get("x-tts-audition-cache-key") || undefined,
       };
     } catch (err) {
       return {

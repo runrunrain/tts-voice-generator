@@ -53,12 +53,26 @@ export interface VoiceAuditionResult {
   audioBlob?: Blob;
   objectUrl?: string;
   latencyMs?: number;
+  cacheStatus?: VoiceAuditionCacheStatus;
+  generatedAt?: string;
+  cacheKey?: string;
   error?: {
     code: string;
     message: string;
     category?: string;
     retryable?: boolean;
+    metadata?: {
+      cachePreserved?: boolean;
+      existingGeneratedAt?: string;
+      [key: string]: unknown;
+    };
   };
+}
+
+export type VoiceAuditionCacheStatus = "hit" | "miss" | "refresh";
+
+export interface VoiceAuditionOptions {
+  forceRefresh?: boolean;
 }
 
 // ─── Generation Request / Result ─────────────────────────────────────────────
@@ -988,7 +1002,7 @@ export interface Diagnostics {
 
 export interface TtsServiceAdapter {
   generateSpeech(req: GenerateRequest): Promise<GenerateResult>;
-  auditionVoice?(voiceName: string): Promise<VoiceAuditionResult>;
+  auditionVoice?(voiceName: string, options?: VoiceAuditionOptions): Promise<VoiceAuditionResult>;
   probeVoice(voiceName: string, force?: boolean): Promise<{ status: VoiceStatus; latency: string; cached?: boolean; cacheTtlSeconds?: number | null; lastVerified?: string | null; error?: string }>;
   testConnection(): Promise<ConnectionStatus>;
   listVoices(): VoiceProfile[];

@@ -16,6 +16,12 @@ import { resolveApiKey } from "../services/key-resolver.js";
 import { OpenRouterProvider } from "../services/openrouter-provider.js";
 import { sanitizeText } from "../services/openrouter-provider.js";
 import { classifyErrorCategory } from "../services/tts-generator.js";
+import {
+  commitAuditionCacheEntry,
+  computeAuditionCacheKey,
+  readAuditionCache,
+  type AuditionCacheEntry,
+} from "../services/voice-audition-cache.js";
 import { canonicalizeVoice } from "../utils/voice.js";
 import { resolveTtsFormat, wrapPcm16LeToWav, type AudioFormat } from "../utils/audio-format.js";
 
@@ -25,6 +31,7 @@ const AUDITION_TEXT = "Hello, this is a voice audition.";
 const PROBE_CACHE_TTL_SECONDS = 30;
 const STALE_VERIFICATION_MS = 24 * 60 * 60 * 1000;
 const inFlightProbes = new Map<string, Promise<ProbeResponse>>();
+const inFlightAuditionGenerations = new Map<string, Promise<AuditionCacheEntry>>();
 
 type VoiceProfileRow = typeof voiceProfile.$inferSelect;
 
@@ -158,6 +165,7 @@ const AuditionSchema = z.object({
   voice: z.string().trim().min(1).max(100),
   model: z.string().trim().min(1).max(200).optional().default(DEFAULT_TTS_MODEL),
   format: z.enum(["wav", "pcm", "mp3"]).optional().default("wav"),
+  forceRefresh: z.boolean().optional().default(false),
 });
 
 app.post("/api/voices/audition", async (c) => {
@@ -188,8 +196,23 @@ app.post("/api/voices/audition", async (c) => {
     }), 400);
   }
 
-  const { voice: voiceName, model, format } = parsed.data;
+  const { voice: voiceName, model, format, forceRefresh } = parsed.data;
   const canonicalName = canonicalizeVoice(voiceName);
+  const formatPlan = resolveTtsFormat(model, format as AudioFormat);
+  const cacheKey = computeAuditionCacheKey({
+    canonicalVoice: canonicalName,
+    model,
+    requestedFormat: format as AudioFormat,
+    outputFormat: formatPlan.outputFormat,
+    contentType: formatPlan.mimeType,
+    auditionText: AUDITION_TEXT,
+  });
+
+  const existingCache = await readAuditionCache(cacheKey);
+  if (!forceRefresh && existingCache) {
+    return buildAuditionAudioResponse(existingCache, "hit");
+  }
+
   const apiKey = resolveApiKey();
 
   if (!apiKey) {
@@ -203,49 +226,43 @@ app.post("/api/voices/audition", async (c) => {
     }), 401);
   }
 
-  const formatPlan = resolveTtsFormat(model, format as AudioFormat);
-
   try {
-    const provider = new OpenRouterProvider(apiKey);
-    const result = await provider.generateSpeech({
-      model,
-      input: AUDITION_TEXT,
-      voice: canonicalName,
-      responseFormat: formatPlan.upstreamFormat,
-    });
+    const generationKey = cacheKey;
+    let generationPromise = inFlightAuditionGenerations.get(generationKey);
+    if (!generationPromise) {
+      generationPromise = generateAndCommitAudition({
+        apiKey,
+        originalVoice: voiceName,
+        canonicalVoice: canonicalName,
+        model,
+        requestedFormat: format as AudioFormat,
+        cacheKey,
+        formatPlan,
+      });
+      inFlightAuditionGenerations.set(generationKey, generationPromise);
+    }
 
-    if (!result.ok) {
-      const safeCode = sanitizeText(result.errorCode || "UPSTREAM_ERROR");
+    try {
+      const entry = await generationPromise;
+      return buildAuditionAudioResponse(entry, forceRefresh ? "refresh" : "miss");
+    } finally {
+      if (inFlightAuditionGenerations.get(generationKey) === generationPromise) {
+        inFlightAuditionGenerations.delete(generationKey);
+      }
+    }
+  } catch (err) {
+    if (err instanceof AuditionProviderError) {
       return c.json(buildAuditionError({
         requestId,
         voice: canonicalName,
-        code: safeCode,
-        message: sanitizeText(result.errorMessage),
-        category: classifyErrorCategory(safeCode),
-        retryable: result.retryable,
-        metadata: result.errorMetadata,
-      }), auditionHttpStatus(safeCode, result.statusCode));
+        code: err.code,
+        message: err.message,
+        category: err.category,
+        retryable: err.retryable,
+        metadata: buildAuditionFailureMetadata(err.metadata, forceRefresh, existingCache),
+      }), err.status);
     }
 
-    let audioBuffer = result.audioBuffer;
-    if (formatPlan.wrapPcmToWav) audioBuffer = wrapPcm16LeToWav(audioBuffer, formatPlan.pcmParams);
-    const responseBody = audioBuffer.buffer.slice(
-      audioBuffer.byteOffset,
-      audioBuffer.byteOffset + audioBuffer.byteLength,
-    ) as ArrayBuffer;
-
-    return new Response(responseBody, {
-      status: 200,
-      headers: {
-        "Content-Type": formatPlan.mimeType,
-        "Content-Length": String(audioBuffer.byteLength),
-        "Cache-Control": "no-store",
-        "X-Content-Type-Options": "nosniff",
-        "X-Audition-Voice": canonicalName,
-        "X-Audio-Format": formatPlan.outputFormat,
-      },
-    });
-  } catch (err) {
     return c.json(buildAuditionError({
       requestId,
       voice: canonicalName,
@@ -253,9 +270,126 @@ app.post("/api/voices/audition", async (c) => {
       message: sanitizeText(err instanceof Error ? err.message : "Audition failed"),
       category: "internal",
       retryable: false,
+      metadata: forceRefresh && existingCache ? {
+        cachePreserved: true,
+        existingGeneratedAt: existingCache.metadata.generatedAt,
+      } : undefined,
     }), 500);
   }
 });
+
+async function generateAndCommitAudition(input: {
+  apiKey: string;
+  originalVoice: string;
+  canonicalVoice: string;
+  model: string;
+  requestedFormat: AudioFormat;
+  cacheKey: string;
+  formatPlan: ReturnType<typeof resolveTtsFormat>;
+}): Promise<AuditionCacheEntry> {
+  const provider = new OpenRouterProvider(input.apiKey);
+  const result = await provider.generateSpeech({
+    model: input.model,
+    input: AUDITION_TEXT,
+    voice: input.canonicalVoice,
+    responseFormat: input.formatPlan.upstreamFormat,
+  });
+
+  if (!result.ok) {
+    const safeCode = sanitizeText(result.errorCode || "UPSTREAM_ERROR");
+    throw new AuditionProviderError({
+      code: safeCode,
+      message: sanitizeText(result.errorMessage),
+      category: classifyErrorCategory(safeCode),
+      retryable: result.retryable,
+      status: auditionHttpStatus(safeCode, result.statusCode),
+      metadata: result.errorMetadata,
+    });
+  }
+
+  let audioBuffer = result.audioBuffer;
+  if (input.formatPlan.wrapPcmToWav) audioBuffer = wrapPcm16LeToWav(audioBuffer, input.formatPlan.pcmParams);
+
+  return commitAuditionCacheEntry({
+    cacheKey: input.cacheKey,
+    originalVoice: input.originalVoice,
+    canonicalVoice: input.canonicalVoice,
+    model: input.model,
+    requestedFormat: input.requestedFormat,
+    outputFormat: input.formatPlan.outputFormat,
+    contentType: input.formatPlan.mimeType,
+    auditionText: AUDITION_TEXT,
+    audioBuffer,
+    extension: input.formatPlan.extension,
+  });
+}
+
+function buildAuditionAudioResponse(entry: AuditionCacheEntry, cacheStatus: "hit" | "miss" | "refresh"): Response {
+  const responseBody = entry.audioBuffer.buffer.slice(
+    entry.audioBuffer.byteOffset,
+    entry.audioBuffer.byteOffset + entry.audioBuffer.byteLength,
+  ) as ArrayBuffer;
+  const safeVoiceHeader = toSafeHeaderValue(entry.metadata.canonicalVoice);
+
+  return new Response(responseBody, {
+    status: 200,
+    headers: {
+      "Content-Type": entry.metadata.contentType,
+      "Content-Length": String(entry.audioBuffer.byteLength),
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "X-Audition-Voice": safeVoiceHeader,
+      "X-Audio-Format": entry.metadata.outputFormat,
+      "X-TTS-Audition-Cache": cacheStatus,
+      "X-TTS-Audition-Generated-At": entry.metadata.generatedAt,
+      "X-TTS-Audition-Voice": safeVoiceHeader,
+      "X-TTS-Audition-Cache-Key": `sha256:${entry.cacheKey}`,
+      "X-TTS-Audition-Content-Sha256": entry.metadata.contentSha256,
+    },
+  });
+}
+
+function toSafeHeaderValue(value: string): string {
+  return /^[\x20-\x7E]+$/.test(value) ? value : encodeURIComponent(value);
+}
+
+class AuditionProviderError extends Error {
+  readonly code: string;
+  readonly category: "validation" | "auth" | "throttle" | "upstream" | "internal" | "unknown";
+  readonly retryable: boolean;
+  readonly status: 400 | 401 | 402 | 429 | 502 | 504;
+  readonly metadata?: Record<string, unknown>;
+
+  constructor(input: {
+    code: string;
+    message: string;
+    category: "validation" | "auth" | "throttle" | "upstream" | "internal" | "unknown";
+    retryable: boolean;
+    status: 400 | 401 | 402 | 429 | 502 | 504;
+    metadata?: Record<string, unknown>;
+  }) {
+    super(input.message);
+    this.name = "AuditionProviderError";
+    this.code = input.code;
+    this.category = input.category;
+    this.retryable = input.retryable;
+    this.status = input.status;
+    this.metadata = input.metadata;
+  }
+}
+
+function buildAuditionFailureMetadata(
+  upstreamMetadata: Record<string, unknown> | undefined,
+  forceRefresh: boolean,
+  existingCache: AuditionCacheEntry | null,
+): Record<string, unknown> | undefined {
+  if (!forceRefresh || !existingCache) return upstreamMetadata;
+  return {
+    ...(upstreamMetadata ?? {}),
+    cachePreserved: true,
+    existingGeneratedAt: existingCache.metadata.generatedAt,
+  };
+}
 
 async function runOpenRouterProbe(input: {
   apiKey: string;

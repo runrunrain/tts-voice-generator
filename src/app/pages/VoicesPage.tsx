@@ -6,12 +6,16 @@ import { formatVoiceCompactLabel, getVoiceDisplayMeta, voiceMatchesQuery } from 
 
 type TabFilter = "all" | "verified" | "candidate" | "custom" | "failed";
 type AuditionPhase = "idle" | "loading" | "playing" | "success" | "error";
+type AuditionAction = "play" | "refresh";
 
 interface AuditionUiState {
   phase: AuditionPhase;
+  action?: AuditionAction;
   message?: string;
   code?: string;
   latencyMs?: number;
+  cacheStatus?: VoiceAuditionResult["cacheStatus"];
+  generatedAt?: string;
 }
 
 function statusDotClass(status: VoiceStatus) {
@@ -44,6 +48,41 @@ function formatAuditionFailure(error: VoiceAuditionResult["error"] | undefined) 
   if (code === "REQUEST_TIMEOUT") return "上游试听请求超时，请稍后重试。";
   if (error?.category === "upstream") return `上游试听失败：${error.message}`;
   return error?.message || "试听失败，请稍后重试。";
+}
+
+function formatAuditionGeneratedAt(generatedAt: string | undefined) {
+  if (!generatedAt) return "";
+  const timestamp = Date.parse(generatedAt);
+  if (Number.isNaN(timestamp)) return "";
+  return new Date(timestamp).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatAuditionSuccess(result: VoiceAuditionResult, action: AuditionAction) {
+  const generatedAt = formatAuditionGeneratedAt(result.generatedAt);
+  const suffix = generatedAt ? ` · ${generatedAt}` : "";
+  switch (result.cacheStatus) {
+    case "hit": return `播放本地试听（本地缓存）${suffix}`;
+    case "miss": return `首次生成并已保存${suffix}`;
+    case "refresh": return `试听已更新${suffix}`;
+    default: return action === "refresh" ? `试听已更新${suffix}` : `试听已准备好，本地缓存优先${suffix}`;
+  }
+}
+
+function formatAuditionErrorMessage(error: VoiceAuditionResult["error"] | undefined, action: AuditionAction) {
+  const cachePreserved = error?.metadata?.cachePreserved === true;
+  if (action === "refresh" && cachePreserved) {
+    const existingGeneratedAt = formatAuditionGeneratedAt(error?.metadata?.existingGeneratedAt);
+    return existingGeneratedAt
+      ? `更新失败，旧试听仍可继续播放 · 旧缓存 ${existingGeneratedAt}`
+      : "更新失败，旧试听仍可继续播放";
+  }
+  if (action === "refresh") return `更新试听失败：${formatAuditionFailure(error)}`;
+  return formatAuditionFailure(error);
 }
 
 export function VoicesPage() {
@@ -148,7 +187,12 @@ export function VoicesPage() {
     }, 5000);
   }, [adapter, refreshVoices]);
 
-  const playAuditionUrl = useCallback(async (voiceName: string, objectUrl: string, latencyMs?: number) => {
+  const playAuditionUrl = useCallback(async (
+    voiceName: string,
+    objectUrl: string,
+    latencyMs?: number,
+    feedback?: Pick<AuditionUiState, "message" | "cacheStatus" | "generatedAt">,
+  ) => {
     cleanupActiveAudition({ phase: "success", message: "已切换到新的试听音色" });
 
     const audio = new Audio(objectUrl);
@@ -172,7 +216,16 @@ export function VoicesPage() {
     const handleEnded = () => {
       cleanup();
       clearActiveIfCurrent();
-      setAuditionStates((prev) => ({ ...prev, [voiceName]: { phase: "success", message: "试听完成", latencyMs } }));
+      setAuditionStates((prev) => ({
+        ...prev,
+        [voiceName]: {
+          phase: "success",
+          message: feedback?.message ? `${feedback.message}，试听完成` : "试听完成",
+          latencyMs,
+          cacheStatus: feedback?.cacheStatus,
+          generatedAt: feedback?.generatedAt,
+        },
+      }));
       scheduleAuditionReset(voiceName);
     };
 
@@ -186,7 +239,16 @@ export function VoicesPage() {
     audio.addEventListener("ended", handleEnded, { once: true });
     audio.addEventListener("error", handleError, { once: true });
     activeAuditionRef.current = { voiceName, cleanup };
-    setAuditionStates((prev) => ({ ...prev, [voiceName]: { phase: "playing", message: "正在播放试听", latencyMs } }));
+    setAuditionStates((prev) => ({
+      ...prev,
+      [voiceName]: {
+        phase: "playing",
+        message: feedback?.message ?? "正在播放试听",
+        latencyMs,
+        cacheStatus: feedback?.cacheStatus,
+        generatedAt: feedback?.generatedAt,
+      },
+    }));
 
     try {
       await audio.play();
@@ -199,9 +261,9 @@ export function VoicesPage() {
     }
   }, [cleanupActiveAudition, scheduleAuditionReset]);
 
-  const handleAudition = useCallback(async (voiceName: string) => {
+  const handleAudition = useCallback(async (voiceName: string, action: AuditionAction = "play") => {
     const currentState = auditionStatesRef.current[voiceName];
-    if (currentState?.phase === "playing" && activeAuditionRef.current?.voiceName === voiceName) {
+    if (action === "play" && currentState?.phase === "playing" && activeAuditionRef.current?.voiceName === voiceName) {
       cleanupActiveAudition({ phase: "success", message: "试听已停止" });
       return;
     }
@@ -215,10 +277,17 @@ export function VoicesPage() {
 
     auditionLoadingRef.current.add(voiceName);
     clearAuditionResetTimer(voiceName);
-    setAuditionStates((prev) => ({ ...prev, [voiceName]: { phase: "loading", message: "正在生成试听音频" } }));
+    setAuditionStates((prev) => ({
+      ...prev,
+      [voiceName]: {
+        phase: "loading",
+        action,
+        message: action === "refresh" ? "正在更新试听音频" : "正在准备试听，本地缓存优先",
+      },
+    }));
 
     try {
-      const result = await adapter.auditionVoice(voiceName);
+      const result = await adapter.auditionVoice(voiceName, action === "refresh" ? { forceRefresh: true } : undefined);
       if (!isMountedRef.current) {
         if (result.ok && result.objectUrl) URL.revokeObjectURL(result.objectUrl);
         return;
@@ -228,8 +297,9 @@ export function VoicesPage() {
           ...prev,
           [voiceName]: {
             phase: "error",
+            action,
             code: result.error?.code ?? "AUDITION_ERROR",
-            message: formatAuditionFailure(result.error),
+            message: formatAuditionErrorMessage(result.error, action),
             latencyMs: result.latencyMs,
           },
         }));
@@ -239,18 +309,23 @@ export function VoicesPage() {
 
       const objectUrl = result.objectUrl ?? (result.audioBlob ? URL.createObjectURL(result.audioBlob) : undefined);
       if (!objectUrl) {
-        setAuditionStates((prev) => ({ ...prev, [voiceName]: { phase: "error", code: "NO_AUDIO_URL", message: "后端已返回音频，但浏览器无法创建试听链接。", latencyMs: result.latencyMs } }));
+        setAuditionStates((prev) => ({ ...prev, [voiceName]: { phase: "error", action, code: "NO_AUDIO_URL", message: "后端已返回音频，但浏览器无法创建试听链接。", latencyMs: result.latencyMs } }));
         scheduleAuditionReset(voiceName);
         return;
       }
 
-      await playAuditionUrl(voiceName, objectUrl, result.latencyMs);
+      await playAuditionUrl(voiceName, objectUrl, result.latencyMs, {
+        message: formatAuditionSuccess(result, action),
+        cacheStatus: result.cacheStatus,
+        generatedAt: result.generatedAt,
+      });
     } catch (err) {
       if (!isMountedRef.current) return;
       setAuditionStates((prev) => ({
         ...prev,
         [voiceName]: {
           phase: "error",
+          action,
           code: "UNEXPECTED",
           message: err instanceof Error ? err.message : "试听过程中发生未知错误。",
         },
@@ -410,6 +485,7 @@ export function VoicesPage() {
               const displayMeta = getVoiceDisplayMeta(v.name);
               const auditionState = auditionStates[v.name] ?? { phase: "idle" };
               const isAuditionLoading = auditionState.phase === "loading";
+              const isAuditionRefreshing = isAuditionLoading && auditionState.action === "refresh";
               const isAuditionPlaying = auditionState.phase === "playing";
               return <div
                  key={v.name}
@@ -458,7 +534,7 @@ export function VoicesPage() {
 
                 <div className="flex items-center justify-between mt-auto">
                   <span className="text-[10px] text-text-tertiary">{v.lastVerified ? `上次验证: ${v.lastVerified.slice(5)}` : "未验证"}</span>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center justify-end gap-2">
                     <button
                       className="text-xs font-medium text-text-secondary hover:text-text-primary transition-colors disabled:opacity-50"
                       onClick={(e) => { e.stopPropagation(); handleProbe(v.name); }}
@@ -493,17 +569,30 @@ export function VoicesPage() {
                       }`}
                       onClick={(e) => { e.stopPropagation(); void handleAudition(v.name); }}
                       disabled={isAuditionLoading}
-                      title={isAuditionLoading ? "正在生成试听音频" : isAuditionPlaying ? "点击停止试听" : "试听该音色"}
+                      title={isAuditionLoading ? "正在准备试听" : isAuditionPlaying ? "点击停止试听" : "试听优先播放本地缓存；没有缓存时才生成并保存。"}
                       aria-label={`${formatVoiceCompactLabel(v.name)} ${isAuditionPlaying ? "停止试听" : "试听"}`}
                     >
-                      {isAuditionLoading ? (
+                      {isAuditionLoading && !isAuditionRefreshing ? (
                         <Loader2 size={12} className="animate-spin" />
                       ) : (
                         <Play size={12} fill="currentColor" />
                       )}
-                      {isAuditionLoading ? "生成中" : isAuditionPlaying ? "播放中" : auditionState.phase === "error" ? "重试试听" : "试听"}
+                      {isAuditionLoading && !isAuditionRefreshing ? "准备中" : isAuditionPlaying ? "播放中" : auditionState.phase === "error" ? "重试试听" : "试听"}
+                    </button>
+                    <button
+                      className="flex items-center gap-1 text-xs font-medium text-text-secondary hover:text-text-primary transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={(e) => { e.stopPropagation(); void handleAudition(v.name, "refresh"); }}
+                      disabled={isAuditionLoading}
+                      title={isAuditionRefreshing ? "正在更新试听音频" : "主动重新生成并替换本地试听，可能消耗一次上游额度。"}
+                      aria-label={`${formatVoiceCompactLabel(v.name)} 更新试听`}
+                    >
+                      <RefreshCw size={12} className={isAuditionRefreshing ? "animate-spin" : undefined} />
+                      {isAuditionRefreshing ? "更新中" : "更新试听"}
                     </button>
                   </div>
+                </div>
+                <div className="mt-1.5 text-[10px] text-text-tertiary">
+                  试听优先本地缓存；只有“更新试听”会主动重新生成。
                 </div>
                 {auditionState.phase !== "idle" && auditionState.message && (
                   <div
