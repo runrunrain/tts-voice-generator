@@ -1,7 +1,7 @@
 /**
  * Global state context for TTS Voice Generator.
  *
- * Provides shared generation state between GeneratePage / DirectorPage and RightPanel,
+ * Provides shared generation state between DirectorPage and RightPanel,
  * as well as access to the service adapter and application settings.
  *
  * Uses httpAdapter for real backend communication via /api/* endpoints.

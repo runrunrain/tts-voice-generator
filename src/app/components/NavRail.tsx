@@ -1,5 +1,5 @@
 import { Link, useLocation } from "react-router";
-import { Mic, History, Settings, Play, Clapperboard, Bell, Factory, Bot } from "lucide-react";
+import { Mic, History, Settings, Clapperboard, Bell, Factory, Bot } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 interface NavRailProps {
@@ -15,7 +15,6 @@ interface NavRailLinkItem {
 }
 
 const primaryNavItems: NavRailLinkItem[] = [
-  { path: "/generate", label: "生成", icon: Play, exact: true },
   { path: "/generate/director", label: "导演", icon: Clapperboard },
 ];
 

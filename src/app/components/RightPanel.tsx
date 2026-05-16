@@ -14,6 +14,11 @@ function displaySpeakerLabel(label: string): string {
   return match ? `说话者 ${match[1].toUpperCase()}` : label;
 }
 
+function isDirectorRoute(path: string): boolean {
+  const normalizedPath = path.replace(/\/+$/, "") || "/";
+  return normalizedPath === "/" || normalizedPath === "/generate" || normalizedPath === "/generate/director";
+}
+
 interface RightPanelProps {
   isOpen: boolean;
   onClose: () => void;
@@ -32,7 +37,7 @@ export function RightPanel({ isOpen, onClose }: RightPanelProps) {
           {isTaskWorkspace ? "Agent 自动化"
             : location.pathname.includes("/voices") ? "音色详情"
             : location.pathname.includes("/history") ? "记录预览"
-            : location.pathname.includes("/director") ? "提示词预览"
+            : isDirectorRoute(location.pathname) ? "提示词预览"
             : "生成输出"}
         </h3>
         <button
@@ -694,7 +699,7 @@ function PanelContent({ path }: { path: string }) {
     return <TaskWorkspaceAgentPanel taskId={decodeURIComponent(taskWorkspaceMatch[1])} />;
   }
 
-  if (path.includes("/director")) {
+  if (isDirectorRoute(path)) {
     return <DirectorPreview />;
   }
 

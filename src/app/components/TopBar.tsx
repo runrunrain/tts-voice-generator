@@ -29,11 +29,11 @@ export function TopBar({ agentPanelSlot }: { agentPanelSlot?: ReactNode }) {
       });
   }, []);
 
-  let breadcrumbs = ["生成", "单次"];
-  let title = "语音生成";
+  let breadcrumbs = ["导演模式"];
+  let title = "导演模式";
 
   if (location.pathname.includes("/director")) {
-    breadcrumbs = ["生成", "导演模式"];
+    breadcrumbs = ["导演模式"];
     title = "导演模式";
   } else if (location.pathname.includes("/voices")) {
     breadcrumbs = ["音色管理"];
