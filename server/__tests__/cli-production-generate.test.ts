@@ -26,7 +26,9 @@ const execFile = promisify(execFileCb);
 
 // The CLI script lives at the project root, not inside server/
 const PROJECT_ROOT = path.resolve(import.meta.dirname, "..", "..");
+const SERVER_ROOT = path.resolve(import.meta.dirname, "..");
 const CLI_SCRIPT = path.join(PROJECT_ROOT, "scripts", "tts-agent-cli.ts");
+const TSX_CLI = path.join(SERVER_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
 
 // ─── Lightweight mock server ──────────────────────────────────────────────────
 // Captures the request so we can assert on method/path/body.
@@ -100,8 +102,8 @@ function runCli(args: string[]): Promise<{ stdout: string; stderr: string; exitC
   return new Promise((resolve) => {
     const env = { ...process.env, TTS_API_URL: baseUrl };
     execFile(
-      "npx",
-      ["tsx", CLI_SCRIPT, ...args],
+      process.execPath,
+      [TSX_CLI, CLI_SCRIPT, ...args],
       {
         cwd: PROJECT_ROOT,
         env,
