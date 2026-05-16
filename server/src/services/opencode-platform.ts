@@ -138,6 +138,14 @@ function isSafeNodeScriptTarget(filePath: string, platform: PlatformLike): boole
   return ext !== ".cmd" && ext !== ".bat" && ext !== ".exe" && ext !== ".com";
 }
 
+function isSafeOpenCodeNativeExecutableTarget(filePath: string, platform: PlatformLike): boolean {
+  if (!isSafeShimDerivedPath(filePath, platform) || !fileExists(filePath)) return false;
+  const ext = extnameFor(filePath).toLowerCase();
+  if (ext === ".cmd" || ext === ".bat") return false;
+  const base = basenameFor(filePath).toLowerCase();
+  return isWindows(platform) ? base === "opencode.exe" : base === "opencode";
+}
+
 function isSafeNativeNodeExecutable(filePath: string | undefined, platform: PlatformLike): boolean {
   if (!filePath) return false;
   const normalized = normalizeForBase(filePath);
@@ -262,6 +270,25 @@ function extractNodeScriptCandidatesFromShim(shimPath: string, platform: Platfor
   return Array.from(new Set(candidates));
 }
 
+function extractOpenCodeNativeExecutableCandidatesFromShim(shimPath: string, platform: PlatformLike): string[] {
+  const shimContent = readTextFile(shimPath);
+  if (!shimContent) return [];
+
+  const candidates: string[] = [];
+  const rawCandidates = [
+    ...extractQuotedPathCandidatesFromShim(shimContent, shimPath, platform),
+    ...extractSetAssignmentPathCandidatesFromShim(shimContent, shimPath, platform),
+    ...extractUnquotedPathCandidatesFromShim(shimContent, shimPath, platform),
+  ];
+
+  for (const expanded of rawCandidates) {
+    const normalized = normalizeForBase(expanded);
+    if (isSafeOpenCodeNativeExecutableTarget(normalized, platform)) candidates.push(normalized);
+  }
+
+  return Array.from(new Set(candidates));
+}
+
 function extractNodeExecutableCandidatesFromShim(shimPath: string, platform: PlatformLike): string[] {
   const shimContent = readTextFile(shimPath);
   if (!shimContent) return [];
@@ -329,6 +356,7 @@ function opencodePackageDirectoriesFromShim(shimPath: string): string[] {
 
 function fixedOpenCodeBinCandidates(packageDir: string): string[] {
   return [
+    joinForBase(packageDir, "bin", "opencode.exe"),
     joinForBase(packageDir, "bin", "opencode"),
     joinForBase(packageDir, "bin", "opencode.js"),
     joinForBase(packageDir, "dist", "index.js"),
@@ -336,19 +364,38 @@ function fixedOpenCodeBinCandidates(packageDir: string): string[] {
   ];
 }
 
-function resolveOpenCodeNodeShimTarget(shimPath: string, platform: PlatformLike): string | null {
+type ResolvedOpenCodeShimTarget =
+  | { kind: "node-script"; file: string }
+  | { kind: "native-executable"; file: string };
+
+function openCodePackageBinCandidatesFromShim(shimPath: string, platform: PlatformLike): string[] {
+  return opencodePackageDirectoriesFromShim(shimPath).flatMap((packageDir) => [
+    ...parsePackageJsonBinCandidates(packageDir, platform),
+    ...fixedOpenCodeBinCandidates(packageDir),
+  ]);
+}
+
+function resolveOpenCodeShimTarget(shimPath: string, platform: PlatformLike): ResolvedOpenCodeShimTarget | null {
   const candidates = [
     ...extractNodeScriptCandidatesFromShim(shimPath, platform),
-    ...opencodePackageDirectoriesFromShim(shimPath).flatMap((packageDir) => [
-      ...parsePackageJsonBinCandidates(packageDir, platform),
-      ...fixedOpenCodeBinCandidates(packageDir),
-    ]),
+    ...openCodePackageBinCandidatesFromShim(shimPath, platform),
   ];
 
   for (const candidate of candidates) {
     const normalized = normalizeForBase(candidate);
-    if (isSafeNodeScriptTarget(normalized, platform)) return normalized;
+    if (isSafeNodeScriptTarget(normalized, platform)) return { kind: "node-script", file: normalized };
   }
+
+  const nativeCandidates = [
+    ...extractOpenCodeNativeExecutableCandidatesFromShim(shimPath, platform),
+    ...openCodePackageBinCandidatesFromShim(shimPath, platform),
+  ];
+
+  for (const candidate of nativeCandidates) {
+    const normalized = normalizeForBase(candidate);
+    if (isSafeOpenCodeNativeExecutableTarget(normalized, platform)) return { kind: "native-executable", file: normalized };
+  }
+
   return null;
 }
 
@@ -715,11 +762,21 @@ export function resolveOpenCodeProcessContext(
   }
   const resolved = resolveExecutableOnPath("opencode", env, platform);
   if (resolved.resolved && isWindowsCommandShim(resolved.command)) {
-    const scriptTarget = resolveOpenCodeNodeShimTarget(resolved.command, platform);
-    if (!scriptTarget) {
+    const shimTarget = resolveOpenCodeShimTarget(resolved.command, platform);
+    if (!shimTarget) {
       throw new Error(
         `Unable to resolve safe native OpenCode target from Windows command shim at ${resolved.command}; refusing to execute .cmd/.bat through cmd.exe /c`,
       );
+    }
+    if (shimTarget.kind === "native-executable") {
+      return {
+        file: shimTarget.file,
+        argsPrefix: [],
+        env,
+        resolved: true,
+        executionMode: "native-executable",
+        shimPath: resolved.command,
+      };
     }
     const nodeCommand = resolveSafeNodeExecutableForShim(resolved.command, env, platform, nodeExecPath);
     if (!nodeCommand) {
@@ -729,7 +786,7 @@ export function resolveOpenCodeProcessContext(
     }
     return {
       file: nodeCommand,
-      argsPrefix: [scriptTarget],
+      argsPrefix: [shimTarget.file],
       env,
       resolved: true,
       executionMode: "windows-node-shim",
@@ -763,11 +820,21 @@ export async function resolveOpenCodeProcessContextAsync(
   }
   const resolved = resolveExecutableOnPath("opencode", env, platform);
   if (resolved.resolved && isWindowsCommandShim(resolved.command)) {
-    const scriptTarget = resolveOpenCodeNodeShimTarget(resolved.command, platform);
-    if (!scriptTarget) {
+    const shimTarget = resolveOpenCodeShimTarget(resolved.command, platform);
+    if (!shimTarget) {
       throw new Error(
         `Unable to resolve safe native OpenCode target from Windows command shim at ${resolved.command}; refusing to execute .cmd/.bat through cmd.exe /c`,
       );
+    }
+    if (shimTarget.kind === "native-executable") {
+      return {
+        file: shimTarget.file,
+        argsPrefix: [],
+        env,
+        resolved: true,
+        executionMode: "native-executable",
+        shimPath: resolved.command,
+      };
     }
     const nodeCommand = resolveSafeNodeExecutableForShim(resolved.command, env, platform, nodeExecPath);
     if (!nodeCommand) {
@@ -777,7 +844,7 @@ export async function resolveOpenCodeProcessContextAsync(
     }
     return {
       file: nodeCommand,
-      argsPrefix: [scriptTarget],
+      argsPrefix: [shimTarget.file],
       env,
       resolved: true,
       executionMode: "windows-node-shim",

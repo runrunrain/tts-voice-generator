@@ -520,6 +520,38 @@ describe("OpenCode Windows platform helpers", () => {
     expect(plan.argsPrefix.join(" ")).not.toContain("/c");
   });
 
+  it("resolves an opencode-ai native exe bin from a Chinese Windows npm shim without node or cmd.exe", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-中文-opencode-exe-plan-"));
+    const userRoot = path.join(fixtureDir, "Users", "毛润");
+    const appData = path.join(userRoot, "AppData", "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    const cmdShim = path.join(appDataNpm, "opencode.cmd");
+    const nativeBin = createOpenCodePackageFixture(appDataNpm, "opencode.exe");
+    const electronExe = path.join(fixtureDir, "TTS Voice Generator.exe");
+    fs.writeFileSync(electronExe, "", "utf8");
+    fs.writeFileSync(cmdShim, [
+      "@ECHO off",
+      "GOTO start",
+      ":find_dp0",
+      "SET dp0=%~dp0",
+      "EXIT /b",
+      ":start",
+      "SETLOCAL",
+      "CALL :find_dp0",
+      "\"%dp0%\\node_modules\\opencode-ai\\bin\\opencode.exe\"   %*",
+    ].join("\r\n"), "utf8");
+
+    const plan = resolveOpenCodeProcessContext({ PATH: "C:\\Windows\\System32", APPDATA: appData }, "win32", electronExe);
+
+    expect(plan.file).toBe(nativeBin);
+    expect(plan.argsPrefix).toEqual([]);
+    expect(plan.executionMode).toBe("native-executable");
+    expect(plan.shimPath).toBe(cmdShim);
+    expect(plan.file.toLowerCase()).toMatch(/opencode\.exe$/);
+    expect(plan.file.toLowerCase()).not.toMatch(/cmd\.exe$|\.cmd$|\.bat$/);
+  });
+
   it("discovers Program Files nodejs while resolving an npm opencode cmd-shim", () => {
     fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-program-files-node-plan-"));
     const appData = path.join(fixtureDir, "Roaming");
@@ -1083,6 +1115,62 @@ describe("checkOpenCodeAvailability combined detection", () => {
       expect(captured[1].args).toEqual([jsBin, "providers", "list"]);
       expect(captured[0].args.join(" ")).not.toContain("/c");
       expect(captured[0].env.PATH).toContain(appDataNpm);
+    } finally {
+      if (originalAppData === undefined) delete process.env.APPDATA;
+      else process.env.APPDATA = originalAppData;
+      if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+      else process.env.LOCALAPPDATA = originalLocalAppData;
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  });
+
+  it("uses an opencode-ai native exe from a Chinese Windows npm shim with shell false", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-中文-opencode-exe-runner-"));
+    const userRoot = path.join(fixtureDir, "Users", "毛润");
+    const appData = path.join(userRoot, "AppData", "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    const cmdShim = path.join(appDataNpm, "opencode.cmd");
+    const nativeBin = createOpenCodePackageFixture(appDataNpm, "opencode.exe");
+    fs.writeFileSync(cmdShim, [
+      "@ECHO off",
+      "GOTO start",
+      ":find_dp0",
+      "SET dp0=%~dp0",
+      "EXIT /b",
+      ":start",
+      "SETLOCAL",
+      "CALL :find_dp0",
+      "\"%dp0%\\node_modules\\opencode-ai\\bin\\opencode.exe\"   %*",
+    ].join("\r\n"), "utf8");
+
+    const originalAppData = process.env.APPDATA;
+    const originalLocalAppData = process.env.LOCALAPPDATA;
+    const originalPath = process.env.PATH;
+    process.env.APPDATA = appData;
+    delete process.env.LOCALAPPDATA;
+    process.env.PATH = "C:\\Windows\\System32";
+
+    const captured: Array<{ file: string; args: string[]; shell: unknown; env: Record<string, string | undefined> }> = [];
+    _setExecRunner(async (file: string, args: string[], options: Record<string, unknown>) => {
+      captured.push({ file, args, shell: options.shell, env: options.env as Record<string, string | undefined> });
+      if (file !== nativeBin) throw new Error(`Unexpected file: ${file}`);
+      if (JSON.stringify(args) === JSON.stringify(["--version"])) return { stdout: "v1.15.1\n", stderr: "" };
+      if (JSON.stringify(args) === JSON.stringify(["providers", "list"])) return { stdout: "1 credentials configured", stderr: "" };
+      throw new Error(`Unexpected args: ${JSON.stringify(args)}`);
+    });
+
+    try {
+      const result = await withProcessPlatformAsync("win32", () => checkOpenCodeAvailability());
+      expect(result.available).toBe(true);
+      expect(result.probeExecutionMode).toBe("native-executable");
+      expect(captured).toHaveLength(2);
+      expect(captured[0].file).toBe(nativeBin);
+      expect(captured[0].args).toEqual(["--version"]);
+      expect(captured[0].shell).toBe(false);
+      expect(captured[0].env.PATH).toContain(appDataNpm);
+      expect(captured[0].args.join(" ")).not.toContain("/c");
     } finally {
       if (originalAppData === undefined) delete process.env.APPDATA;
       else process.env.APPDATA = originalAppData;
