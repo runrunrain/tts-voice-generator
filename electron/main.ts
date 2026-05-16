@@ -15,6 +15,15 @@ const DESKTOP_TOKEN_HEADER = "X-TTS-Desktop-Token";
 const HEALTH_TIMEOUT_MS = 15_000;
 const HEALTH_POLL_INTERVAL_MS = 250;
 
+const MACOS_GUI_PATH_CANDIDATES = [
+  "/opt/homebrew/bin",
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+  "/usr/sbin",
+  "/sbin",
+];
+
 type StartedServer = {
   port: number;
   hostname: string;
@@ -41,6 +50,34 @@ let updaterService: DesktopUpdaterService | null = null;
 
 function ensureDirectory(directory: string) {
   fs.mkdirSync(directory, { recursive: true });
+}
+
+function appendUniquePathEntries(basePath: string | undefined, additions: string[]) {
+  const entries = (basePath || "").split(path.delimiter).map((entry) => entry.trim()).filter(Boolean);
+  const seen = new Set(entries);
+  for (const addition of additions) {
+    const normalized = path.normalize(addition.trim());
+    if (!normalized || !path.isAbsolute(normalized) || /[\0\r\n]/.test(normalized) || seen.has(normalized)) continue;
+    entries.push(normalized);
+    seen.add(normalized);
+  }
+  return entries.join(path.delimiter);
+}
+
+function configureMacOSGuiPath() {
+  if (process.platform !== "darwin") return;
+
+  const home = os.homedir();
+  const homeCandidates = home ? [
+    path.join(home, ".npm-global", "bin"),
+    path.join(home, ".local", "bin"),
+    path.join(home, ".bun", "bin"),
+  ] : [];
+
+  process.env.PATH = appendUniquePathEntries(process.env.PATH, [
+    ...MACOS_GUI_PATH_CANDIDATES,
+    ...homeCandidates,
+  ]);
 }
 
 function sanitizeDesktopError(error: unknown): string {
@@ -324,6 +361,7 @@ function unsupportedUpdateResult(): DesktopActionResult {
 
 async function boot() {
   getQuitCoordinator();
+  configureMacOSGuiPath();
   desktopApiToken = crypto.randomBytes(32).toString("base64url");
   configureDesktopEnvironment(desktopApiToken);
 

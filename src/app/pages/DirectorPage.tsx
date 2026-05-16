@@ -616,7 +616,7 @@ export function DirectorPage() {
         {/* No API Key warning overlay */}
         {!hasApiKey && (
           <div className="absolute inset-0 bg-bg-base/60 backdrop-blur-sm flex items-center justify-center z-10">
-            <div className="bg-bg-elevated border border-border rounded-lg p-6 max-w-md flex flex-col gap-4 text-center shadow-shadow-lg">
+            <div className="bg-bg-elevated border border-border rounded-lg p-6 max-w-[28rem] flex flex-col gap-4 text-center shadow-shadow-lg">
               <div className="w-12 h-12 rounded-full bg-error-muted flex items-center justify-center mx-auto">
                 <AlertCircle size={24} className="text-error" />
               </div>
@@ -750,7 +750,7 @@ export function DirectorPage() {
             <AlertCircle size={32} className="text-error" />
           </div>
           <p className="text-text-secondary text-sm font-medium">提示词组装失败</p>
-          <div className="p-4 bg-error-muted/50 rounded-md border border-error/20 flex flex-col gap-2 max-w-lg">
+          <div className="p-4 bg-error-muted/50 rounded-md border border-error/20 flex flex-col gap-2 max-w-[32rem]">
             <div className="flex items-center gap-2 text-sm text-error font-medium">
               <AlertCircle size={16} />
               {assembleError.code}

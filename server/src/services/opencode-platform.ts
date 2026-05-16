@@ -374,6 +374,41 @@ export function getWindowsNpmGlobalPathCandidates(env: Record<string, string | u
   return Array.from(new Set(candidates.map(normalizeForBase)));
 }
 
+export function getNonWindowsOpenCodePathCandidates(
+  env: Record<string, string | undefined> = process.env,
+  platform: PlatformLike = process.platform,
+): string[] {
+  if (isWindows(platform)) return [];
+
+  const candidates: string[] = [];
+  const home = homeDirCandidate(env, platform);
+  const npmPrefix = env.npm_config_prefix?.trim() || env.NPM_CONFIG_PREFIX?.trim();
+
+  if (platform === "darwin") {
+    candidates.push(
+      "/opt/homebrew/bin",
+      "/usr/local/bin",
+      "/opt/homebrew/lib/node_modules/.bin",
+      "/usr/local/lib/node_modules/.bin",
+    );
+  }
+
+  candidates.push("/usr/local/bin", "/usr/bin", "/bin");
+
+  if (home) {
+    candidates.push(
+      joinForBase(home, ".npm-global", "bin"),
+      joinForBase(home, ".local", "bin"),
+      joinForBase(home, ".bun", "bin"),
+    );
+  }
+  if (npmPrefix && isAbsoluteForPlatform(npmPrefix, platform) && !/[\0\r\n]/.test(npmPrefix)) {
+    candidates.push(...dynamicPrefixPathCandidates(npmPrefix, platform));
+  }
+
+  return Array.from(new Set(candidates.map(normalizeForBase)));
+}
+
 function dynamicPrefixPathCandidates(prefix: string, platform: PlatformLike): string[] {
   const normalized = normalizeForBase(prefix.trim());
   if (!normalized || !isAbsoluteForPlatform(normalized, platform)) return [];
@@ -419,8 +454,11 @@ export function buildOpenCodeChildEnv(
   safeEnv: Record<string, string | undefined>,
   platform: PlatformLike = process.platform,
 ): Record<string, string | undefined> {
-  if (!isWindows(platform)) return { ...safeEnv };
   const pathKey = getPathKey(safeEnv);
+  if (!isWindows(platform)) {
+    const nextPath = appendUniquePathEntries(safeEnv[pathKey], getNonWindowsOpenCodePathCandidates(safeEnv, platform), platform);
+    return withPathValue(safeEnv, nextPath, platform);
+  }
   const nextPath = appendUniquePathEntries(safeEnv[pathKey], getWindowsNpmGlobalPathCandidates(safeEnv), platform);
   return withPathValue(safeEnv, nextPath, platform);
 }
@@ -429,8 +467,16 @@ export async function buildOpenCodeChildEnvAsync(
   safeEnv: Record<string, string | undefined>,
   platform: PlatformLike = process.platform,
 ): Promise<Record<string, string | undefined>> {
-  if (!isWindows(platform)) return { ...safeEnv };
   const pathKey = getPathKey(safeEnv);
+  if (!isWindows(platform)) {
+    const prefix = await getNpmGlobalPrefix(buildOpenCodeChildEnv(safeEnv, platform), platform);
+    const additions = [
+      ...getNonWindowsOpenCodePathCandidates(safeEnv, platform),
+      ...(prefix ? dynamicPrefixPathCandidates(prefix, platform) : []),
+    ];
+    const nextPath = appendUniquePathEntries(safeEnv[pathKey], additions, platform);
+    return withPathValue(safeEnv, nextPath, platform);
+  }
   const prefix = await getNpmGlobalPrefix(safeEnv, platform);
   const additions = [
     ...getWindowsNpmGlobalPathCandidates(safeEnv),
@@ -597,7 +643,14 @@ export function resolveOpenCodeProcessContext(
 ): OpenCodeProcessContext {
   const env = buildOpenCodeChildEnv(safeEnv, platform);
   if (!isWindows(platform)) {
-    return { file: "opencode", argsPrefix: [], env, resolved: false, executionMode: "plain" };
+    const resolved = resolveExecutableOnPath("opencode", env, platform);
+    return {
+      file: resolved.command,
+      argsPrefix: [],
+      env,
+      resolved: resolved.resolved,
+      executionMode: resolved.resolved ? "native-executable" : "plain",
+    };
   }
   const resolved = resolveExecutableOnPath("opencode", env, platform);
   if (resolved.resolved && isWindowsCommandShim(resolved.command)) {
@@ -638,7 +691,14 @@ export async function resolveOpenCodeProcessContextAsync(
 ): Promise<OpenCodeProcessContext> {
   const env = await buildOpenCodeChildEnvAsync(safeEnv, platform);
   if (!isWindows(platform)) {
-    return { file: "opencode", argsPrefix: [], env, resolved: false, executionMode: "plain" };
+    const resolved = resolveExecutableOnPath("opencode", env, platform);
+    return {
+      file: resolved.command,
+      argsPrefix: [],
+      env,
+      resolved: resolved.resolved,
+      executionMode: resolved.resolved ? "native-executable" : "plain",
+    };
   }
   const resolved = resolveExecutableOnPath("opencode", env, platform);
   if (resolved.resolved && isWindowsCommandShim(resolved.command)) {
@@ -867,7 +927,12 @@ export function getEffectiveOpenCodePathCandidates(
   platform: PlatformLike = process.platform,
   npmGlobalPrefix?: string | null,
 ): string[] {
-  if (!isWindows(platform)) return [];
+  if (!isWindows(platform)) {
+    return Array.from(new Set([
+      ...getNonWindowsOpenCodePathCandidates(safeEnv, platform),
+      ...(npmGlobalPrefix ? dynamicPrefixPathCandidates(npmGlobalPrefix, platform) : []),
+    ].map(normalizeForBase)));
+  }
   return Array.from(new Set([
     ...getWindowsNpmGlobalPathCandidates(safeEnv),
     ...(npmGlobalPrefix ? dynamicPrefixPathCandidates(npmGlobalPrefix, platform) : []),
@@ -879,7 +944,7 @@ export async function getOpenCodePathDiagnostics(
   platform: PlatformLike = process.platform,
 ): Promise<OpenCodePathDiagnostics> {
   const systemResolved = resolveExecutableOnPath("opencode", safeEnv, platform);
-  const prefix = isWindows(platform) ? await getNpmGlobalPrefix(safeEnv, platform) : null;
+  const prefix = await getNpmGlobalPrefix(buildOpenCodeChildEnv(safeEnv, platform), platform);
   const effectivePathCandidates = getEffectiveOpenCodePathCandidates(safeEnv, platform, prefix);
   let resolutionError: string | null = null;
   let runResolutionError: string | null = null;

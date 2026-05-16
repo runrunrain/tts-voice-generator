@@ -482,7 +482,7 @@ export function SettingsPage() {
           <div className="flex flex-col gap-2">
             <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">Settings Hub</p>
             <h2 className="font-display text-3xl font-bold text-text-primary">设置</h2>
-            <p className="max-w-3xl text-sm leading-6 text-text-tertiary">
+            <p className="max-w-[48rem] text-sm leading-6 text-text-tertiary">
               主页面仅保留设置入口。点击卡片会直接进入对应二级页面，不在当前页面展开表单，避免长列表堆叠造成的定位负担。
             </p>
           </div>
@@ -512,7 +512,7 @@ export function SettingsPage() {
           </Link>
           <div className="flex flex-col gap-1">
             <h2 className="text-2xl font-bold font-display text-text-primary">{currentSection?.title}</h2>
-            <p className="max-w-3xl text-sm leading-6 text-text-tertiary">{currentSection?.description}</p>
+            <p className="max-w-[48rem] text-sm leading-6 text-text-tertiary">{currentSection?.description}</p>
           </div>
         </div>
 

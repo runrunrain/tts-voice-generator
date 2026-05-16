@@ -39,7 +39,10 @@ import {
   buildOpenCodeChildEnv,
   buildOpenCodeChildEnvAsync,
   detectInstallMethod,
+  getEffectiveOpenCodePathCandidates,
   getNpmGlobalPrefix,
+  getNonWindowsOpenCodePathCandidates,
+  getOpenCodePathDiagnostics,
   resolveExecutableOnPath,
   getOpenCodeConfigPathCandidates,
   resolveOpenCodeProcessContext,
@@ -65,6 +68,11 @@ function cleanupDir(dir: string) {
   if (fs.existsSync(dir)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+function isOpenCodeExecutableCommand(file: string): boolean {
+  const baseName = path.basename(file).toLowerCase();
+  return file === "opencode" || baseName === "opencode" || baseName === "opencode.exe" || baseName === "opencode.cmd";
 }
 
 function createOpenCodePackageFixture(appDataNpm: string, binName = "opencode.js"): string {
@@ -138,7 +146,7 @@ function sampleConfigWithProviders(apiKeyCount: number): Record<string, unknown>
 /** Create a mock _execRunner that responds to opencode commands */
 function createMockExecRunner(responses: Array<{ args: string[]; result: { stdout: string; stderr: string } | Error }>) {
   return async (file: string, args: string[], _options: Record<string, unknown>) => {
-    if (file !== "opencode") throw new Error(`Unexpected command: ${file}`);
+    if (!isOpenCodeExecutableCommand(file)) throw new Error(`Unexpected command: ${file}`);
     for (const resp of responses) {
       if (JSON.stringify(args) === JSON.stringify(resp.args)) {
         if (resp.result instanceof Error) throw resp.result;
@@ -604,6 +612,78 @@ describe("OpenCode Windows platform helpers", () => {
   });
 });
 
+describe("OpenCode non-Windows PATH helpers", () => {
+  let fixtureDir: string | null = null;
+
+  afterEach(() => {
+    _resetOpenCodePlatformCachesForTests();
+    if (fixtureDir) {
+      cleanupDir(fixtureDir);
+      fixtureDir = null;
+    }
+  });
+
+  it("augments macOS GUI PATH with Homebrew and user npm candidates", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "darwin-opencode-path-"));
+    const home = path.join(fixtureDir, "home");
+    const userBin = path.join(home, ".npm-global", "bin");
+    fs.mkdirSync(userBin, { recursive: true });
+    const opencodeBin = path.join(userBin, "opencode");
+    fs.writeFileSync(opencodeBin, "#!/usr/bin/env node\n", "utf8");
+
+    const candidates = getNonWindowsOpenCodePathCandidates({ PATH: "/usr/bin", HOME: home }, "darwin");
+    const enhancedEnv = buildOpenCodeChildEnv({ PATH: "/usr/bin", HOME: home }, "darwin");
+    const resolved = resolveExecutableOnPath("opencode", enhancedEnv, "darwin");
+    const plan = resolveOpenCodeProcessContext({ PATH: "/usr/bin", HOME: home }, "darwin");
+
+    expect(candidates).toContain("/opt/homebrew/bin");
+    expect(candidates).toContain("/usr/local/bin");
+    expect(candidates).toContain(userBin);
+    expect(enhancedEnv.PATH?.split(path.delimiter)).toContain(userBin);
+    expect(resolved.resolved).toBe(true);
+    expect(isOpenCodeExecutableCommand(resolved.command)).toBe(true);
+    expect(plan.resolved).toBe(true);
+    expect(isOpenCodeExecutableCommand(plan.file)).toBe(true);
+    expect(plan.argsPrefix).toEqual([]);
+    expect(plan.executionMode).toBe("native-executable");
+  });
+
+  it("adds async npm global prefix candidates without using shell resolution", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "darwin-npm-prefix-"));
+    const home = path.join(fixtureDir, "home");
+    const prefixDir = path.join(fixtureDir, "npm-prefix");
+    _setNpmGlobalPrefixRunnerForTests(async (_file, _args, options) => {
+      expect(options.shell).toBe(false);
+      return { stdout: `${prefixDir}\n`, stderr: "" };
+    });
+
+    const enhancedEnv = await buildOpenCodeChildEnvAsync({ PATH: "/usr/bin", HOME: home }, "darwin");
+    const entries = enhancedEnv.PATH?.split(path.delimiter) ?? [];
+    const effectiveCandidates = getEffectiveOpenCodePathCandidates({ PATH: "/usr/bin", HOME: home }, "darwin", prefixDir);
+
+    expect(entries).toContain(path.join(prefixDir, "bin"));
+    expect(effectiveCandidates).toContain(path.join(prefixDir, "bin"));
+  });
+
+  it("reports augmented-path when OpenCode is found only through macOS PATH candidates", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "darwin-diagnostics-"));
+    const home = path.join(fixtureDir, "home");
+    const userBin = path.join(home, ".npm-global", "bin");
+    fs.mkdirSync(userBin, { recursive: true });
+    const opencodeBin = path.join(userBin, "opencode");
+    fs.writeFileSync(opencodeBin, "#!/usr/bin/env node\n", "utf8");
+    _setNpmGlobalPrefixRunnerForTests(async () => ({ stdout: "", stderr: "" }));
+
+    const diagnostics = await getOpenCodePathDiagnostics({ PATH: "/usr/bin", HOME: home }, "darwin");
+
+    expect(diagnostics.pathState).toBe("augmented-path");
+    expect(isOpenCodeExecutableCommand(diagnostics.executablePath ?? "")).toBe(true);
+    expect(diagnostics.probeExecutionMode).toBe("native-executable");
+    expect(diagnostics.effectivePathCandidates).toContain(userBin);
+    expect(diagnostics.resolutionError).toBeNull();
+  });
+});
+
 // ─── checkOpenCodeAvailability (combined detection) ────────────────────────────
 
 describe("checkOpenCodeAvailability combined detection", () => {
@@ -627,6 +707,7 @@ describe("checkOpenCodeAvailability combined detection", () => {
 
   afterEach(() => {
     _resetExecRunner();
+    _resetOpenCodePlatformCachesForTests();
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
@@ -697,7 +778,7 @@ describe("checkOpenCodeAvailability combined detection", () => {
   it("uses auth list alias when providers list has no credential signal", async () => {
     const capturedArgs: string[][] = [];
     _setExecRunner(async (file: string, args: string[], _options: Record<string, unknown>) => {
-      if (file !== "opencode") throw new Error(`Unexpected command: ${file}`);
+      if (!isOpenCodeExecutableCommand(file)) throw new Error(`Unexpected command: ${file}`);
       capturedArgs.push(args);
       if (JSON.stringify(args) === JSON.stringify(["--version"])) return { stdout: "v1.15.0\n", stderr: "" };
       if (JSON.stringify(args) === JSON.stringify(["providers", "list"])) return { stdout: "provider table without credential count", stderr: "" };
@@ -794,7 +875,7 @@ describe("checkOpenCodeAvailability combined detection", () => {
     const capturedOptions: Record<string, unknown>[] = [];
     _setExecRunner(async (file: string, args: string[], options: Record<string, unknown>) => {
       capturedOptions.push(options);
-      if (file !== "opencode") throw new Error(`Unexpected command: ${file}`);
+      if (!isOpenCodeExecutableCommand(file)) throw new Error(`Unexpected command: ${file}`);
       if (JSON.stringify(args) === JSON.stringify(["--version"])) {
         return { stdout: "v1.14.30\n", stderr: "" };
       }
@@ -836,6 +917,53 @@ describe("checkOpenCodeAvailability combined detection", () => {
       } else {
         process.env.CLIENT_SECRET = originalClientSecret;
       }
+    }
+  });
+
+  it("uses augmented macOS PATH for availability probes in GUI-like environments", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "darwin-opencode-runner-"));
+    const home = path.join(fixtureDir, "home");
+    const userBin = path.join(home, ".npm-global", "bin");
+    fs.mkdirSync(userBin, { recursive: true });
+    const opencodeBin = path.join(userBin, "opencode");
+    fs.writeFileSync(opencodeBin, "#!/usr/bin/env node\n", "utf8");
+    _setNpmGlobalPrefixRunnerForTests(async () => ({ stdout: "", stderr: "" }));
+
+    const originalPathValue = process.env.PATH;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    process.env.XDG_CONFIG_HOME = "";
+    delete process.env.XDG_DATA_HOME;
+    process.env.PATH = "/usr/bin";
+
+    const captured: Array<{ file: string; args: string[]; env: Record<string, string | undefined>; shell: unknown }> = [];
+    _setExecRunner(async (file: string, args: string[], options: Record<string, unknown>) => {
+      captured.push({
+        file,
+        args,
+        env: options.env as Record<string, string | undefined>,
+        shell: options.shell,
+      });
+      if (!isOpenCodeExecutableCommand(file)) throw new Error(`Unexpected file: ${file}`);
+      if (JSON.stringify(args) === JSON.stringify(["--version"])) return { stdout: "v1.14.50\n", stderr: "" };
+      if (JSON.stringify(args) === JSON.stringify(["providers", "list"])) return { stdout: "1 credentials configured", stderr: "" };
+      throw new Error(`Unexpected opencode args: ${JSON.stringify(args)}`);
+    });
+
+    try {
+      const result = await withProcessPlatformAsync("darwin", () => checkOpenCodeAvailability());
+
+      expect(result.available).toBe(true);
+      expect(result.pathState).toBe("augmented-path");
+      expect(result.probeExecutionMode).toBe("native-executable");
+      expect(captured).toHaveLength(2);
+      expect(isOpenCodeExecutableCommand(captured[0].file)).toBe(true);
+      expect(captured[0].args).toEqual(["--version"]);
+      expect(captured[0].shell).toBe(false);
+      expect(captured[0].env.PATH?.split(path.delimiter)).toContain(userBin);
+    } finally {
+      if (originalPathValue === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPathValue;
     }
   });
 

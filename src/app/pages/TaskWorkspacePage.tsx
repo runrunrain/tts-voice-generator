@@ -125,7 +125,7 @@ function AuditUnavailableState() {
     <div className="h-full border border-border-subtle bg-bg-surface flex flex-col items-center justify-center gap-3 text-center text-text-tertiary">
       <ShieldAlert size={22} className="text-warning" />
       <div className="text-sm font-semibold text-text-secondary">审计记录暂不可用</div>
-      <div className="max-w-md text-xs leading-5">当前前端未发现任务审计时间线 API；此处保持真实不可用空态，不渲染假审计日志。Agent run 历史可在右侧 Agent 自动化面板查看。</div>
+      <div className="max-w-[28rem] text-xs leading-5">当前前端未发现任务审计时间线 API；此处保持真实不可用空态，不渲染假审计日志。Agent run 历史可在右侧 Agent 自动化面板查看。</div>
     </div>
   );
 }
@@ -148,5 +148,5 @@ function TaskHeader({ taskId, title, status, updatedAt, onRefresh }: { taskId: s
 }
 
 function WorkspaceState({ title, hint, icon, action }: { title: string; hint?: string; icon?: React.ReactNode; action?: React.ReactNode }) {
-  return <div className="h-full flex flex-col items-center justify-center gap-3 text-text-tertiary text-center">{icon}<div className="text-sm font-semibold text-text-secondary">{title}</div>{hint && <div className="text-xs max-w-md leading-5">{hint}</div>}{action}</div>;
+  return <div className="h-full flex flex-col items-center justify-center gap-3 text-text-tertiary text-center">{icon}<div className="text-sm font-semibold text-text-secondary">{title}</div>{hint && <div className="text-xs max-w-[28rem] leading-5">{hint}</div>}{action}</div>;
 }

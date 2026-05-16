@@ -147,6 +147,17 @@
   --spacing-2xl: var(--space-2xl);
   --spacing-3xl: var(--space-3xl);
 
+  /* Tailwind v4 resolves named max-w-* utilities through the container scale.
+     Keep these widths in rem so max-w-sm/md/lg/3xl are not narrowed by the
+     pixel-based spacing tokens above. */
+  --container-sm: 24rem;
+  --container-md: 28rem;
+  --container-lg: 32rem;
+  --container-xl: 36rem;
+  --container-2xl: 42rem;
+  --container-3xl: 48rem;
+  --container-4xl: 56rem;
+
   --radius-xs: var(--radius-xs);
   --radius-sm: var(--radius-sm);
   --radius-md: var(--radius-md);
