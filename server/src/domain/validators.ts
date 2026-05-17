@@ -566,13 +566,84 @@ function truncateTranscriptSample(value: string): string {
   return value.trim().slice(0, 160);
 }
 
+function stripInlineMarkdownDecorators(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/\*(.+?)\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/_(.+?)_/g, "$1")
+    .replace(/`(.+?)`/g, "$1")
+    .replace(/\[(.+?)\]\(.+?\)/g, "$1")
+    .replace(/~~(.+?)~~/g, "$1")
+    .trim();
+}
+
+function normalizeGenerationInstructionLine(line: string): string {
+  let normalized = stripInlineMarkdownDecorators(line);
+  for (let i = 0; i < 6; i++) {
+    const previous = normalized;
+    normalized = normalized
+      .trim()
+      .replace(/^[\s"'“”‘’`【】\[\]（）(){}<>《》「」『』〔〕〖〗〈〉，,。.!！?？;；、]+|[\s"'“”‘’`【】\[\]（）(){}<>《》「」『』〔〕〖〗〈〉，,。.!！?？;；、]+$/g, "")
+      .replace(/^\s*>+\s*/, "")
+      .replace(/^\s*#{1,6}\s*/, "")
+      .replace(/^\s*(?:[-*+•]\s*)?\[[ xX]\]\s*/, "")
+      .replace(/^\s*(?:[-*+•]|[0-9０-９]+[.)、．]|[一二三四五六七八九十百千万]+[.)、．])\s*/, "")
+      .trim();
+    if (normalized === previous) break;
+  }
+  return normalized;
+}
+
+function isGenerationInstructionLine(line: string): boolean {
+  const normalized = normalizeGenerationInstructionLine(line);
+  if (!normalized) return false;
+
+  const hasInstructionScope = /(?:以下|下列|下面|上述|上面|所给|给定|这些|此(?:份|段|个)?|本(?:需求|文档|内容)|following|below|provided|given|from)/i.test(normalized);
+  const endsLikePromptLeadIn = /[：:]\s*$/.test(normalized);
+  const hasDocumentObject = /(?:需求|脚本|内容|文档|列表|requirements?|content|script|document|list)/i.test(normalized);
+
+  const chineseAction = /(?:生成|制作|创建|输出|整理|补全|完善|分析|提取|转换|转成|转为|规范化|标准化)/;
+  const chineseTarget = /(?:语音|台词|对白|生产列表|制作列表|配音|音频|需求|脚本|内容|文档|列表|声线)/;
+  const startsWithChineseDirective = /^(?:请\s*)?(?:根据|基于|为|将|把|分析|补全|完善|整理|生成|制作|创建|输出|提取|转换|转成|转为|规范化|标准化)/.test(normalized)
+    || /^请\s*(?:分析|补全|完善|整理|生成|制作|创建|输出|提取|转换|转成|转为|根据|基于|为|将|把)/.test(normalized);
+  const containsChineseActionTarget = (chineseAction.test(normalized) && chineseTarget.test(normalized))
+    || /请\s*分析并补全/.test(normalized);
+  if (startsWithChineseDirective && containsChineseActionTarget && (hasInstructionScope || endsLikePromptLeadIn || hasDocumentObject)) {
+    return true;
+  }
+
+  const startsWithEnglishGeneration = /^(?:please\s+)?(?:generate|create|produce)\b/i.test(normalized);
+  if (startsWithEnglishGeneration
+    && /(?:voice\s*lines?|production\s*list|tts|audio|dialogue|transcript|script)/i.test(normalized)
+    && /(?:from|for|following|below|provided|given|requirements?|content|script|document)/i.test(normalized)) {
+    return true;
+  }
+
+  const startsWithEnglishTransform = /^(?:please\s+)?(?:convert|transform|turn|rewrite|normalize|analy[sz]e|complete|extract)\b/i.test(normalized);
+  if (startsWithEnglishTransform
+    && (hasInstructionScope || hasDocumentObject || endsLikePromptLeadIn)
+    && /(?:into|to|as|for|voice\s*lines?|production\s*list|tts|audio|dialogue|transcript|script|requirements?|content|document)/i.test(normalized)) {
+    return true;
+  }
+
+  return false;
+}
+
 function classifyTranscriptQualityIssue(transcript: string): QualityIssueCode | null {
   const normalized = transcript.trim();
   if (!normalized || !hasSemanticTranscript(normalized)) return "TRANSCRIPT_EMPTY_OR_PUNCTUATION_ONLY";
+  if (isGenerationInstructionLine(normalized)) return "TRANSCRIPT_NON_SPEECH_DESCRIPTION";
+  if (/^(?:show|scene|hide|with|play|stop|pause|jump|call|return|menu|label|define|image|window)\b/i.test(normalized)) {
+    return "TRANSCRIPT_NON_SPEECH_DESCRIPTION";
+  }
+  if (/^[A-Za-z_][A-Za-z0-9_.-]*\s*["“].+["”]\s*$/.test(normalized)) {
+    return "TRANSCRIPT_PROMPT_STRUCTURE_POLLUTION";
+  }
   if (/^(?:style|pacing|accent|emotion|director(?:'s|s)?\s+notes|performance\s+notes|audio\s+profile|sample\s+context)\s*[：:].+$/i.test(normalized)) {
     return "TRANSCRIPT_PROMPT_STRUCTURE_POLLUTION";
   }
-  if (/^(?:风格|语速|节奏|口音|发音|情绪|导演备注|表演备注|音频档案|场景|示例上下文)\s*[：:].+$/i.test(normalized)) {
+  if (/^(?:风格|语速|节奏|口音|咬字|口音\/咬字|发音|情绪|导演备注|表演备注|音频档案|场景|示例上下文|角色|角色\/身份|身份|姓名|性别|年龄|主要颜色|外貌特征|性格特征)\s*[：:].+$/i.test(normalized)) {
     return "TRANSCRIPT_PROMPT_STRUCTURE_POLLUTION";
   }
   if (/^#{1,6}\s*(?:audio\s+profile|the\s+scene|director(?:'s|s)?\s+notes|sample\s+context|transcript)\b/i.test(normalized)) {
@@ -612,12 +683,14 @@ export function validateBusinessQualityGate(options: {
   draft: RawPromptStructuredAgentDraft;
   candidateLineCount: number;
   voiceMetadataCount?: number;
+  voiceMetadataIdentityCount?: number;
 }): BusinessQualityReport {
   const issues: QualityIssue[] = [];
   const candidateLineCount = Math.max(0, Math.floor(options.candidateLineCount));
   const producedLineCount = options.draft.lines.length;
   const candidateCoverageRatio = candidateLineCount > 0 ? producedLineCount / candidateLineCount : null;
   const voiceMetadataCount = Math.max(0, Math.floor(options.voiceMetadataCount ?? 0));
+  const voiceMetadataIdentityCount = Math.max(0, Math.floor(options.voiceMetadataIdentityCount ?? voiceMetadataCount));
 
   if (options.draft.promptProfiles.length === 0) {
     issues.push({
@@ -784,7 +857,7 @@ export function validateBusinessQualityGate(options: {
     }
   }
 
-  if (voiceMetadataCount >= 2 && producedLineCount >= 2) {
+  if (voiceMetadataIdentityCount >= 2 && producedLineCount >= 2) {
     const normalizedLineLabels = new Set(
       options.draft.lines.map((line) => (line.speakerLabel ?? line.speaker).trim()).filter(Boolean),
     );
@@ -798,9 +871,9 @@ export function validateBusinessQualityGate(options: {
       issues.push({
         code: "ROLE_VOICE_COLLAPSE",
         severity: "blocking",
-        message: "Input contains multiple role or voice metadata sections, but the draft collapsed all line speakerLabel, line voice, and profile speakers to one identity.",
+        message: "Input contains multiple distinct role or voice metadata identities, but the draft collapsed all line speakerLabel, line voice, and profile speakers to one identity.",
         expected: "multiple role-aware speaker labels, voices, or profile speaker identities derived from source metadata",
-        actual: `voiceMetadataCount=${voiceMetadataCount}, lineSpeakerLabels=${normalizedLineLabels.size}, lineVoices=${normalizedLineVoices.size}, profileSpeakerIdentities=${profileSpeakerSignatures.size}`,
+        actual: `voiceMetadataCount=${voiceMetadataCount}, voiceMetadataIdentityCount=${voiceMetadataIdentityCount}, lineSpeakerLabels=${normalizedLineLabels.size}, lineVoices=${normalizedLineVoices.size}, profileSpeakerIdentities=${profileSpeakerSignatures.size}`,
       });
     }
   }

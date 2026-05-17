@@ -602,11 +602,36 @@ export interface CandidateLine {
   speakerLabel: string;
   transcript: string;
   voice: string;
+  sourceRole?: "speakable_line";
+  evidence?: string[];
   sectionTitle?: string;
   sourceDocumentId?: string;
   sourceFileName?: string;
   sourceLineNumber?: number;
   voiceMetadataId?: string;
+}
+
+export type SourceContentRole =
+  | "speakable_line"
+  | "speaker_voice_metadata"
+  | "scene_context"
+  | "stage_direction"
+  | "generation_instruction"
+  | "non_speakable_note"
+  | "structural_marker";
+
+export interface SourceAnnotation {
+  id: string;
+  role: SourceContentRole;
+  text: string;
+  rawLine: string;
+  sectionTitle?: string;
+  sourceDocumentId: string;
+  sourceFileName: string;
+  sourceLineNumber: number;
+  linkedCandidateId?: string;
+  voiceMetadataId?: string;
+  evidence: string[];
 }
 
 export interface VoiceMetadata {
@@ -625,6 +650,7 @@ export interface VoiceMetadata {
 export interface CandidateLineExtractionOutput {
   candidateLines: CandidateLine[];
   voiceMetadata: VoiceMetadata[];
+  sourceAnnotations: SourceAnnotation[];
   speakers: FallbackSpeaker[];
   warnings: Array<{ code: string; message: string }>;
   parseStats: ParseStats;
@@ -643,12 +669,14 @@ export type CandidateFilterReason =
   | "label_only"
   | "label_prefix"
   | "url_only"
-  | "non_speech_description";
+  | "non_speech_description"
+  | "stage_direction";
 
 export interface CandidateExtractionQualitySummary {
   inputLineCount: number;
   candidateLineCount: number;
   voiceMetadataCount: number;
+  voiceMetadataIdentityCount: number;
   skippedByReason: Record<CandidateFilterReason, number>;
   examplesByReason: Partial<Record<CandidateFilterReason, string[]>>;
 }
@@ -1449,6 +1477,142 @@ function emptyCandidateReasonCounts(): Record<CandidateFilterReason, number> {
     label_prefix: 0,
     url_only: 0,
     non_speech_description: 0,
+    stage_direction: 0,
+  };
+}
+
+function isContextOnlySection(sectionTitle: string | null): boolean {
+  const normalized = stripMarkdownDecorators(sectionTitle ?? "").trim();
+  if (!normalized) return false;
+  return /^(?:音频档案|音频资料|声音档案|场景|导演备注|表演备注|示例上下文|上下文|语境|世界观|角色设定|人物设定|背景设定|参考资料|制作要求|生成要求|profile|audio\s*profile|scene|context|director(?:'s|s)?\s+notes|sample\s+context|background|reference)(?:\s|[：:]|$)/i.test(normalized);
+}
+
+function isDialogueSection(sectionTitle: string | null): boolean {
+  const normalized = stripMarkdownDecorators(sectionTitle ?? "").trim();
+  if (!normalized) return false;
+  return /(?:^|[\s：:：\-_/])(?:台词|对白|语音台词|script|dialogue|transcript)(?:\s|[：:]|$)/i.test(normalized);
+}
+
+function isStageDirectionLine(line: string): boolean {
+  const normalized = stripMarkdownDecorators(line).trim();
+  if (/^(?:show|scene|hide|with|play|stop|pause|jump|call|return|menu|label|define|image|window|camera|cut|fade|bgm|sfx)\b/i.test(normalized)) return true;
+  if (/^[（(\[].{1,80}[）)\]]$/.test(normalized) && /(?:上场|退场|出现|离开|沉默|停顿|看向|转身|镜头|音效|音乐|表情|动作|笑|哭|叹气|whisper|pause|beat|silence|camera|sfx|bgm)/i.test(normalized)) return true;
+  return false;
+}
+
+function stripLeadingListMarker(line: string): string {
+  return line
+    .replace(/^\s*>+\s*/, "")
+    .replace(/^\s*(?:[-*+•]\s*)?\[[ xX]\]\s*/, "")
+    .replace(/^\s*(?:[-*+•]|[0-9０-９]+[.)、．]|[一二三四五六七八九十百千万]+[.)、．])\s*/, "")
+    .trim();
+}
+
+function cleanSpeakableText(line: string): string {
+  return stripLeadingListMarker(stripTranscriptFieldLabel(stripMarkdownDecorators(line)).text).trim();
+}
+
+function parseQuotedDialogueLine(line: string): { speakerLabel: string | null; text: string; evidence: string[] } | null {
+  const normalized = cleanSpeakableText(line);
+  const scriptMatch = normalized.match(/^([A-Za-z_][A-Za-z0-9_.-]*)\s*["“](.+)["”]\s*$/);
+  if (scriptMatch) {
+    const text = scriptMatch[2].trim();
+    if (!text || !hasSemanticContent(text)) return null;
+    return { speakerLabel: scriptMatch[1], text, evidence: ["quoted_dialogue", "speaker_before_quote"] };
+  }
+
+  const pureQuoteMatch = normalized.match(/^["“](.+)["”]\s*$/);
+  if (!pureQuoteMatch) return null;
+  const text = pureQuoteMatch[1].trim();
+  if (!text || !hasSemanticContent(text)) return null;
+  return { speakerLabel: null, text, evidence: ["quoted_dialogue"] };
+}
+
+function parseSpeakerPrefixedLine(line: string): { speakerLabel: string; text: string; evidence: string[] } | null {
+  const normalized = cleanSpeakableText(line);
+  const match = normalized.match(/^([^：:]{1,40})\s*[：:]\s*(.+)$/);
+  if (!match) return null;
+  const speakerLabel = stripMarkdownDecorators(match[1]).trim();
+  const text = stripTranscriptFieldLabel(match[2].trim()).text;
+  if (!speakerLabel || !text || !hasSemanticContent(text)) return null;
+  if (/[。！？!?，,；;、]/.test(speakerLabel)) return null;
+  if (/^(?:style|pacing|accent|emotion|director(?:'s|s)?\s+notes|performance\s+notes|audio\s+profile|sample\s+context|transcript|line|text|风格|语速|节奏|口音|咬字|发音|情绪|导演备注|表演备注|音频档案|场景|示例上下文|声线|音色|角色|角色\/身份|身份|姓名|性别|年龄|主要颜色|外貌特征|性格特征|台词|对白|文本|内容|来源|标题|抓取时间)$/i.test(speakerLabel)) return null;
+  return { speakerLabel, text, evidence: ["speaker_label_prefix"] };
+}
+
+function isGenerationInstructionLine(line: string): boolean {
+  const decorated = stripMarkdownDecorators(line).trim();
+  const normalized = stripLeadingListMarker(decorated).trim();
+  if (!normalized) return false;
+
+  const hasInstructionScope = /(?:以下|下列|下面|上述|上面|所给|给定|这些|此(?:份|段|个)?|本(?:需求|文档|内容)|following|below|provided|given|from)/i.test(normalized);
+  const endsLikePromptLeadIn = /[：:]\s*$/.test(decorated);
+  const hasDocumentObject = /(?:需求|脚本|内容|文档|列表|requirements?|content|script|document|list)/i.test(normalized);
+
+  const chineseAction = /(?:生成|制作|创建|输出|整理|补全|完善|分析|提取|转换|转成|转为|规范化|标准化)/;
+  const chineseTarget = /(?:语音|台词|对白|生产列表|制作列表|配音|音频|需求|脚本|内容|文档|列表|声线)/;
+  const startsWithChineseDirective = /^(?:请\s*)?(?:根据|基于|为|将|把|分析|补全|完善|整理|生成|制作|创建|输出|提取|转换|转成|转为|规范化|标准化)/.test(normalized)
+    || /^请\s*(?:分析|补全|完善|整理|生成|制作|创建|输出|提取|转换|转成|转为|根据|基于|为|将|把)/.test(normalized);
+  const containsChineseActionTarget = (chineseAction.test(normalized) && chineseTarget.test(normalized))
+    || /请\s*分析并补全/.test(normalized);
+  if (startsWithChineseDirective && containsChineseActionTarget && (hasInstructionScope || endsLikePromptLeadIn || hasDocumentObject)) {
+    return true;
+  }
+
+  const startsWithEnglishGeneration = /^(?:please\s+)?(?:generate|create|produce)\b/i.test(normalized);
+  if (startsWithEnglishGeneration
+    && /(?:voice\s*lines?|production\s*list|tts|audio|dialogue|transcript|script)/i.test(normalized)
+    && /(?:from|for|following|below|provided|given|requirements?|content|script|document)/i.test(normalized)) {
+    return true;
+  }
+
+  const startsWithEnglishTransform = /^(?:please\s+)?(?:convert|transform|turn|rewrite|normalize|analy[sz]e|complete|extract)\b/i.test(normalized);
+  if (startsWithEnglishTransform
+    && (hasInstructionScope || hasDocumentObject || endsLikePromptLeadIn)
+    && /(?:into|to|as|for|voice\s*lines?|production\s*list|tts|audio|dialogue|transcript|script|requirements?|content|document)/i.test(normalized)) {
+    return true;
+  }
+
+  return false;
+}
+
+function isSceneOrContextLabelLine(line: string): boolean {
+  const normalized = stripMarkdownDecorators(line).trim();
+  return /^(?:场景|上下文|语境|背景|示例上下文|导演备注|表演备注|风格|节奏|语速|口音|咬字|发音|情绪|外貌特征|性格特征|主要颜色|年龄|性别|姓名|scene|context|background|notes?|style|pacing|accent|emotion)\s*[：:].+$/i.test(normalized);
+}
+
+function contentRoleForSkip(reason: CandidateFilterReason, line: string, sectionTitle: string | null): SourceContentRole {
+  if (reason === "voice_metadata") return "speaker_voice_metadata";
+  if (reason === "stage_direction") return "stage_direction";
+  if (isGenerationInstructionLine(line)) return "generation_instruction";
+  if (isContextOnlySection(sectionTitle) || isSceneOrContextLabelLine(line)) return "scene_context";
+  if (reason === "section_marker" || reason === "metadata_source" || reason === "metadata_title" || reason === "metadata_scrape_time" || reason === "url_only" || reason === "label_only") return "structural_marker";
+  return "non_speakable_note";
+}
+
+function createSourceAnnotation(options: {
+  role: SourceContentRole;
+  doc: NormalizeRequirementsInput["documents"][number];
+  lineIdx: number;
+  rawLine: string;
+  text?: string;
+  sectionTitle: string | null;
+  linkedCandidateId?: string;
+  voiceMetadataId?: string;
+  evidence: string[];
+}): SourceAnnotation {
+  return {
+    id: `${options.doc.id}:annotation:${options.lineIdx + 1}:${options.role}`,
+    role: options.role,
+    text: (options.text ?? stripMarkdownDecorators(options.rawLine)).trim(),
+    rawLine: options.rawLine,
+    sectionTitle: options.sectionTitle ?? undefined,
+    sourceDocumentId: options.doc.id,
+    sourceFileName: options.doc.fileName,
+    sourceLineNumber: options.lineIdx + 1,
+    linkedCandidateId: options.linkedCandidateId,
+    voiceMetadataId: options.voiceMetadataId,
+    evidence: options.evidence,
   };
 }
 
@@ -1467,8 +1631,10 @@ function recordCandidateSkip(
 }
 
 function classifyNonSpeechCandidateLine(line: string): CandidateFilterReason | null {
-  const normalized = stripMarkdownDecorators(line).trim();
+  const normalized = stripLeadingListMarker(stripMarkdownDecorators(line)).trim();
   if (!normalized) return "empty";
+  if (isGenerationInstructionLine(normalized)) return "non_speech_description";
+  if (isStageDirectionLine(normalized)) return "stage_direction";
   if (/^https?:\/\/\S+$/i.test(normalized)) return "url_only";
   if (/^(?:来源|出处|数据来源|source|url|link|链接)\s*[：:].*$/i.test(normalized)) return "metadata_source";
   if (/^(?:标题|题目|title)\s*[：:].*$/i.test(normalized)) return "metadata_title";
@@ -1479,11 +1645,17 @@ function classifyNonSpeechCandidateLine(line: string): CandidateFilterReason | n
     return "section_marker";
   }
   if (/^#{1,6}\s+/.test(line.trim())) return "section_marker";
-  if (/^(?:台词|对白|文本|内容|声线|音色|角色|说话人|speaker|voice|voice\s*name|character|role)\s*[：:]\s*$/i.test(normalized)) {
+  if (/^(?:台词|对白|文本|内容|声线|音色|角色|角色\/身份|身份|姓名|性别|年龄|主要颜色|外貌特征|性格特征|说话人|speaker|voice|voice\s*name|character|role)\s*[：:]\s*$/i.test(normalized)) {
     return "label_only";
   }
-  if (/^(?:声线|音色|角色|说话人|speaker|voice|voice\s*name|character|role)\s*[：:].+$/i.test(normalized)) {
+  if (/^(?:声线|音色|角色|角色\/身份|身份|说话人|speaker|voice|voice\s*name|character|role)\s*[：:].+$/i.test(normalized)) {
     return "voice_metadata";
+  }
+  if (/^(?:风格|节奏|语速|口音|咬字|口音\/咬字|发音|情绪|导演备注|表演备注|场景|姓名|性别|年龄|主要颜色|外貌特征|性格特征)\s*[：:].+$/i.test(normalized)) {
+    return "non_speech_description";
+  }
+  if (/^(?:测试节选|本文档|本需求|需求说明|文档说明|共\s*\d+\s*(?:种|组|条)?.*(?:声线|角色|对白|台词|音色)|共[一二三四五六七八九十百千万]+(?:种|组|条)?.*(?:声线|角色|对白|台词|音色))/i.test(normalized)) {
+    return "non_speech_description";
   }
   if (/^(?:以下是|下面是|本段内容|本文内容|整理后|整理如下|章节说明|备注|说明)\b.*(?:台词|对白|内容|整理|来源|说明)/i.test(normalized)) {
     return "non_speech_description";
@@ -1505,6 +1677,7 @@ function extractMarkdownHeading(line: string): string | null {
 function inferSpeakerLabelFromSection(sectionTitle: string | null, fallback: string): string {
   const source = stripMarkdownDecorators(sectionTitle ?? "").trim();
   const withoutOrdinal = source
+    .replace(/^\s*(?:音频档案|音频资料|声音档案|说话人|speaker|character|role)\s*[：:]\s*/i, "")
     .replace(/^\s*(?:[一二三四五六七八九十百千万]+|\d+)[\.、．)]\s*/, "")
     .replace(/^\s*第\s*[一二三四五六七八九十百千万\d]+\s*[章节幕集段]?\s*/, "")
     .trim();
@@ -1512,13 +1685,13 @@ function inferSpeakerLabelFromSection(sectionTitle: string | null, fallback: str
 }
 
 function extractVoiceMetadata(line: string): { kind: VoiceMetadata["kind"]; text: string } | null {
-  const normalized = stripMarkdownDecorators(line).trim();
-  const match = normalized.match(/^(声线|音色|角色|说话人|speaker|voice|voice\s*name|character|role)\s*[：:]\s*(.+)$/i);
+  const normalized = stripLeadingListMarker(stripMarkdownDecorators(line)).trim();
+  const match = normalized.match(/^(声线|音色|角色|角色\/身份|身份|说话人|speaker|voice|voice\s*name|character|role)\s*[：:]\s*(.+)$/i);
   if (!match) return null;
   const key = match[1].toLowerCase();
   const kind: VoiceMetadata["kind"] = key === "音色" || key === "voice" || key === "voice name"
     ? "tone"
-    : key === "角色" || key === "role"
+    : key === "角色" || key === "角色/身份" || key === "身份" || key === "role"
       ? "role"
       : key === "说话人" || key === "speaker"
         ? "speaker"
@@ -1707,6 +1880,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
     return {
       candidateLines: [],
       voiceMetadata: [],
+      sourceAnnotations: [],
       speakers: [],
       warnings,
         parseStats: {
@@ -1722,6 +1896,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
           inputLineCount: 0,
           candidateLineCount: 0,
           voiceMetadataCount: 0,
+          voiceMetadataIdentityCount: 0,
           skippedByReason: emptyCandidateReasonCounts(),
           examplesByReason: {},
         },
@@ -1731,6 +1906,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
   const speakerMap = new Map<string, FallbackSpeaker>();
   const candidateLines: CandidateLine[] = [];
   const voiceMetadata: VoiceMetadata[] = [];
+  const sourceAnnotations: SourceAnnotation[] = [];
   let order = 0;
   let rawLines = 0;
   let totalTableBlocks = 0;
@@ -1814,7 +1990,18 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
       const headingTitle = extractMarkdownHeading(trimmed);
       if (headingTitle) {
         currentSectionTitle = headingTitle;
-        activeVoiceMetadata = null;
+        if (!isContextOnlySection(headingTitle) && !isDialogueSection(headingTitle)) {
+          activeVoiceMetadata = null;
+        }
+        sourceAnnotations.push(createSourceAnnotation({
+          role: isGenerationInstructionLine(headingTitle) ? "generation_instruction" : "structural_marker",
+          doc,
+          lineIdx,
+          rawLine,
+          text: headingTitle,
+          sectionTitle: currentSectionTitle,
+          evidence: ["markdown_heading"],
+        }));
       }
 
       // Skip empty lines
@@ -1872,13 +2059,31 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
         if (tableCandidateReason) {
           metadataRowsSkipped++;
           recordCandidateSkip(skippedByReason, examplesByReason, tableCandidateReason, transcriptCell);
+          sourceAnnotations.push(createSourceAnnotation({
+            role: contentRoleForSkip(tableCandidateReason, transcriptCell, currentSectionTitle),
+            doc,
+            lineIdx,
+            rawLine,
+            text: transcriptCell,
+            sectionTitle: currentSectionTitle,
+            evidence: ["table_transcript_cell_filtered", tableCandidateReason],
+          }));
           continue;
         }
 
-        const cleanedTranscriptCell = stripTranscriptFieldLabel(transcriptCell).text;
+        const cleanedTranscriptCell = cleanSpeakableText(transcriptCell);
         if (!cleanedTranscriptCell || classifyNonSpeechCandidateLine(cleanedTranscriptCell) || !hasSemanticContent(cleanedTranscriptCell)) {
           metadataRowsSkipped++;
           recordCandidateSkip(skippedByReason, examplesByReason, "label_prefix", transcriptCell);
+          sourceAnnotations.push(createSourceAnnotation({
+            role: "non_speakable_note",
+            doc,
+            lineIdx,
+            rawLine,
+            text: transcriptCell,
+            sectionTitle: currentSectionTitle,
+            evidence: ["table_transcript_cell_not_speakable"],
+          }));
           continue;
         }
 
@@ -1901,13 +2106,16 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
             ? cells[block.columnMapping.voice].trim()
             : "Zephyr";
           const speaker = registerSpeaker(speakerMap, speakerLabel, voiceFromTable);
+          const candidateId = crypto.randomUUID();
           candidateLines.push({
-            id: crypto.randomUUID(),
+            id: candidateId,
             order,
             speaker: speaker.id,
             speakerLabel: speaker.label,
             transcript: cleanedSub,
             voice: speaker.voice,
+            sourceRole: "speakable_line",
+            evidence: ["markdown_table", "transcript_column"],
             sectionTitle: block.columnMapping.module !== null && block.columnMapping.module < cells.length
               ? cells[block.columnMapping.module].trim() || undefined
               : currentSectionTitle ?? undefined,
@@ -1915,6 +2123,16 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
             sourceFileName: doc.fileName,
             sourceLineNumber: lineIdx + 1,
           });
+          sourceAnnotations.push(createSourceAnnotation({
+            role: "speakable_line",
+            doc,
+            lineIdx,
+            rawLine,
+            text: cleanedSub,
+            sectionTitle: currentSectionTitle,
+            linkedCandidateId: candidateId,
+            evidence: ["markdown_table", "transcript_column"],
+          }));
 
           order++;
         }
@@ -1941,6 +2159,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
 
       const candidateReason = classifyNonSpeechCandidateLine(trimmed);
       if (candidateReason) {
+        let linkedVoiceMetadataId: string | undefined;
         if (candidateReason === "voice_metadata") {
           const parsedMetadata = extractVoiceMetadata(trimmed);
           if (parsedMetadata) {
@@ -1959,26 +2178,110 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
             };
             voiceMetadata.push(metadata);
             activeVoiceMetadata = metadata;
+            linkedVoiceMetadataId = metadata.id;
           }
         }
         metadataRowsSkipped++;
         recordCandidateSkip(skippedByReason, examplesByReason, candidateReason, trimmed);
+        sourceAnnotations.push(createSourceAnnotation({
+          role: contentRoleForSkip(candidateReason, trimmed, currentSectionTitle),
+          doc,
+          lineIdx,
+          rawLine,
+          sectionTitle: currentSectionTitle,
+          voiceMetadataId: linkedVoiceMetadataId,
+          evidence: ["deterministic_preprocess", candidateReason],
+        }));
         continue;
       }
 
-      // Detect speaker prefix: "A: text", "B: text", "Speaker1: text"
-      const speakerMatch = trimmed.match(/^([A-Za-z][A-Za-z0-9_]*)\s*:\s*(.+)$/);
+      const quotedDialogue = parseQuotedDialogueLine(trimmed);
+      if (quotedDialogue) {
+        const speakerLabel = activeVoiceMetadata?.inferredSpeakerLabel ?? quotedDialogue.speakerLabel ?? "旁白";
+        const speaker = registerSpeaker(speakerMap, speakerLabel, activeVoiceMetadata?.inferredVoice ?? "Zephyr");
+        const candidateId = crypto.randomUUID();
+        candidateLines.push({
+          id: candidateId,
+          order,
+          speaker: speaker.id,
+          speakerLabel: speaker.label,
+          transcript: quotedDialogue.text,
+          voice: speaker.voice,
+          sourceRole: "speakable_line",
+          evidence: quotedDialogue.evidence,
+          sectionTitle: currentSectionTitle ?? undefined,
+          sourceDocumentId: doc.id,
+          sourceFileName: doc.fileName,
+          sourceLineNumber: lineIdx + 1,
+          voiceMetadataId: activeVoiceMetadata?.id,
+        });
+        sourceAnnotations.push(createSourceAnnotation({
+          role: "speakable_line",
+          doc,
+          lineIdx,
+          rawLine,
+          text: quotedDialogue.text,
+          sectionTitle: currentSectionTitle,
+          linkedCandidateId: candidateId,
+          voiceMetadataId: activeVoiceMetadata?.id,
+          evidence: quotedDialogue.evidence,
+        }));
+        order++;
+        continue;
+      }
+
+      const prefixedDialogue = parseSpeakerPrefixedLine(trimmed);
+      if (prefixedDialogue) {
+        const speaker = registerSpeaker(speakerMap, prefixedDialogue.speakerLabel, activeVoiceMetadata?.inferredVoice ?? "Zephyr");
+        const candidateId = crypto.randomUUID();
+        candidateLines.push({
+          id: candidateId,
+          order,
+          speaker: speaker.id,
+          speakerLabel: speaker.label,
+          transcript: prefixedDialogue.text,
+          voice: speaker.voice,
+          sourceRole: "speakable_line",
+          evidence: prefixedDialogue.evidence,
+          sectionTitle: currentSectionTitle ?? undefined,
+          sourceDocumentId: doc.id,
+          sourceFileName: doc.fileName,
+          sourceLineNumber: lineIdx + 1,
+          voiceMetadataId: activeVoiceMetadata?.id,
+        });
+        sourceAnnotations.push(createSourceAnnotation({
+          role: "speakable_line",
+          doc,
+          lineIdx,
+          rawLine,
+          text: prefixedDialogue.text,
+          sectionTitle: currentSectionTitle,
+          linkedCandidateId: candidateId,
+          voiceMetadataId: activeVoiceMetadata?.id,
+          evidence: prefixedDialogue.evidence,
+        }));
+        order++;
+        continue;
+      }
+
+      if (isContextOnlySection(currentSectionTitle) && !isDialogueSection(currentSectionTitle)) {
+        metadataRowsSkipped++;
+        recordCandidateSkip(skippedByReason, examplesByReason, "non_speech_description", trimmed);
+        sourceAnnotations.push(createSourceAnnotation({
+          role: "scene_context",
+          doc,
+          lineIdx,
+          rawLine,
+          sectionTitle: currentSectionTitle,
+          evidence: ["context_section"],
+        }));
+        continue;
+      }
 
       let speakerLabel: string;
       let text: string;
-
-      if (speakerMatch) {
-        speakerLabel = speakerMatch[1];
-        text = speakerMatch[2].trim();
-      } else {
-        speakerLabel = activeVoiceMetadata?.inferredSpeakerLabel ?? "旁白";
-        text = stripTranscriptFieldLabel(trimmed).text;
-      }
+      speakerLabel = activeVoiceMetadata?.inferredSpeakerLabel ?? "旁白";
+      text = cleanSpeakableText(trimmed);
 
       if (!text) continue;
 
@@ -1986,23 +2289,46 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
       if (textReason) {
         metadataRowsSkipped++;
         recordCandidateSkip(skippedByReason, examplesByReason, textReason, trimmed);
+        sourceAnnotations.push(createSourceAnnotation({
+          role: contentRoleForSkip(textReason, text, currentSectionTitle),
+          doc,
+          lineIdx,
+          rawLine,
+          text,
+          sectionTitle: currentSectionTitle,
+          evidence: ["text_after_cleaning_filtered", textReason],
+        }));
         continue;
       }
 
       const speaker = registerSpeaker(speakerMap, speakerLabel, activeVoiceMetadata?.inferredVoice ?? "Zephyr");
+      const candidateId = crypto.randomUUID();
       candidateLines.push({
-        id: crypto.randomUUID(),
+        id: candidateId,
         order,
         speaker: speaker.id,
         speakerLabel: speaker.label,
         transcript: text,
         voice: speaker.voice,
+        sourceRole: "speakable_line",
+        evidence: ["plain_or_bullet_line"],
         sectionTitle: currentSectionTitle ?? undefined,
         sourceDocumentId: doc.id,
         sourceFileName: doc.fileName,
         sourceLineNumber: lineIdx + 1,
         voiceMetadataId: activeVoiceMetadata?.id,
       });
+      sourceAnnotations.push(createSourceAnnotation({
+        role: "speakable_line",
+        doc,
+        lineIdx,
+        rawLine,
+        text,
+        sectionTitle: currentSectionTitle,
+        linkedCandidateId: candidateId,
+        voiceMetadataId: activeVoiceMetadata?.id,
+        evidence: ["plain_or_bullet_line"],
+      }));
 
       order++;
     }
@@ -2021,6 +2347,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
   return {
     candidateLines,
     voiceMetadata,
+    sourceAnnotations,
     speakers: Array.from(speakerMap.values()),
     warnings,
     parseStats,
@@ -2028,6 +2355,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
       inputLineCount: rawLines,
       candidateLineCount: candidateLines.length,
       voiceMetadataCount: voiceMetadata.length,
+      voiceMetadataIdentityCount: new Set(voiceMetadata.map((metadata) => metadata.inferredSpeakerLabel.trim()).filter(Boolean)).size,
       skippedByReason,
       examplesByReason,
     },
@@ -2102,6 +2430,8 @@ export async function runOpenCodeNormalize(
     "- If source metadata says 声线/音色/角色, use it as strong evidence; if metadata is vague, infer from the actual line text and section title.",
     "- High-energy battle/anger/urgent lines should prefer Fenrir or Alnilam; elder/authority/exposition should prefer Charon, Sadaltager, Rasalgethi, or Orus; young/playful lines should prefer Puck or Sadachbia; gentle/comforting lines should prefer Achernar or Vindemiatrix; casual street dialogue should prefer Zubenelgenubi or Aoede.",
     "- Split content by logical sentences or dialogue turns",
+    "- Source documents may be arbitrary semi-structured requirements: prose, bullets, tables, quoted scripts, speaker labels, role metadata, scene/context notes, and generation instructions. Analyze roles instead of assuming a fixed format.",
+    "- Only spoken dialogue/voice-over text belongs in lines[].transcript; use metadata/context/stage directions to complete promptProfiles, speaker styles, scene, sampleContext, and line.style.",
     "- Detect speaker prefixes like \"A:\", \"B:\", \"Speaker1:\" and map to speaker IDs",
     "- For Markdown role sections, derive speakerLabel, voice, and profile speakers from section titles plus 声线/音色/角色 metadata",
     "- Multiple different source voices must not all be 旁白/Zephyr; voice names may be grouped, but speakerLabel/profile speakers must preserve role differences",
@@ -2368,13 +2698,14 @@ export async function runBundleOpenCodeNormalize(
     `1. Read the normalize request at: ${input.normalizeRequestPath}`,
     `2. Read the schema at: ${input.schemaPath}`,
     ...(input.instructionPath ? [`3. Read instructions at: ${input.instructionPath}`] : []),
-    "4. If normalizeRequest.candidateLines is present, read that JSON file first and use candidateLines as the authoritative line set; also read its voiceMetadata array when present.",
-    "5. When candidateLines are present, do NOT reparse Markdown documents and do NOT reread the current production list.",
-    "6. Preserve each candidate line's id, order, and transcript exactly; use candidate speaker, speakerLabel, voice, sectionTitle, and voiceMetadataId as role context.",
-    "7. Create reusable promptProfiles from section titles, 声线/音色/角色 metadata, and candidate speakers, then bind every copied line to the best matching profile.",
-    "8. If candidateLines are absent, read enabled inputDocuments and extract lines from the document JSON wrapper content fields.",
-    "9. Generate a compact Prompt-Structured Production List v2 JSON with schemaVersion, promptProfiles, and lines.",
-    `10. Write the result to: ${input.draftPath}`,
+    "4. If normalizeRequest.candidateLines is present, read that JSON file first. It contains candidateLines plus sourceAnnotations and voiceMetadata from arbitrary semi-structured source documents.",
+    "5. Treat candidateLines as the permissive speakable-line candidate set. Do NOT reparse Markdown documents and do NOT reread the current production list when candidateLines are present.",
+    "6. Preserve each candidate line's id, order, and transcript exactly after trimming; use candidate speaker, speakerLabel, voice, sectionTitle, evidence, and voiceMetadataId as role context.",
+    "7. Read sourceAnnotations too: speaker_voice_metadata, scene_context, stage_direction, generation_instruction, and non_speakable_note roles are context for completing promptProfiles/style/scene/sampleContext, not production lines.",
+    "8. Create reusable promptProfiles from section titles, sourceAnnotations, 声线/音色/角色 metadata, candidate evidence, and candidate speakers, then bind every copied line to the best matching profile.",
+    "9. If candidateLines are absent, read enabled inputDocuments and extract speakable lines from the document JSON wrapper content fields while keeping metadata/context out of transcripts.",
+    "10. Generate a compact Prompt-Structured Production List v2 JSON with schemaVersion, promptProfiles, and lines.",
+    `11. Write the result to: ${input.draftPath}`,
     "",
     "规则：",
     "Voice selection guide:",
@@ -2395,11 +2726,14 @@ export async function runBundleOpenCodeNormalize(
     "- Do NOT output placeholder profile fields such as TODO, TBD, N/A, 待补充, 暂无, 空, or 无",
     "- Reuse the same prompt profile for multiple lines when role, scene, and delivery style match",
     "- Derive line.speakerLabel, line.voice, and promptProfiles[].speakers from source section titles plus voiceMetadata entries such as 声线, 音色, 角色, 说话人, speaker, voice, character, and role",
+    "- Source documents may be free-form prose, bullets, Markdown tables, quoted scripts, or speaker-labeled dialogue; do not assume one fixed format such as Ren'Py.",
+    "- Never convert sourceAnnotations with role speaker_voice_metadata, scene_context, stage_direction, generation_instruction, non_speakable_note, or structural_marker into final lines[].transcript.",
+    "- Use non-speakable sourceAnnotations as evidence for profile fields: scene_context -> scene/sampleContext, speaker_voice_metadata -> audioProfile/speakers/style, stage_direction -> line.style/performanceNotes when relevant, generation_instruction -> task intent only.",
     "- Multiple different voiceMetadata roles must not all be emitted as 旁白/Zephyr; voice names may be grouped by available system voices, but speakerLabel and profile speakers must preserve role differences",
     "- Each promptProfile's speakers must match the role and voice metadata of lines bound to that profile",
     "- Every line MUST include only required compact fields: id, order, speaker, transcript, promptProfileId, voice, plus optional speakerLabel and style when the source has line-specific delivery guidance",
     "- Do NOT repeat optional defaults on lines: omit text, model, responseFormat, status, generationStatus, notes, directorProfileId, and directorOverrideJson unless truly needed; preserve explicit style instead of dropping it",
-    "- Keep transcript clean: move stage directions, mood labels, and prompt labels such as Style:, Pacing:, Accent:, Emotion:, Director's Notes:, Performance Notes:, 音色:, 风格:, 情绪:, 语速: into line.style or promptOverride",
+    "- Keep transcript clean: only spoken words belong in transcript/text. Move stage directions, scene/context notes, generation instructions, mood labels, and prompt labels such as Style:, Pacing:, Accent:, Emotion:, Director's Notes:, Performance Notes:, 音色:, 风格:, 情绪:, 语速: into profile fields, line.style, or promptOverride",
     "- Do not invent unsupported inline audio tags and do not insert free-form tags into transcript; use natural-language style fields",
     "- If line.text is present it MUST match line.transcript after trimming, but prefer omitting text",
     "- line.speaker MUST be one of the speakers defined by its bound prompt profile",

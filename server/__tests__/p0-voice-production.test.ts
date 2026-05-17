@@ -87,6 +87,7 @@ import {
   PasteDocumentSchema,
   validateProductionList,
   validateRawPromptStructuredAgentDraft,
+  validateBusinessQualityGate,
 } from "../src/domain/validators.js";
 import {
   writeArtifact,
@@ -412,6 +413,364 @@ describe("OpenCode Runner", () => {
       voice: "Leda",
       voiceMetadataId: result.voiceMetadata[1].id,
     });
+  });
+
+  it("extractCandidateLines keeps RenPy dialogue clean and excludes context metadata from voice candidates", () => {
+    const content = [
+      "请为以下脚本生成语音：",
+      "",
+      "# 音频档案：Speaker A",
+      "角色/身份：声音清澈且高冷，让人觉得有距离感，但又有点温柔",
+      "音色：Speaker A (主持人): Leda，风格：专业、沉稳",
+      "",
+      "## 场景",
+      "准备启航的船只的甲板上",
+      "",
+      "### 导演备注",
+      "风格：Speaker A: 专业、沉稳",
+      "节奏：自然口语节奏，停顿清楚。",
+      "情绪：根据台词上下文自然匹配情绪。",
+      "",
+      "### 示例上下文",
+      "姓名：弗洛尔.纳尔里斯",
+      "性别：女性",
+      "她曾是学院中最年轻、最耀眼的魔法天才之一。",
+      "",
+      "#### 台词",
+      "    witch \"你也是，被带到这艘船上的人？\"",
+      "    witch\"加油吧，军医。\"",
+      "    show witch normal at center_half",
+      "    witch \"……比我想的要好一点。\"",
+    ].join("\n");
+
+    const result = extractCandidateLines({
+      documents: [{ id: "doc-renpy", fileName: "测试需求.md", enabled: true, content }],
+    });
+
+    expect(result.candidateLines.map((line) => line.transcript)).toEqual([
+      "你也是，被带到这艘船上的人？",
+      "加油吧，军医。",
+      "……比我想的要好一点。",
+    ]);
+    expect(result.candidateLines.every((line) => line.speakerLabel === "Speaker A")).toBe(true);
+    expect(result.candidateLines.every((line) => line.voice === "Leda")).toBe(true);
+    expect(result.candidateLines.some((line) => line.transcript.includes("witch"))).toBe(false);
+    expect(result.candidateLines.some((line) => line.transcript.startsWith("show "))).toBe(false);
+    expect(result.qualitySummary.skippedByReason.non_speech_description).toBeGreaterThan(0);
+    expect(result.qualitySummary.skippedByReason.stage_direction).toBe(1);
+  });
+
+  it("extractCandidateLines normalizes arbitrary requirement-document roles without filename or format assumptions", () => {
+    const fixtures = [
+      {
+        name: "rage大世界npc语音.md representative",
+        content: [
+          "# Rage大世界NPC语音需求表",
+          "> 来源：https://example.invalid/wiki/source",
+          "## 一、单人语音",
+          "### 1. 世家大族/门阀子弟/年轻名士",
+          "**声线**：男青年到中青年，带天然优越感与轻慢感，语速从容",
+          "**台词**：",
+          "- 卖猪屠夫位列三公，简直令天下士人耻笑。",
+          "- 真定玉梨，大如拳，甘如蜜，脆如菱，天上仙果也。",
+          "### 2. 士族女眷",
+          "**声线**：年轻女性，聪慧活泼的贵族女性，少女感",
+          "**台词**：",
+          "- 瞧我这美衣服，这可是蜀锦，如今朝廷二千石以上都穿着呢。",
+          "## 二、双人对白",
+          "### 对白1",
+          "| 角色 | 台词 | 方案一 |",
+          "|------|------|--------|",
+          "| A | 蜀锦纹如云起，行走间流光回雪，才配我等门楣。 | 清朗骄傲青年音 |",
+          "| B | 好看是好看。可在乱路上，越显眼越招贼，护卫得加倍。 | 沉稳审慎中青年音 |",
+        ].join("\n"),
+        minLines: 5,
+        requiredRoles: ["speaker_voice_metadata", "speakable_line", "structural_marker"],
+      },
+      {
+        name: "rage大世界npc语音-测试1of5.md representative",
+        content: [
+          "> 测试节选：本文档从源需求文档中按完整章节节选约 1/5 内容，仅用于测试。",
+          "# Rage大世界NPC语音需求表",
+          "### 1. 世家大族/门阀子弟/年轻名士",
+          "**声线**：男青年到中青年，带天然优越感与轻慢感，语速从容，句尾常略带傲气",
+          "**台词**：",
+          "- 卖猪屠夫位列三公，简直令天下士人耻笑。",
+          "- 累世公卿立大名，少年意气自纵横。你是何人？可有名爵？",
+          "### 2. 族老/经学大儒",
+          "**声线**：中老年男性，低沉稳重，气定神闲，带训诫感、权威感",
+          "**台词**：",
+          "- 今汉室倾颓，天子蒙尘，我等世食汉禄，理当报效，这位壮士，你说对否？",
+        ].join("\n"),
+        minLines: 3,
+        requiredRoles: ["speaker_voice_metadata", "speakable_line"],
+      },
+      {
+        name: "测试需求.md representative",
+        content: [
+          "请为以下脚本生成语音：",
+          "# 音频档案：Speaker A",
+          "角色/身份：声音清澈且高冷，让人觉得有距离感，但又有点温柔",
+          "音色：Speaker A (主持人): Leda，风格：专业、沉稳",
+          "## 场景",
+          "准备启航的船只的甲板上",
+          "### 导演备注",
+          "节奏：自然口语节奏，停顿清楚。",
+          "### 示例上下文",
+          "姓名：弗洛尔.纳尔里斯",
+          "她曾是学院中最年轻、最耀眼的魔法天才之一。",
+          "#### 台词",
+          "witch \"你也是，被带到这艘船上的人？\"",
+          "show witch normal at center_half",
+          "witch\"加油吧，军医。\"",
+        ].join("\n"),
+        minLines: 2,
+        requiredRoles: ["speaker_voice_metadata", "scene_context", "stage_direction", "generation_instruction", "speakable_line"],
+      },
+    ];
+
+    for (const fixture of fixtures) {
+      const result = extractCandidateLines({
+        documents: [{ id: fixture.name, fileName: fixture.name, enabled: true, content: fixture.content }],
+      });
+      const transcripts = result.candidateLines.map((line) => line.transcript);
+      const roles = new Set(result.sourceAnnotations.map((annotation) => annotation.role));
+
+      expect(transcripts.length, fixture.name).toBeGreaterThanOrEqual(fixture.minLines);
+      expect(transcripts.every((text) => !text.startsWith("- ")), fixture.name).toBe(true);
+      expect(transcripts.some((text) => /(?:声线|音色|角色\/身份|姓名|节奏|来源)[：:]/.test(text)), fixture.name).toBe(false);
+      expect(transcripts.some((text) => /^show\b/i.test(text) || text.includes("witch \"")), fixture.name).toBe(false);
+      for (const role of fixture.requiredRoles) {
+        expect(roles.has(role as any), `${fixture.name} role=${role}`).toBe(true);
+      }
+    }
+  });
+
+  it("extractCandidateLines filters generalized generation instructions while allowing polite dialogue", () => {
+    const generationInstructionLines = [
+      { raw: "请根据以下半结构化需求生成语音：", annotationText: "请根据以下半结构化需求生成语音：" },
+      { raw: "请为以下内容生成生产列表：", annotationText: "请为以下内容生成生产列表：" },
+      { raw: "将下列需求转换为标准台词列表：", annotationText: "将下列需求转换为标准台词列表：" },
+      { raw: "请分析并补全以下语音需求：", annotationText: "请分析并补全以下语音需求：" },
+      { raw: "Generate voice lines from the following requirements:", annotationText: "Generate voice lines from the following requirements:" },
+      { raw: "Create a production list for the provided content:", annotationText: "Create a production list for the provided content:" },
+      { raw: "- [ ] 请根据以下半结构化需求生成语音：", annotationText: "- [ ] 请根据以下半结构化需求生成语音：" },
+      { raw: "## 请为以下内容生成生产列表", annotationText: "请为以下内容生成生产列表" },
+      { raw: "> Generate voice lines from the following requirements:", annotationText: "> Generate voice lines from the following requirements:" },
+    ];
+    const politeDialogue = [
+      "- 请你把药拿来，我还能撑住。",
+      "- 请别担心，援军很快就到。",
+    ];
+    const result = extractCandidateLines({
+      documents: [{
+        id: "doc-generation-instruction-probe",
+        fileName: "freeform-generation-instructions.md",
+        enabled: true,
+        content: [...generationInstructionLines.map((line) => line.raw), "#### 台词", ...politeDialogue].join("\n"),
+      }],
+    });
+
+    const transcripts = result.candidateLines.map((line) => line.transcript);
+    const generationInstructionAnnotations = result.sourceAnnotations
+      .filter((annotation) => annotation.role === "generation_instruction")
+      .map((annotation) => annotation.text);
+
+    expect(transcripts).toEqual([
+      "请你把药拿来，我还能撑住。",
+      "请别担心，援军很快就到。",
+    ]);
+    expect(transcripts).not.toContain("请根据以下半结构化需求生成语音：");
+    for (const instruction of generationInstructionLines) {
+      expect(generationInstructionAnnotations).toContain(instruction.annotationText);
+    }
+  });
+
+  it("validateBusinessQualityGate blocks decorated generation instruction transcripts", () => {
+    const draft = {
+      schemaVersion: "tts.production-list.v2",
+      promptProfiles: [{
+        id: "profile_a",
+        name: "战地女声",
+        audioProfile: "清晰自然的年轻女性声线，适合战地对话。",
+        scene: "军医与同伴在撤离前进行短暂交流。",
+        directorNotes: "只朗读角色台词，不朗读需求或生成指令。",
+        sampleContext: "源文档可能包含生成任务说明和实际台词。",
+        speakers: [{ id: "speaker-a", label: "Speaker A", voice: "Leda" }],
+      }],
+      lines: [
+        { id: "l1", order: 0, speaker: "speaker-a", speakerLabel: "Speaker A", transcript: "请根据以下半结构化需求生成语音：", promptProfileId: "profile_a", voice: "Leda" },
+        { id: "l2", order: 1, speaker: "speaker-a", speakerLabel: "Speaker A", transcript: "- 请根据以下半结构化需求生成语音：", promptProfileId: "profile_a", voice: "Leda" },
+        { id: "l3", order: 2, speaker: "speaker-a", speakerLabel: "Speaker A", transcript: "## 请为以下内容生成生产列表", promptProfileId: "profile_a", voice: "Leda" },
+        { id: "l4", order: 3, speaker: "speaker-a", speakerLabel: "Speaker A", transcript: "> Generate voice lines from the following requirements:", promptProfileId: "profile_a", voice: "Leda" },
+        { id: "l5", order: 4, speaker: "speaker-a", speakerLabel: "Speaker A", transcript: "“请你生成一道结界，保护大家。”", promptProfileId: "profile_a", voice: "Leda" },
+      ],
+    };
+
+    const report = validateBusinessQualityGate({ draft, candidateLineCount: 5, voiceMetadataCount: 1, voiceMetadataIdentityCount: 1 });
+
+    expect(report.passed).toBe(false);
+    expect(report.issues.some((issue) => issue.lineId === "l1" && issue.code === "TRANSCRIPT_NON_SPEECH_DESCRIPTION")).toBe(true);
+    expect(report.issues.some((issue) => issue.lineId === "l2" && issue.code === "TRANSCRIPT_NON_SPEECH_DESCRIPTION")).toBe(true);
+    expect(report.issues.some((issue) => issue.lineId === "l3" && issue.code === "TRANSCRIPT_NON_SPEECH_DESCRIPTION")).toBe(true);
+    expect(report.issues.some((issue) => issue.lineId === "l4" && issue.code === "TRANSCRIPT_NON_SPEECH_DESCRIPTION")).toBe(true);
+    expect(report.issues.some((issue) => issue.lineId === "l5")).toBe(false);
+  });
+
+  it("extractCandidateLines keeps the three real requirement documents deterministic and clean", () => {
+    const realDocumentPaths = [
+      "/Users/maorun/maorun-workpace/Database/AI技术/AI语音模型/语音需求表/rage大世界npc语音.md",
+      "/Users/maorun/maorun-workpace/Database/AI技术/AI语音模型/语音需求表/rage大世界npc语音-测试1of5.md",
+      "/Users/maorun/maorun-workpace/Database/AI技术/AI语音模型/语音需求表/测试需求.md",
+    ];
+
+    const summary = realDocumentPaths.map((documentPath, index) => {
+      const content = fs.readFileSync(documentPath, "utf-8");
+      const result = extractCandidateLines({
+        documents: [{ id: `real-doc-${index + 1}`, fileName: path.basename(documentPath), enabled: true, content }],
+      });
+      const draft = {
+        schemaVersion: "tts.production-list.v2",
+        promptProfiles: [{
+          id: "profile_real_doc",
+          name: "真实需求文档声线归一化",
+          audioProfile: "根据源文档声线说明选择具体的 Google TTS 声音，不设置通用兜底类别。",
+          scene: "从真实语音需求文档中提取可朗读台词。",
+          directorNotes: "保留台词内容，排除来源、标题、生成指令、舞台指令和元数据。",
+          sampleContext: "真实文档可能包含 Markdown 标题、表格、角色声线和 Ren'Py 脚本。",
+          speakers: [{ id: "speaker-real-doc", label: "Real Document Speaker", voice: "Zephyr" }],
+        }],
+        lines: result.candidateLines.map((candidate) => ({
+          id: candidate.id,
+          order: candidate.order,
+          speaker: "speaker-real-doc",
+          speakerLabel: candidate.speakerLabel,
+          transcript: candidate.transcript,
+          promptProfileId: "profile_real_doc",
+          voice: candidate.voice,
+        })),
+      };
+      const schemaReport = validateRawPromptStructuredAgentDraft(draft);
+      const qualityReport = validateBusinessQualityGate({
+        draft,
+        candidateLineCount: result.candidateLines.length,
+        voiceMetadataCount: result.voiceMetadata.length,
+        voiceMetadataIdentityCount: result.qualitySummary.voiceMetadataIdentityCount,
+      });
+
+      expect(result.candidateLines.length, documentPath).toBeGreaterThan(0);
+      expect(schemaReport.valid, documentPath).toBe(true);
+      expect(qualityReport.passed, documentPath).toBe(true);
+      expect(JSON.stringify(draft), documentPath).not.toMatch(/neutral voice category|Neutral/);
+
+      return {
+        file: path.basename(documentPath),
+        candidateLines: result.candidateLines.length,
+        voiceMetadata: result.voiceMetadata.length,
+        voiceMetadataIdentityCount: result.qualitySummary.voiceMetadataIdentityCount,
+        sourceAnnotations: result.sourceAnnotations.length,
+        qualityPassed: qualityReport.passed,
+      };
+    });
+
+    expect(summary).toEqual([
+      expect.objectContaining({ file: "rage大世界npc语音.md", candidateLines: expect.any(Number), qualityPassed: true }),
+      expect.objectContaining({ file: "rage大世界npc语音-测试1of5.md", candidateLines: expect.any(Number), qualityPassed: true }),
+      expect.objectContaining({ file: "测试需求.md", candidateLines: expect.any(Number), qualityPassed: true }),
+    ]);
+  });
+
+  it("quality gate permits a valid normalized dataset derived from free-form source context", () => {
+    const result = extractCandidateLines({
+      documents: [{
+        id: "doc-freeform-valid",
+        fileName: "freeform.md",
+        enabled: true,
+        content: [
+          "请根据以下半结构化需求生成语音：",
+          "# 音频档案：Speaker A",
+          "音色：Speaker A (主持人): Leda，风格：专业、沉稳",
+          "## 场景",
+          "准备启航的船只的甲板上",
+          "### 导演备注",
+          "节奏：自然口语节奏，停顿清楚。",
+          "#### 台词",
+          "witch \"你也是，被带到这艘船上的人？\"",
+          "witch \"加油吧，军医。\"",
+          "witch \"……比我想的要好一点。\"",
+        ].join("\n"),
+      }],
+    });
+
+    const draft = {
+      schemaVersion: "tts.production-list.v2",
+      promptProfiles: [{
+        id: "profile_speaker_a",
+        name: "高冷女声旁白",
+        audioProfile: "清澈高冷且略带温柔的年轻女性声线，保持专业沉稳。",
+        scene: "准备启航的船只甲板上，角色与军医进行简短对话。",
+        directorNotes: "自然口语节奏，停顿清楚，不朗读任何角色资料或舞台指令。",
+        sampleContext: "半结构化需求中包含音频档案、场景、导演备注和带引号脚本台词。",
+        style: "清冷、克制、略带距离感",
+        pacing: "自然口语节奏，关键停顿清楚",
+        accent: "清晰自然的中文咬字",
+        emotion: "克制、冷静、轻微温柔",
+        performanceNotes: "只朗读台词内容，舞台说明仅作为表演参考。",
+        speakers: [{ id: "speaker-a", label: "Speaker A", voice: "Leda", style: "清澈高冷、专业沉稳" }],
+      }],
+      lines: result.candidateLines.map((candidate) => ({
+        id: candidate.id,
+        order: candidate.order,
+        speaker: "speaker-a",
+        speakerLabel: "Speaker A",
+        transcript: candidate.transcript,
+        promptProfileId: "profile_speaker_a",
+        voice: "Leda",
+      })),
+    };
+
+    const schemaReport = validateRawPromptStructuredAgentDraft(draft);
+    const qualityReport = validateBusinessQualityGate({
+      draft,
+      candidateLineCount: result.candidateLines.length,
+      voiceMetadataCount: result.voiceMetadata.length,
+    });
+
+    expect(result.sourceAnnotations.some((annotation) => annotation.role === "scene_context")).toBe(true);
+    expect(result.sourceAnnotations.some((annotation) => annotation.role === "generation_instruction" && annotation.text === "请根据以下半结构化需求生成语音：")).toBe(true);
+    expect(result.candidateLines.some((candidate) => candidate.transcript === "请根据以下半结构化需求生成语音：")).toBe(false);
+    expect(result.sourceAnnotations.some((annotation) => annotation.role === "stage_direction")).toBe(false);
+    expect(schemaReport.valid).toBe(true);
+    expect(qualityReport.passed).toBe(true);
+    expect(JSON.stringify(draft)).not.toMatch(/neutral voice category|Neutral/);
+  });
+
+  it("validateBusinessQualityGate blocks old RenPy metadata and stage-direction transcripts", () => {
+    const draft = {
+      schemaVersion: "tts.production-list.v2",
+      promptProfiles: [{
+        id: "profile_a",
+        name: "高冷女声",
+        audioProfile: "清澈高冷且略带温柔的年轻女性声线",
+        scene: "准备启航的船只甲板上，角色与军医交谈",
+        directorNotes: "保持专业沉稳，语速自然，停顿清楚",
+        sampleContext: "弗洛尔在前往许愿岛的船上与军医对话",
+        speakers: [{ id: "speaker-a", label: "Speaker A", voice: "Leda" }],
+      }],
+      lines: [
+        { id: "l1", order: 0, speaker: "speaker-a", transcript: "角色/身份：声音清澈且高冷", promptProfileId: "profile_a", voice: "Leda" },
+        { id: "l2", order: 1, speaker: "speaker-a", transcript: "witch \"你也是，被带到这艘船上的人？\"", promptProfileId: "profile_a", voice: "Leda" },
+        { id: "l3", order: 2, speaker: "speaker-a", transcript: "show witch normal at center_half", promptProfileId: "profile_a", voice: "Leda" },
+      ],
+    };
+
+    const report = validateBusinessQualityGate({ draft, candidateLineCount: 3, voiceMetadataCount: 2 });
+
+    expect(report.passed).toBe(false);
+    expect(report.blockingIssueCount).toBeGreaterThanOrEqual(3);
+    expect(report.issues.map((issue) => issue.lineId).filter(Boolean)).toEqual(["l1", "l2", "l3"]);
+    expect(report.issues.some((issue) => issue.code === "TRANSCRIPT_PROMPT_STRUCTURE_POLLUTION")).toBe(true);
+    expect(report.issues.some((issue) => issue.code === "TRANSCRIPT_NON_SPEECH_DESCRIPTION")).toBe(true);
   });
 
   it("applyFallbackTransform shortens text", () => {

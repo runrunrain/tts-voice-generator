@@ -17,7 +17,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { env } from "../config/env.js";
 import type { VoiceLine, Speaker } from "../domain/validators.js";
-import type { CandidateLine, VoiceMetadata } from "./opencode-runner.js";
+import type { CandidateLine, SourceAnnotation, VoiceMetadata } from "./opencode-runner.js";
 import { formatVoiceGenderSelectionRulesForPrompt, formatVoiceSelectionGuideForPrompt } from "../utils/voice.js";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
@@ -393,12 +393,24 @@ export function generateNormalizeRequestBundle(options: {
  * These lines are not a commit source; the server only commits a validated raw
  * Prompt-Structured v2 draft authored by OpenCode.
  */
-export function writeCandidateLinesArtifact(candidateLinesPath: string, candidateLines: CandidateLine[], voiceMetadata: VoiceMetadata[] = []): CandidateLinesRef {
+export function writeCandidateLinesArtifact(
+  candidateLinesPath: string,
+  candidateLines: CandidateLine[],
+  voiceMetadata: VoiceMetadata[] = [],
+  sourceAnnotations: SourceAnnotation[] = [],
+): CandidateLinesRef {
   const content = JSON.stringify({
     schemaVersion: "tts.candidate-lines.v1",
     generatedAt: new Date().toISOString(),
     count: candidateLines.length,
     voiceMetadataCount: voiceMetadata.length,
+    voiceMetadataIdentityCount: new Set(voiceMetadata.map((metadata) => metadata.inferredSpeakerLabel.trim()).filter(Boolean)).size,
+    sourceAnnotationCount: sourceAnnotations.length,
+    sourceRolePolicy: [
+      "candidateLines are permissive speakable-line candidates extracted from arbitrary semi-structured documents.",
+      "sourceAnnotations preserve nearby context, metadata, stage directions, generation instructions, and non-speakable notes for profile completion.",
+      "Only role=speakable_line may become production-list lines; other roles are evidence for promptProfiles, speaker labels, style, scene, or sampleContext.",
+    ],
     voiceSelectionGuide: {
       policy: [
         "Choose a Gemini voice by matching source metadata, role, scene, emotion, transcript semantics, and the Google/Provider voice table gender when source gender is explicit. Candidate voice is a hint; explicit source voice metadata is stronger evidence.",
@@ -408,6 +420,7 @@ export function writeCandidateLinesArtifact(candidateLinesPath: string, candidat
     },
     candidateLines,
     voiceMetadata,
+    sourceAnnotations,
   });
   const buffer = Buffer.from(content, "utf-8");
   const tempPath = candidateLinesPath + ".tmp";
@@ -492,6 +505,9 @@ export function writeInstructionMarkdown(instructionPath: string, context: Instr
     `- 说话人限制是 profile 级别：每个 promptProfile 最多 2 个 speakers；完整数据集可通过多个 profiles 承载不同角色。`,
     `- 每个 promptProfile 的 speakers 必须匹配绑定到该 profile 的台词角色和音色元数据。`,
     `- 每行 transcript/text 必须保持干净：只放真正要朗读的词句。`,
+    `- 原始需求文档格式不固定，可能是自由文本、项目符号、Markdown 表格、带引号脚本、说话人标签或混合格式；不要假设单一来源格式。`,
+    `- 如果 candidate-lines.json 中包含 sourceAnnotations，必须读取并使用：speakable_line 才能成为最终 lines；speaker_voice_metadata、scene_context、stage_direction、generation_instruction、non_speakable_note、structural_marker 只能作为 profile、speaker、style、scene、sampleContext 的证据。`,
+    `- 不要把场景说明、角色资料、导演备注、生成指令、舞台指令或非朗读备注塞进 transcript/text。`,
     `- 将舞台说明、情绪标签、括号表演提示，以及 Style:, Pacing:, Accent:, Emotion:, Director's Notes:, Performance Notes:, 音色:, 风格:, 情绪:, 语速: 等标签移出 transcript/text，写入 line.style 或 promptOverride。`,
     `- 当 line.style 会改变该行表演时必须保留；不要因为可选就删掉明确风格，只避免重复空值/默认值。`,
     `- 不要发明不支持的内联音频标签，也不要把自由格式标签插入 transcript；请使用自然语言中文风格字段。`,

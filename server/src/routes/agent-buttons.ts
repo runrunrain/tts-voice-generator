@@ -851,6 +851,9 @@ function attemptLateDraftRecoveryFromArtifacts(options: {
     voiceMetadataCount: typeof progress.candidateQualitySummary === "object" && progress.candidateQualitySummary !== null && typeof (progress.candidateQualitySummary as Record<string, unknown>).voiceMetadataCount === "number"
       ? (progress.candidateQualitySummary as Record<string, unknown>).voiceMetadataCount as number
       : 0,
+    voiceMetadataIdentityCount: typeof progress.candidateQualitySummary === "object" && progress.candidateQualitySummary !== null && typeof (progress.candidateQualitySummary as Record<string, unknown>).voiceMetadataIdentityCount === "number"
+      ? (progress.candidateQualitySummary as Record<string, unknown>).voiceMetadataIdentityCount as number
+      : undefined,
     progressPaths: paths,
     recovery: {
       code: "OPENCODE_LATE_DRAFT_RECOVERY",
@@ -921,6 +924,10 @@ function releaseActiveNormalizeRun(taskId: string, runId: string): void {
   }
 }
 
+function countVoiceMetadataIdentities(metadata: Array<{ inferredSpeakerLabel?: string; inferredVoice?: string }>): number {
+  return new Set(metadata.map((item) => (item.inferredSpeakerLabel ?? "").trim()).filter(Boolean)).size;
+}
+
 function finalizeBundleNormalizeDraft(options: {
   c: any;
   db: ReturnType<typeof getDb>;
@@ -936,6 +943,7 @@ function finalizeBundleNormalizeDraft(options: {
   normalizeStartTime: number;
   candidateLineCount: number;
   voiceMetadataCount?: number;
+  voiceMetadataIdentityCount?: number;
   progressPaths?: Pick<RunPaths, "progressPath" | "draftPath">;
   recovery?: { code: string; message: string; reason: string };
 }) {
@@ -954,6 +962,7 @@ function finalizeBundleNormalizeDraft(options: {
     normalizeStartTime,
     candidateLineCount,
     voiceMetadataCount = 0,
+    voiceMetadataIdentityCount = voiceMetadataCount,
     progressPaths,
     recovery,
   } = options;
@@ -1124,6 +1133,7 @@ function finalizeBundleNormalizeDraft(options: {
     draft: parsedPromptDraft,
     candidateLineCount,
     voiceMetadataCount,
+    voiceMetadataIdentityCount,
   });
 
   writeValidationReport(paths.validationReportPath, {
@@ -1599,6 +1609,7 @@ app.post("/api/tasks/:taskId/agent/normalize-requirements", async (c) => {
     const activeContext = responseContext();
     let candidateLineCountForRun = 0;
     let voiceMetadataCountForRun = 0;
+    let voiceMetadataIdentityCountForRun = 0;
 
     const executeNormalize = async () => {
     try {
@@ -1640,7 +1651,13 @@ app.post("/api/tasks/:taskId/agent/normalize-requirements", async (c) => {
       const candidateExtraction = extractCandidateLines({ documents: docInputs });
       candidateLineCountForRun = candidateExtraction.candidateLines.length;
       voiceMetadataCountForRun = candidateExtraction.voiceMetadata.length;
-      const candidateLinesRef = writeCandidateLinesArtifact(paths.candidateLinesPath, candidateExtraction.candidateLines, candidateExtraction.voiceMetadata);
+      voiceMetadataIdentityCountForRun = countVoiceMetadataIdentities(candidateExtraction.voiceMetadata);
+      const candidateLinesRef = writeCandidateLinesArtifact(
+        paths.candidateLinesPath,
+        candidateExtraction.candidateLines,
+        candidateExtraction.voiceMetadata,
+        candidateExtraction.sourceAnnotations,
+      );
       mergeRunProgress(progressPaths, {
         stage: "preprocessing",
         message: "候选台词已提取并完成元信息过滤",
@@ -1707,6 +1724,7 @@ app.post("/api/tasks/:taskId/agent/normalize-requirements", async (c) => {
         normalizeStartTime,
         candidateLineCount: candidateExtraction.candidateLines.length,
         voiceMetadataCount: candidateExtraction.voiceMetadata.length,
+        voiceMetadataIdentityCount: voiceMetadataIdentityCountForRun,
         progressPaths,
       });
     } catch (bundleErr) {
@@ -1743,6 +1761,7 @@ app.post("/api/tasks/:taskId/agent/normalize-requirements", async (c) => {
             normalizeStartTime,
             candidateLineCount: candidateLineCountForRun,
             voiceMetadataCount: voiceMetadataCountForRun,
+            voiceMetadataIdentityCount: voiceMetadataIdentityCountForRun,
             progressPaths,
             recovery: {
               code: "OPENCODE_PROCESS_TIMEOUT_AFTER_DRAFT",
