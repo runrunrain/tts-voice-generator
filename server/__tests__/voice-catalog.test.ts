@@ -11,19 +11,25 @@ describe("Gemini voice catalog perceived gender metadata", () => {
   it("covers all 30 Gemini voices with valid perceivedGender values", () => {
     expect(GEMINI_VOICE_CATALOG).toHaveLength(30);
     for (const voice of GEMINI_VOICE_CATALOG) {
-      expect(["male", "female", "neutral"]).toContain(voice.perceivedGender);
+      expect(["male", "female"]).toContain(voice.perceivedGender);
     }
   });
 
-  it("groups voices by project-curated perceived gender", () => {
+  it("groups voices by Google/Provider table gender without a neutral category", () => {
     expect(getVoicesByPerceivedGender("female")).toEqual([
+      "Zephyr",
       "Kore",
       "Leda",
       "Aoede",
+      "Callirrhoe",
+      "Autonoe",
       "Despina",
       "Erinome",
       "Laomedeia",
       "Achernar",
+      "Gacrux",
+      "Pulcherrima",
+      "Vindemiatrix",
       "Sulafat",
     ]);
     expect(getVoicesByPerceivedGender("male")).toEqual([
@@ -31,40 +37,40 @@ describe("Gemini voice catalog perceived gender metadata", () => {
       "Charon",
       "Fenrir",
       "Orus",
+      "Enceladus",
       "Iapetus",
+      "Umbriel",
+      "Algieba",
       "Algenib",
       "Rasalgethi",
       "Alnilam",
-      "Gacrux",
-      "Sadaltager",
-    ]);
-    expect(getVoicesByPerceivedGender("neutral")).toEqual([
-      "Zephyr",
-      "Callirrhoe",
-      "Autonoe",
-      "Enceladus",
-      "Umbriel",
-      "Algieba",
       "Schedar",
-      "Pulcherrima",
       "Achird",
       "Zubenelgenubi",
-      "Vindemiatrix",
       "Sadachbia",
+      "Sadaltager",
     ]);
+    expect(getVoicesByPerceivedGender("female")).toHaveLength(14);
+    expect(getVoicesByPerceivedGender("male")).toHaveLength(16);
   });
 
-  it("formats guide and rules with official-vs-project wording", () => {
+  it("formats guide and rules with Google/Provider no-neutral wording", () => {
     const guide = formatVoiceSelectionGuideForPrompt();
-    expect(guide).toContain("Kore（珂瑞）：项目感知性别=女");
-    expect(guide).toContain("Charon（卡戎）：项目感知性别=男");
-    expect(guide).toContain("Zephyr（和风）：项目感知性别=中性");
+    expect(guide).toContain("Kore（珂瑞）：Google/Provider表性别=女");
+    expect(guide).toContain("Charon（卡戎）：Google/Provider表性别=男");
+    expect(guide).toContain("Zephyr（和风）：Google/Provider表性别=女");
+    expect(guide).toContain("Gacrux（十字架一）：Google/Provider表性别=女");
+    expect(guide).not.toContain("项目感知性别");
+    expect(guide).not.toContain("=中性");
 
     const rules = formatVoiceGenderSelectionRulesForPrompt();
-    expect(rules).toContain("Google official docs list voice names/styles");
-    expect(rules).toContain("project-curated perceived gender");
-    expect(rules).toContain("project female voice: Kore, Leda, Aoede, Despina, Erinome, Laomedeia, Achernar, Sulafat");
-    expect(rules).toContain("project male voice: Puck, Charon, Fenrir, Orus, Iapetus, Algenib, Rasalgethi, Alnilam, Gacrux, Sadaltager");
-    expect(rules).toContain("neutral or unspecified, do not invent gender");
+    expect(rules).toContain("Google/Provider voice tables classify every prebuilt Gemini TTS voice as either Female or Male");
+    expect(rules).toContain("there is no neutral voice category");
+    expect(rules).toContain("female voice: Zephyr, Kore, Leda, Aoede, Callirrhoe, Autonoe, Despina, Erinome, Laomedeia, Achernar, Gacrux, Pulcherrima, Vindemiatrix, Sulafat");
+    expect(rules).toContain("male voice: Puck, Charon, Fenrir, Orus, Enceladus, Iapetus, Umbriel, Algieba, Algenib, Rasalgethi, Alnilam, Schedar, Achird, Zubenelgenubi, Sadachbia, Sadaltager");
+    expect(rules).toContain("When gender is unknown, infer the intended speaker identity");
+    expect(rules).toContain("Do not use or mention a neutral category");
+    expect(rules).not.toContain("project-curated perceived gender");
+    expect(rules).not.toContain("neutral or unspecified");
   });
 });

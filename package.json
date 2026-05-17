@@ -1,7 +1,7 @@
 {
   "name": "tts-voice-generator",
   "private": true,
-  "version": "0.0.87",
+  "version": "0.0.88",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
@@ -15,6 +15,7 @@
     "server:start": "node server/dist/index.js",
     "server:test": "npm test --prefix server",
     "test": "npm test --prefix server",
+    "test:voice-display": "node scripts/verify-voice-display-labels.mjs",
     "package:release": "node scripts/package-release.js",
     "electron:build": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outdir=dist-electron --entry-names=[name] --out-extension:.js=.cjs",
     "desktop:target": "node scripts/build-desktop-target.js",

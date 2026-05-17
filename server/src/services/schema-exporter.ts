@@ -147,7 +147,7 @@ export function generateProductionListSchemaSnapshot(): SchemaSnapshot {
           type: "string",
           required: true,
           description: "Gemini/OpenRouter voice name selected for this line's role, emotion, scene, and transcript semantics.",
-          constraints: ["Must be non-empty", "Must match the line text and role context; Zephyr is only a neutral fallback"],
+          constraints: ["Must be non-empty", "Must match the line text and role context; Zephyr is only a default bright fallback"],
           defaultValue: "Zephyr",
         },
         {

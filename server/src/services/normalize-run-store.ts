@@ -401,7 +401,7 @@ export function writeCandidateLinesArtifact(candidateLinesPath: string, candidat
     voiceMetadataCount: voiceMetadata.length,
     voiceSelectionGuide: {
       policy: [
-        "Choose a Gemini voice by matching source metadata, role, scene, emotion, transcript semantics, and project-curated perceived gender when source gender is explicit. Candidate voice is a hint; explicit source voice metadata is stronger evidence.",
+        "Choose a Gemini voice by matching source metadata, role, scene, emotion, transcript semantics, and the Google/Provider voice table gender when source gender is explicit. Candidate voice is a hint; explicit source voice metadata is stronger evidence.",
         formatVoiceGenderSelectionRulesForPrompt(),
       ].join("\n"),
       voices: formatVoiceSelectionGuideForPrompt(),
@@ -485,7 +485,7 @@ export function writeInstructionMarkdown(instructionPath: string, context: Instr
     `- 可用 Gemini 音色指南：`,
     formatVoiceSelectionGuideForPrompt(),
     formatVoiceGenderSelectionRulesForPrompt(),
-    `- 只有在角色、章节标题、源元数据和台词都没有更好信号时，才使用 Zephyr 作为中性明亮兜底音色。`,
+    `- 只有在角色、章节标题、源元数据和台词都没有更好信号时，才使用 Zephyr 作为默认明亮兜底音色。`,
     `- 高能战斗/愤怒/紧急台词优先 Fenrir 或 Alnilam；长者/权威/讲解优先 Charon、Sadaltager、Rasalgethi 或 Orus；年轻/俏皮台词优先 Puck 或 Sadachbia；温柔/安抚台词优先 Achernar 或 Vindemiatrix；市井口语优先 Zubenelgenubi 或 Aoede。`,
     `- 从源章节标题以及 声线/音色/角色/说话人/speaker/voice/character/role 元数据中推导 line.speakerLabel、line.voice 和 promptProfiles[].speakers。`,
     `- 多个不同角色或音色元数据段不能全部塌缩为 旁白/Zephyr。音色名可以合理复用，但 speakerLabel 和 profile speakers 必须保留角色差异。`,
