@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router";
-import { AlertCircle, CheckCircle2, Factory, Loader2, Plus, RefreshCw, Search } from "lucide-react";
+import { AlertCircle, AlertTriangle, CheckCircle2, Factory, Loader2, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { useTasks } from "../hooks/useTasks";
 import type { Task, TaskStatus } from "../types";
 
@@ -18,13 +18,16 @@ const STATUS_LABEL: Record<TaskStatus | "all", string> = {
 
 export function TasksPage() {
   const navigate = useNavigate();
-  const { tasks, statusFilter, setStatusFilter, loading, phase, error, successMessage, clearSuccessMessage, refresh, createTask } = useTasks();
+  const { tasks, statusFilter, setStatusFilter, loading, phase, error, successMessage, clearSuccessMessage, refresh, createTask, deleteTask } = useTasks();
   const [query, setQuery] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [taskPendingDelete, setTaskPendingDelete] = useState<Task | null>(null);
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const filtered = tasks.filter((task) => {
     if (statusFilter !== "all" && task.status !== statusFilter) return false;
@@ -47,6 +50,33 @@ export function TasksPage() {
       setCreateError(err instanceof Error ? err.message : "任务创建失败");
     } finally {
       setCreating(false);
+    }
+  };
+
+  const requestDelete = (task: Task) => {
+    clearSuccessMessage();
+    setDeleteError(null);
+    setDialogOpen(false);
+    setTaskPendingDelete(task);
+  };
+
+  const cancelDelete = () => {
+    if (deletingTaskId) return;
+    setDeleteError(null);
+    setTaskPendingDelete(null);
+  };
+
+  const confirmDelete = async () => {
+    if (!taskPendingDelete || deletingTaskId) return;
+    setDeleteError(null);
+    setDeletingTaskId(taskPendingDelete.id);
+    try {
+      await deleteTask(taskPendingDelete.id);
+      setTaskPendingDelete(null);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "任务删除失败");
+    } finally {
+      setDeletingTaskId(null);
     }
   };
 
@@ -92,11 +122,11 @@ export function TasksPage() {
             <table className="w-full min-w-[980px] text-xs border-collapse">
               <thead className="bg-bg-sunken text-text-tertiary border-b border-border-subtle">
                 <tr>
-                  <Th>任务</Th><Th className="w-28">状态</Th><Th className="w-24">文档</Th><Th className="w-24">生产行</Th><Th className="w-44">更新时间</Th><Th className="w-32">入口</Th>
+                  <Th>任务</Th><Th className="w-28">状态</Th><Th className="w-24">文档</Th><Th className="w-24">生产行</Th><Th className="w-44">更新时间</Th><Th className="w-52">操作</Th>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((task) => <TaskRow key={task.id} task={task} />)}
+                {filtered.map((task) => <TaskRow key={task.id} task={task} onRequestDelete={requestDelete} deletingTaskId={deletingTaskId} />)}
               </tbody>
             </table>
           </div>
@@ -114,12 +144,60 @@ export function TasksPage() {
           </div>
         </div>
       )}
+
+      {taskPendingDelete && (
+        <div className="absolute inset-0 z-40 bg-bg-base/75 backdrop-blur-sm flex items-center justify-center px-4">
+          <div className="w-full max-w-[560px] rounded-xl border border-error/30 bg-bg-elevated shadow-shadow-lg overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="delete-task-title">
+            <div className="px-5 py-4 border-b border-border-subtle bg-[linear-gradient(135deg,rgba(195,78,74,0.14),transparent_48%),var(--color-bg-elevated)] flex items-start gap-3">
+              <div className="mt-0.5 h-9 w-9 rounded-full border border-error/30 bg-error-muted text-error flex items-center justify-center"><AlertTriangle size={18} /></div>
+              <div>
+                <h2 id="delete-task-title" className="text-lg font-display font-semibold text-text-primary">确认删除任务</h2>
+                <p className="mt-1 text-xs text-text-tertiary leading-5">这是不可撤销的硬删除操作，请确认任务不再需要。</p>
+              </div>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="rounded-lg border border-border bg-bg-sunken px-4 py-3">
+                <div className="text-sm font-semibold text-text-primary break-words">{taskPendingDelete.title}</div>
+                <div className="mt-2 text-[10px] font-mono text-text-tertiary break-all">{taskPendingDelete.id}</div>
+              </div>
+              <p className="text-xs leading-6 text-text-secondary">删除后将移除任务、需求文档、生产列表、行数据和任务 artifact。已生成的全局音频历史不在本次删除范围。</p>
+              {deleteError && <div className="px-3 py-2 rounded border border-error/20 bg-error-muted text-error text-xs flex items-start gap-2"><AlertCircle size={14} className="mt-0.5 shrink-0" />{deleteError}</div>}
+            </div>
+            <div className="px-5 py-4 border-t border-border-subtle bg-bg-sunken flex justify-end gap-2">
+              <button className="px-3 py-1.5 rounded border border-border text-xs hover:bg-bg-hover disabled:opacity-50 disabled:cursor-not-allowed" onClick={cancelDelete} disabled={!!deletingTaskId}>取消</button>
+              <button className="px-4 py-1.5 rounded bg-error text-white text-xs font-semibold hover:brightness-110 active:brightness-95 disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2" onClick={confirmDelete} disabled={!!deletingTaskId}>
+                {deletingTaskId ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                {deletingTaskId ? "删除中" : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function TaskRow({ task }: { task: Task }) {
-  return <tr className="border-b border-border-subtle hover:bg-bg-hover/60"><td className="px-3 py-3"><div className="font-medium text-text-primary">{task.title}</div><div className="text-[10px] text-text-tertiary mt-1 font-mono">{task.id}</div><div className="text-xs text-text-secondary mt-1 truncate max-w-[520px]">{task.description || "无描述"}</div></td><td className="px-3 py-3"><StatusBadge status={task.status} /></td><td className="px-3 py-3 text-text-secondary">{task.documentCount ?? task.documents?.length ?? 0}</td><td className="px-3 py-3 text-text-secondary">{task.lineCount ?? 0}</td><td className="px-3 py-3 text-text-tertiary font-mono">{new Date(task.updatedAt).toLocaleString("zh-CN")}</td><td className="px-3 py-3"><Link className="px-3 py-1.5 rounded border border-accent/30 text-accent hover:bg-accent-muted" to={`/tasks/${task.id}`}>进入工作台</Link></td></tr>;
+function TaskRow({ task, onRequestDelete, deletingTaskId }: { task: Task; onRequestDelete: (task: Task) => void; deletingTaskId: string | null }) {
+  const isDeleting = deletingTaskId === task.id;
+  const deleteDisabled = deletingTaskId !== null;
+  return (
+    <tr className={`border-b border-border-subtle hover:bg-bg-hover/60 ${isDeleting ? "opacity-70" : ""}`}>
+      <td className="px-3 py-3"><div className="font-medium text-text-primary">{task.title}</div><div className="text-[10px] text-text-tertiary mt-1 font-mono">{task.id}</div><div className="text-xs text-text-secondary mt-1 truncate max-w-[520px]">{task.description || "无描述"}</div></td>
+      <td className="px-3 py-3"><StatusBadge status={task.status} /></td>
+      <td className="px-3 py-3 text-text-secondary">{task.documentCount ?? task.documents?.length ?? 0}</td>
+      <td className="px-3 py-3 text-text-secondary">{task.lineCount ?? 0}</td>
+      <td className="px-3 py-3 text-text-tertiary font-mono">{new Date(task.updatedAt).toLocaleString("zh-CN")}</td>
+      <td className="px-3 py-3">
+        <div className="flex items-center gap-2">
+          <Link className="px-3 py-1.5 rounded border border-accent/30 text-accent hover:bg-accent-muted active:bg-accent-muted" to={`/tasks/${task.id}`}>进入工作台</Link>
+          <button className="px-3 py-1.5 rounded border border-error/30 text-error hover:bg-error-muted active:bg-error-muted disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5" type="button" onClick={() => onRequestDelete(task)} disabled={deleteDisabled} aria-label={`删除任务：${task.title}`}>
+            {isDeleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+            删除
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
 }
 
 function StatusBadge({ status }: { status: TaskStatus }) {

@@ -6,6 +6,17 @@ import { getLineGenerationStatus, isGeneratableVoiceLine, useProductionGeneratio
 import { taskApi } from "../../services/httpAdapter";
 import { createAudioElementFromAsset, downloadAudioAsset } from "../../services/audioAsset";
 import { ProductionListP1Panel } from "./ProductionListP1Panel";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "../ui/alert-dialog";
 import type { DirectorProfile, LineGenerationResult, LineGenerationStatus, ProductionListValidationReport, ResponseFormat, ValidationIssue, VoiceLine } from "../../types";
 import { formatVoiceOptionLabel } from "../../utils/voiceDisplay";
 
@@ -69,6 +80,7 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
   const [bulkVoice, setBulkVoice] = useState(settings.defaultVoice || "Zephyr");
   const [lineCloneMessage, setLineCloneMessage] = useState<string | null>(null);
   const [lineCloneError, setLineCloneError] = useState<string | null>(null);
+  const [bulkGenerateConfirmOpen, setBulkGenerateConfirmOpen] = useState(false);
 
   const selectedIds = selectedLineIds ?? internalSelected;
   const setSelectedIds = onSelectedLineIdsChange ?? setInternalSelected;
@@ -85,8 +97,10 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
   const localDraftText = JSON.stringify({ lines: draftLines }, null, 2);
   const selectedLines = useMemo(() => draftLines.filter((line) => selectedSet.has(line.id)), [draftLines, selectedSet]);
   const selectedEligible = useMemo(() => selectedLines.filter(isGeneratableVoiceLine), [selectedLines]);
+  const eligibleLineCount = useMemo(() => draftLines.filter(isGeneratableVoiceLine).length, [draftLines]);
   const allSelected = draftLines.length > 0 && selectedIds.length === draftLines.length;
   const profileBindingMap = useMemo(() => buildProfileBindingMap(draftLines), [draftLines]);
+  const bulkGenerateDisabled = saving || generating || !list;
 
   useEffect(() => {
     const visibleLineIds = new Set(draftLines.map((line) => line.id));
@@ -116,6 +130,11 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
   const runGeneration = async (scope: "selection" | "eligible") => {
     const generation = await generateLines(list ? { ...list, lines: draftLines } : null, scope, scope === "selection" ? selectedIds : []);
     if (generation) await refresh();
+  };
+
+  const confirmBulkGenerate = () => {
+    if (bulkGenerateDisabled) return;
+    void runGeneration("eligible");
   };
 
   const copyDraft = async () => {
@@ -191,7 +210,31 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
           <div className="text-[10px] text-text-tertiary font-mono">v{list?.version ?? "--"} · {draftLines.length} 行 · Ctrl+S 保存 · expectedVersion 写入</div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
-          <button className="px-3 py-1.5 rounded border border-border text-xs hover:bg-bg-hover disabled:opacity-50 flex items-center gap-1" onClick={() => void runGeneration("eligible")} disabled={saving || generating || !list}><Play size={13} /> 生成全部待生成/变更音频</button>
+          <AlertDialog open={bulkGenerateConfirmOpen} onOpenChange={setBulkGenerateConfirmOpen}>
+            <AlertDialogTrigger asChild>
+              <button className="px-3 py-1.5 rounded border border-border text-xs hover:bg-bg-hover disabled:opacity-50 flex items-center gap-1" disabled={bulkGenerateDisabled}><Play size={13} /> 生成全部待生成/变更音频</button>
+            </AlertDialogTrigger>
+            <AlertDialogContent className="border-border bg-bg-elevated text-text-primary shadow-shadow-lg sm:max-w-[30rem]">
+              <AlertDialogHeader>
+                <div className="flex items-start gap-3 text-left">
+                  <span className="mt-0.5 rounded-full border border-warning/30 bg-warning-muted p-2 text-warning"><AlertCircle size={18} /></span>
+                  <div className="min-w-0">
+                    <AlertDialogTitle className="text-sm font-semibold text-text-primary">确认生成全部待生成音频？</AlertDialogTitle>
+                    <AlertDialogDescription className="mt-2 text-xs leading-5 text-text-secondary">
+                      此操作会提交当前生产列表中所有待生成或需要重新生成的台词，可能消耗真实 TTS/API 额度，并需要等待一段时间完成。
+                    </AlertDialogDescription>
+                  </div>
+                </div>
+              </AlertDialogHeader>
+              <div className="rounded-md border border-warning/20 bg-warning-muted/30 px-3 py-2 text-[11px] leading-5 text-warning">
+                当前检查到 {eligibleLineCount} 条可生成/重生成行。点击“取消”不会提交任何生成请求；只有点击“确认生成”才会执行原有批量生成逻辑。
+              </div>
+              <AlertDialogFooter>
+                <AlertDialogCancel className="h-8 rounded border-border bg-bg-base px-3 text-xs text-text-primary hover:bg-bg-hover hover:text-text-primary">取消</AlertDialogCancel>
+                <AlertDialogAction className="h-8 rounded bg-warning px-4 text-xs font-semibold text-bg-base hover:bg-warning/90 disabled:opacity-50" onClick={confirmBulkGenerate} disabled={bulkGenerateDisabled}>确认生成</AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
           <button className="px-3 py-1.5 rounded border border-accent/40 text-accent text-xs hover:bg-accent-muted disabled:opacity-50 flex items-center gap-1" onClick={() => void runGeneration("selection")} disabled={saving || generating || !list || selectedIds.length === 0}><Play size={13} /> 生成选中音频</button>
           <button className="px-3 py-1.5 rounded border border-border text-xs hover:bg-bg-hover disabled:opacity-50 flex items-center gap-1" onClick={() => void refresh()} disabled={saving || validating || generating}><RefreshCw size={13} /> 刷新</button>
           <button className="px-3 py-1.5 rounded border border-border text-xs hover:bg-bg-hover disabled:opacity-50 flex items-center gap-1" onClick={() => void validateRemote()} disabled={saving || validating || generating}>{validating ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />} 校验</button>

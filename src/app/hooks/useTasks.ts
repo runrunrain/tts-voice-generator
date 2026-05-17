@@ -1,8 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { taskApi } from "../services/httpAdapter";
+import { ApiError, taskApi } from "../services/httpAdapter";
 import type { Task, TaskStatus } from "../types";
 
 type LoadState = "idle" | "loading" | "success" | "error";
+
+function formatTaskDeleteError(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 409) {
+      return "任务正在运行或存在活跃执行，请等待完成后再删除。";
+    }
+    if (err.status === 500) {
+      return "任务删除失败，请稍后重试。";
+    }
+  }
+  return err instanceof Error ? err.message : "任务删除失败";
+}
 
 export function useTasks(initialStatus: TaskStatus | "all" = "all") {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -41,6 +53,25 @@ export function useTasks(initialStatus: TaskStatus | "all" = "all") {
     return task;
   }, []);
 
+  const deleteTask = useCallback(async (taskId: string) => {
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      await taskApi.deleteTask(taskId);
+      setTasks((prev) => prev.filter((item) => item.id !== taskId));
+      setSuccessMessage("任务已删除");
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        setTasks((prev) => prev.filter((item) => item.id !== taskId));
+        setSuccessMessage("任务已不存在，列表已更新");
+        return;
+      }
+      const message = formatTaskDeleteError(err);
+      setError(message);
+      throw new Error(message);
+    }
+  }, []);
+
   return {
     tasks,
     statusFilter,
@@ -52,6 +83,7 @@ export function useTasks(initialStatus: TaskStatus | "all" = "all") {
     clearSuccessMessage: () => setSuccessMessage(null),
     refresh,
     createTask,
+    deleteTask,
   };
 }
 

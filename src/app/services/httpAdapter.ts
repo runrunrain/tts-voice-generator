@@ -139,7 +139,11 @@ async function readResponseBody(response: Response): Promise<unknown> {
 function errorMessageFromBody(status: number, body: unknown): string {
   if (body && typeof body === "object") {
     const record = body as Record<string, unknown>;
-    const message = record.message ?? record.error ?? record.detail;
+    const nestedError = record.error;
+    const nestedMessage = nestedError && typeof nestedError === "object" && !Array.isArray(nestedError)
+      ? (nestedError as Record<string, unknown>).message
+      : undefined;
+    const message = record.message ?? nestedMessage ?? record.error ?? record.detail;
     if (typeof message === "string" && message.length > 0) return message;
   }
   if (typeof body === "string" && body.length > 0) return body.slice(0, 200);
@@ -1838,6 +1842,22 @@ export const taskApi = {
   async getTask(taskId: string) {
     const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}`);
     return mapTask(unwrapEnvelope(data, "task"));
+  },
+
+  async deleteTask(taskId: string) {
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}`, {
+      method: "DELETE",
+    });
+    const record = isRecord(data) ? data : {};
+    const cleanup = isRecord(record.artifactCleanup) ? record.artifactCleanup : undefined;
+    return {
+      ok: asBoolean(record.ok, true),
+      deletedTaskId: asString(record.deletedTaskId ?? record.deleted, taskId),
+      artifactCleanup: cleanup ? {
+        attempted: asBoolean(cleanup.attempted, false),
+        deleted: asBoolean(cleanup.deleted, false),
+      } : undefined,
+    };
   },
 
   async uploadDocument(taskId: string, payload: { filename?: string; fileName?: string; content: string }) {

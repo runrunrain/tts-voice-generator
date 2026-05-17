@@ -5,6 +5,7 @@
  * POST   /api/tasks          - Create task
  * GET    /api/tasks/:taskId  - Get single task
  * PATCH  /api/tasks/:taskId  - Update task
+ * DELETE /api/tasks/:taskId  - Delete task and task-scoped data
  */
 
 import { Hono } from "hono";
@@ -19,6 +20,27 @@ import { deleteTaskDir } from "../services/artifact-store.js";
 const app = new Hono();
 
 type VoiceTaskRow = typeof voiceTask.$inferSelect;
+
+type DeleteBlocker =
+  | { type: "task_status"; status: string }
+  | { type: "voice_line_generation"; status: string; count: number }
+  | { type: "opencode_session"; status: "active"; count: number }
+  | { type: "agent_button_run"; status: string; count: number }
+  | { type: "agent_chat_session"; status: "active"; count: number };
+
+interface DeleteSnapshotCounts {
+  documents: number;
+  productionVersions: number;
+  voiceLines: number;
+  opencodeSessions: number;
+  agentChatSessions: number;
+  agentButtonRuns: number;
+}
+
+interface ArtifactCleanupResult {
+  attempted: true;
+  deleted: boolean;
+}
 
 interface TaskStats {
   documentCount: number;
@@ -233,6 +255,81 @@ function auditLog(entityType: string, entityId: string, operation: string, actor
   }
 }
 
+function countBySql(rawDb: Database.Database, sql: string, taskId: string): number {
+  const row = rawDb.prepare(sql).get(taskId) as { count: number } | undefined;
+  return Number(row?.count ?? 0);
+}
+
+function collectDeleteBlockers(rawDb: Database.Database, task: VoiceTaskRow): DeleteBlocker[] {
+  const blockers: DeleteBlocker[] = [];
+
+  if (task.status === "running" || task.status === "in_progress") {
+    blockers.push({ type: "task_status", status: task.status });
+  }
+
+  const voiceLineRows = rawDb.prepare(`
+    SELECT generation_status AS status, COUNT(*) AS count
+    FROM voice_line
+    WHERE task_id = ? AND generation_status IN ('pending', 'running')
+    GROUP BY generation_status
+  `).all(task.id) as Array<{ status: string; count: number }>;
+  for (const row of voiceLineRows) {
+    const count = Number(row.count) || 0;
+    if (count > 0) blockers.push({ type: "voice_line_generation", status: row.status, count });
+  }
+
+  const activeOpenCodeSessions = countBySql(rawDb, "SELECT COUNT(*) AS count FROM opencode_session WHERE task_id = ? AND status = 'active'", task.id);
+  if (activeOpenCodeSessions > 0) {
+    blockers.push({ type: "opencode_session", status: "active", count: activeOpenCodeSessions });
+  }
+
+  const buttonRunRows = rawDb.prepare(`
+    SELECT status, COUNT(*) AS count
+    FROM agent_button_run
+    WHERE task_id = ? AND status IN ('pending', 'running')
+    GROUP BY status
+  `).all(task.id) as Array<{ status: string; count: number }>;
+  for (const row of buttonRunRows) {
+    const count = Number(row.count) || 0;
+    if (count > 0) blockers.push({ type: "agent_button_run", status: row.status, count });
+  }
+
+  const activeChatSessions = countBySql(rawDb, "SELECT COUNT(*) AS count FROM agent_chat_session WHERE task_id = ? AND status = 'active'", task.id);
+  if (activeChatSessions > 0) {
+    blockers.push({ type: "agent_chat_session", status: "active", count: activeChatSessions });
+  }
+
+  return blockers;
+}
+
+function buildDeleteSnapshot(rawDb: Database.Database, task: VoiceTaskRow): { task: Record<string, unknown>; counts: DeleteSnapshotCounts } {
+  return {
+    task: {
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      createdAt: task.createdAt.toISOString(),
+      updatedAt: task.updatedAt.toISOString(),
+    },
+    counts: {
+      documents: countBySql(rawDb, "SELECT COUNT(*) AS count FROM requirement_document WHERE task_id = ?", task.id),
+      productionVersions: countBySql(rawDb, "SELECT COUNT(*) AS count FROM production_list_version WHERE task_id = ?", task.id),
+      voiceLines: countBySql(rawDb, "SELECT COUNT(*) AS count FROM voice_line WHERE task_id = ?", task.id),
+      opencodeSessions: countBySql(rawDb, "SELECT COUNT(*) AS count FROM opencode_session WHERE task_id = ?", task.id),
+      agentChatSessions: countBySql(rawDb, "SELECT COUNT(*) AS count FROM agent_chat_session WHERE task_id = ?", task.id),
+      agentButtonRuns: countBySql(rawDb, "SELECT COUNT(*) AS count FROM agent_button_run WHERE task_id = ?", task.id),
+    },
+  };
+}
+
+function safeDeleteTaskDir(taskId: string): ArtifactCleanupResult {
+  try {
+    return { attempted: true, deleted: deleteTaskDir(taskId) };
+  } catch {
+    return { attempted: true, deleted: false };
+  }
+}
+
 // ─── GET /api/tasks ────────────────────────────────────────────────────────────
 
 app.get("/api/tasks", (c) => {
@@ -359,6 +456,67 @@ app.patch("/api/tasks/:taskId", async (c) => {
     ok: true,
     requestId,
     task: serializeTask(updated, getTaskStatsMap(db, [taskId]).get(taskId) ?? emptyTaskStats()),
+  });
+});
+
+// ─── DELETE /api/tasks/:taskId ─────────────────────────────────────────────────
+
+app.delete("/api/tasks/:taskId", (c) => {
+  const requestId = uuidv4();
+  const taskId = c.req.param("taskId");
+  const db = getDb();
+  const rawDb = getRawDb(db);
+
+  const existing = db.select().from(voiceTask).where(eq(voiceTask.id, taskId)).get();
+  if (!existing) {
+    return apiError(c, requestId, 404, "TASK_NOT_FOUND", `Task "${taskId}" not found.`, "validation");
+  }
+
+  const blockers = collectDeleteBlockers(rawDb, existing);
+  if (blockers.length > 0) {
+    const statsByTaskId = getTaskStatsMap(db, [taskId]);
+    return apiError(
+      c,
+      requestId,
+      409,
+      "TASK_DELETE_CONFLICT",
+      "Task is running or has active work. Wait for it to finish before deleting.",
+      "conflict",
+      true,
+      {
+        taskId,
+        rawStatus: existing.status,
+        derivedStatus: deriveTaskStatus(existing, statsByTaskId.get(taskId) ?? emptyTaskStats()).status,
+        blockers,
+      },
+    );
+  }
+
+  const snapshot = buildDeleteSnapshot(rawDb, existing);
+
+  try {
+    const deleteTask = rawDb.transaction(() => {
+      rawDb.prepare("DELETE FROM agent_chat_session WHERE task_id = ?").run(taskId);
+      rawDb.prepare("DELETE FROM opencode_session WHERE task_id = ?").run(taskId);
+      rawDb.prepare("DELETE FROM voice_task WHERE id = ?").run(taskId);
+      rawDb.prepare(`
+        INSERT INTO operation_audit_log (entity_type, entity_id, operation, actor, snapshot_json, request_id, created_at)
+        VALUES ('task', ?, 'delete', 'user', ?, ?, ?)
+      `).run(taskId, JSON.stringify(snapshot), requestId, Math.floor(Date.now() / 1000));
+    });
+    deleteTask();
+  } catch {
+    return apiError(c, requestId, 500, "TASK_DELETE_FAILED", "Task deletion failed.", "system", true);
+  }
+
+  const artifactCleanup = safeDeleteTaskDir(taskId);
+
+  return c.json({
+    ok: true,
+    requestId,
+    deletedTaskId: taskId,
+    deleted: taskId,
+    artifactCleanup,
   });
 });
 
