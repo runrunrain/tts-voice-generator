@@ -10,7 +10,7 @@
  */
 
 import fs from "node:fs";
-import { formatVoiceSelectionGuideForPrompt } from "../utils/voice.js";
+import { formatVoiceGenderSelectionRulesForPrompt, formatVoiceSelectionGuideForPrompt } from "../utils/voice.js";
 
 export interface SchemaField {
   name: string;
@@ -302,6 +302,7 @@ export function generateProductionListSchemaSnapshot(): SchemaSnapshot {
       "Generate-ready prompt materialization is profile or override plus line transcript.",
       "Speaker limits are profile-scoped: each promptProfile supports 1 to 2 speakers, but different promptProfiles may define different role speakers across the dataset.",
       "Voice selection must match source metadata, role, scene, emotion, and transcript semantics; do not blindly choose the default voice for all lines.",
+      formatVoiceGenderSelectionRulesForPrompt(),
       `Available Gemini voice guide:\n${formatVoiceSelectionGuideForPrompt()}`,
       'Default voice is "Zephyr" only when no source role, voice metadata, or transcript cue suggests a better match; default model is "google/gemini-3.1-flash-tts-preview".',
       'Default responseFormat is "wav".',

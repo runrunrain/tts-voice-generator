@@ -329,6 +329,7 @@ describe("TTS Generate API", () => {
       expect(reqBody.voice).toBe("Zephyr");
       expect(reqBody.generationConfig?.speechConfig?.voiceConfig?.prebuiltVoiceConfig?.voiceName).toBe("Zephyr");
       expect(reqBody.generationConfig?.responseModalities).toEqual(["AUDIO"]);
+      expect(JSON.stringify(reqBody)).not.toContain("perceivedGender");
     });
 
     it("passes selected Gemini voice through native speechConfig for male-associated voices", async () => {

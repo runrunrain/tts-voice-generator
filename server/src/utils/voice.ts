@@ -8,44 +8,57 @@
  * - Legacy alias is accepted as input for backward compatibility.
  */
 
+export type VoicePerceivedGender = "male" | "female" | "neutral";
+
+const PERCEIVED_GENDER_LABEL_ZH: Record<VoicePerceivedGender, string> = {
+  male: "男",
+  female: "女",
+  neutral: "中性",
+};
+
 export interface GeminiVoiceCatalogEntry {
   name: string;
   displayNameZh: string;
   toneZh: string;
   selectionHints: string[];
+  /**
+   * Project-curated perceived speaker gender for prompt guidance only.
+   * Google Gemini TTS public docs list voice names/styles but do not expose an official gender enum.
+   */
+  perceivedGender: VoicePerceivedGender;
 }
 
 export const GEMINI_VOICE_CATALOG: readonly GeminiVoiceCatalogEntry[] = [
-  { name: "Zephyr", displayNameZh: "和风", toneZh: "明亮、自然", selectionHints: ["明亮旁白", "中性叙述", "默认自然声"] },
-  { name: "Puck", displayNameZh: "顽童", toneZh: "欢快、机敏", selectionHints: ["少年", "年轻角色", "俏皮调侃", "轻快台词"] },
-  { name: "Charon", displayNameZh: "卡戎", toneZh: "低沉、信息量强", selectionHints: ["长者", "权威", "讲解", "低沉稳重", "训诫"] },
-  { name: "Kore", displayNameZh: "珂瑞", toneZh: "坚定、果断", selectionHints: ["坚定女性", "女将", "果断宣告", "强势角色"] },
-  { name: "Fenrir", displayNameZh: "芬里尔", toneZh: "兴奋、有冲击力", selectionHints: ["战斗", "冲锋", "激动", "愤怒", "高能喊话"] },
-  { name: "Leda", displayNameZh: "勒达", toneZh: "青春、轻盈", selectionHints: ["少女", "年轻女性", "清新", "活泼温和"] },
-  { name: "Orus", displayNameZh: "奥鲁斯", toneZh: "稳重、正式", selectionHints: ["军政汇报", "正式陈述", "沉着指令", "稳重男性"] },
-  { name: "Aoede", displayNameZh: "艾俄德", toneZh: "轻松、流畅", selectionHints: ["轻松说明", "朋友交流", "日常对白"] },
-  { name: "Callirrhoe", displayNameZh: "卡利罗厄", toneZh: "放松、舒缓", selectionHints: ["放松叙述", "舒缓说明", "慢节奏"] },
-  { name: "Autonoe", displayNameZh: "奥托诺厄", toneZh: "明快、清亮", selectionHints: ["明快播报", "积极提示", "清晰短句"] },
-  { name: "Enceladus", displayNameZh: "恩克拉多斯", toneZh: "气声、虚弱感", selectionHints: ["耳语", "疲惫", "神秘", "低声"] },
-  { name: "Iapetus", displayNameZh: "伊阿珀托斯", toneZh: "清晰、理性", selectionHints: ["清晰解释", "理性说明", "教程"] },
-  { name: "Umbriel", displayNameZh: "翁布里尔", toneZh: "轻松愉快", selectionHints: ["轻松愉快", "随和", "明亮互动"] },
-  { name: "Algieba", displayNameZh: "阿尔吉巴", toneZh: "平滑、圆润", selectionHints: ["圆润播报", "平顺叙述", "广告旁白"] },
-  { name: "Despina", displayNameZh: "德斯皮娜", toneZh: "平滑、亲和", selectionHints: ["亲和说明", "客服", "平稳对话"] },
-  { name: "Erinome", displayNameZh: "厄里诺墨", toneZh: "清澈、干净", selectionHints: ["清澈女声", "纯净叙述", "清亮说明"] },
-  { name: "Algenib", displayNameZh: "阿尔杰尼布", toneZh: "沙哑、粗粝", selectionHints: ["粗粝角色", "沙哑", "疲惫老兵", "市井感"] },
-  { name: "Rasalgethi", displayNameZh: "拉萨尔格提", toneZh: "信息丰富、厚实", selectionHints: ["史诗旁白", "资料解说", "厚重叙述"] },
-  { name: "Laomedeia", displayNameZh: "拉俄墨得亚", toneZh: "欢快、热情", selectionHints: ["欢快女性", "热情介绍", "轻喜剧"] },
-  { name: "Achernar", displayNameZh: "水委一", toneZh: "柔和、安抚", selectionHints: ["温柔", "安抚", "治愈", "柔和旁白"] },
-  { name: "Alnilam", displayNameZh: "参宿二", toneZh: "坚定、有力", selectionHints: ["坚定宣告", "命令", "不容置疑", "强执行"] },
-  { name: "Schedar", displayNameZh: "王良四", toneZh: "平稳、克制", selectionHints: ["克制叙述", "平稳旁白", "中性成熟"] },
-  { name: "Gacrux", displayNameZh: "十字架一", toneZh: "成熟、稳健", selectionHints: ["成熟角色", "稳健旁白", "中年叙述"] },
-  { name: "Pulcherrima", displayNameZh: "普尔凯里玛", toneZh: "前瞻、明亮", selectionHints: ["科技感", "未来感", "宣传介绍"] },
-  { name: "Achird", displayNameZh: "阿基尔德", toneZh: "友好、亲切", selectionHints: ["友好对话", "亲切提示", "陪伴感"] },
-  { name: "Zubenelgenubi", displayNameZh: "氐宿一", toneZh: "随意、口语", selectionHints: ["随意闲聊", "市井对白", "自然口语"] },
-  { name: "Vindemiatrix", displayNameZh: "太微左垣四", toneZh: "温和、细腻", selectionHints: ["温和解释", "细腻情绪", "安静对白"] },
-  { name: "Sadachbia", displayNameZh: "萨达克比亚", toneZh: "活泼、灵动", selectionHints: ["活泼", "灵动", "轻快互动", "年轻角色"] },
-  { name: "Sadaltager", displayNameZh: "萨达尔塔格", toneZh: "博学、沉着", selectionHints: ["学者", "知识讲解", "冷静分析", "智者"] },
-  { name: "Sulafat", displayNameZh: "苏拉法特", toneZh: "偏高、明亮", selectionHints: ["高音色", "清亮提醒", "活泼短句"] },
+  { name: "Zephyr", displayNameZh: "和风", toneZh: "明亮、自然", selectionHints: ["明亮旁白", "中性叙述", "默认自然声"], perceivedGender: "neutral" },
+  { name: "Puck", displayNameZh: "顽童", toneZh: "欢快、机敏", selectionHints: ["少年", "年轻角色", "俏皮调侃", "轻快台词"], perceivedGender: "male" },
+  { name: "Charon", displayNameZh: "卡戎", toneZh: "低沉、信息量强", selectionHints: ["长者", "权威", "讲解", "低沉稳重", "训诫"], perceivedGender: "male" },
+  { name: "Kore", displayNameZh: "珂瑞", toneZh: "坚定、果断", selectionHints: ["坚定女性", "女将", "果断宣告", "强势角色"], perceivedGender: "female" },
+  { name: "Fenrir", displayNameZh: "芬里尔", toneZh: "兴奋、有冲击力", selectionHints: ["战斗", "冲锋", "激动", "愤怒", "高能喊话"], perceivedGender: "male" },
+  { name: "Leda", displayNameZh: "勒达", toneZh: "青春、轻盈", selectionHints: ["少女", "年轻女性", "清新", "活泼温和"], perceivedGender: "female" },
+  { name: "Orus", displayNameZh: "奥鲁斯", toneZh: "稳重、正式", selectionHints: ["军政汇报", "正式陈述", "沉着指令", "稳重男性"], perceivedGender: "male" },
+  { name: "Aoede", displayNameZh: "艾俄德", toneZh: "轻松、流畅", selectionHints: ["轻松说明", "朋友交流", "日常对白"], perceivedGender: "female" },
+  { name: "Callirrhoe", displayNameZh: "卡利罗厄", toneZh: "放松、舒缓", selectionHints: ["放松叙述", "舒缓说明", "慢节奏"], perceivedGender: "neutral" },
+  { name: "Autonoe", displayNameZh: "奥托诺厄", toneZh: "明快、清亮", selectionHints: ["明快播报", "积极提示", "清晰短句"], perceivedGender: "neutral" },
+  { name: "Enceladus", displayNameZh: "恩克拉多斯", toneZh: "气声、虚弱感", selectionHints: ["耳语", "疲惫", "神秘", "低声"], perceivedGender: "neutral" },
+  { name: "Iapetus", displayNameZh: "伊阿珀托斯", toneZh: "清晰、理性", selectionHints: ["清晰解释", "理性说明", "教程"], perceivedGender: "male" },
+  { name: "Umbriel", displayNameZh: "翁布里尔", toneZh: "轻松愉快", selectionHints: ["轻松愉快", "随和", "明亮互动"], perceivedGender: "neutral" },
+  { name: "Algieba", displayNameZh: "阿尔吉巴", toneZh: "平滑、圆润", selectionHints: ["圆润播报", "平顺叙述", "广告旁白"], perceivedGender: "neutral" },
+  { name: "Despina", displayNameZh: "德斯皮娜", toneZh: "平滑、亲和", selectionHints: ["亲和说明", "客服", "平稳对话"], perceivedGender: "female" },
+  { name: "Erinome", displayNameZh: "厄里诺墨", toneZh: "清澈、干净", selectionHints: ["清澈女声", "纯净叙述", "清亮说明"], perceivedGender: "female" },
+  { name: "Algenib", displayNameZh: "阿尔杰尼布", toneZh: "沙哑、粗粝", selectionHints: ["粗粝角色", "沙哑", "疲惫老兵", "市井感"], perceivedGender: "male" },
+  { name: "Rasalgethi", displayNameZh: "拉萨尔格提", toneZh: "信息丰富、厚实", selectionHints: ["史诗旁白", "资料解说", "厚重叙述"], perceivedGender: "male" },
+  { name: "Laomedeia", displayNameZh: "拉俄墨得亚", toneZh: "欢快、热情", selectionHints: ["欢快女性", "热情介绍", "轻喜剧"], perceivedGender: "female" },
+  { name: "Achernar", displayNameZh: "水委一", toneZh: "柔和、安抚", selectionHints: ["温柔", "安抚", "治愈", "柔和旁白"], perceivedGender: "female" },
+  { name: "Alnilam", displayNameZh: "参宿二", toneZh: "坚定、有力", selectionHints: ["坚定宣告", "命令", "不容置疑", "强执行"], perceivedGender: "male" },
+  { name: "Schedar", displayNameZh: "王良四", toneZh: "平稳、克制", selectionHints: ["克制叙述", "平稳旁白", "中性成熟"], perceivedGender: "neutral" },
+  { name: "Gacrux", displayNameZh: "十字架一", toneZh: "成熟、稳健", selectionHints: ["成熟角色", "稳健旁白", "中年叙述"], perceivedGender: "male" },
+  { name: "Pulcherrima", displayNameZh: "普尔凯里玛", toneZh: "前瞻、明亮", selectionHints: ["科技感", "未来感", "宣传介绍"], perceivedGender: "neutral" },
+  { name: "Achird", displayNameZh: "阿基尔德", toneZh: "友好、亲切", selectionHints: ["友好对话", "亲切提示", "陪伴感"], perceivedGender: "neutral" },
+  { name: "Zubenelgenubi", displayNameZh: "氐宿一", toneZh: "随意、口语", selectionHints: ["随意闲聊", "市井对白", "自然口语"], perceivedGender: "neutral" },
+  { name: "Vindemiatrix", displayNameZh: "太微左垣四", toneZh: "温和、细腻", selectionHints: ["温和解释", "细腻情绪", "安静对白"], perceivedGender: "neutral" },
+  { name: "Sadachbia", displayNameZh: "萨达克比亚", toneZh: "活泼、灵动", selectionHints: ["活泼", "灵动", "轻快互动", "年轻角色"], perceivedGender: "neutral" },
+  { name: "Sadaltager", displayNameZh: "萨达尔塔格", toneZh: "博学、沉着", selectionHints: ["学者", "知识讲解", "冷静分析", "智者"], perceivedGender: "male" },
+  { name: "Sulafat", displayNameZh: "苏拉法特", toneZh: "偏高、明亮", selectionHints: ["高音色", "清亮提醒", "活泼短句"], perceivedGender: "female" },
 ];
 
 /** Map of legacy alias -> canonical voice name */
@@ -93,8 +106,28 @@ export function getVoiceDisplayNameZh(voice: string): string {
 
 export function formatVoiceSelectionGuideForPrompt(): string {
   return GEMINI_VOICE_CATALOG
-    .map((voice) => `${voice.name}（${voice.displayNameZh}）：${voice.toneZh}；适合 ${voice.selectionHints.join("、")}`)
+    .map((voice) => `${voice.name}（${voice.displayNameZh}）：项目感知性别=${PERCEIVED_GENDER_LABEL_ZH[voice.perceivedGender]}；${voice.toneZh}；适合 ${voice.selectionHints.join("、")}`)
     .join("\n");
+}
+
+export function getVoicesByPerceivedGender(gender: VoicePerceivedGender): string[] {
+  return GEMINI_VOICE_CATALOG
+    .filter((voice) => voice.perceivedGender === gender)
+    .map((voice) => voice.name);
+}
+
+export function formatVoiceGenderSelectionRulesForPrompt(): string {
+  const femaleVoices = getVoicesByPerceivedGender("female").join(", ");
+  const maleVoices = getVoicesByPerceivedGender("male").join(", ");
+  const neutralVoices = getVoicesByPerceivedGender("neutral").join(", ");
+
+  return [
+    "- Gemini TTS voice gender policy: Google official docs list voice names/styles but do not expose an official gender enum; gender tags in this guide are project-curated perceived gender for prompt guidance.",
+    `- When source role or voice metadata explicitly indicates female gender (女/女性/女子/姑娘/少女/女眷/mother/woman/girl/she/her), choose a project female voice: ${femaleVoices}.`,
+    `- When source role or voice metadata explicitly indicates male gender (男/男性/男子/少年/青年/先生/父亲/长者/man/boy/he/him), choose a project male voice: ${maleVoices}.`,
+    `- When gender is neutral or unspecified, do not invent gender; choose by style from neutral or best-fit voices: ${neutralVoices}.`,
+    "- If the source explicitly names an exact Gemini voice, preserve that explicit voice unless other source metadata clearly contradicts it and the task asks for gender correction.",
+  ].join("\n");
 }
 
 export function inferVoiceForTextContext(...parts: Array<string | null | undefined>): string {

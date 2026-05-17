@@ -18,7 +18,7 @@ import crypto from "node:crypto";
 import { env } from "../config/env.js";
 import type { VoiceLine, Speaker } from "../domain/validators.js";
 import type { CandidateLine, VoiceMetadata } from "./opencode-runner.js";
-import { formatVoiceSelectionGuideForPrompt } from "../utils/voice.js";
+import { formatVoiceGenderSelectionRulesForPrompt, formatVoiceSelectionGuideForPrompt } from "../utils/voice.js";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -400,7 +400,10 @@ export function writeCandidateLinesArtifact(candidateLinesPath: string, candidat
     count: candidateLines.length,
     voiceMetadataCount: voiceMetadata.length,
     voiceSelectionGuide: {
-      policy: "Choose a Gemini voice by matching source metadata, role, scene, emotion, and transcript semantics. Candidate voice is a hint; explicit source voice metadata is stronger evidence.",
+      policy: [
+        "Choose a Gemini voice by matching source metadata, role, scene, emotion, transcript semantics, and project-curated perceived gender when source gender is explicit. Candidate voice is a hint; explicit source voice metadata is stronger evidence.",
+        formatVoiceGenderSelectionRulesForPrompt(),
+      ].join("\n"),
       voices: formatVoiceSelectionGuideForPrompt(),
     },
     candidateLines,
@@ -481,6 +484,7 @@ export function writeInstructionMarkdown(instructionPath: string, context: Instr
     `- 音色选择必须匹配真实台词和角色语境，不能只使用默认值。候选行 voice 是提示；原文明确的 声线/音色 元数据优先级更高。`,
     `- 可用 Gemini 音色指南：`,
     formatVoiceSelectionGuideForPrompt(),
+    formatVoiceGenderSelectionRulesForPrompt(),
     `- 只有在角色、章节标题、源元数据和台词都没有更好信号时，才使用 Zephyr 作为中性明亮兜底音色。`,
     `- 高能战斗/愤怒/紧急台词优先 Fenrir 或 Alnilam；长者/权威/讲解优先 Charon、Sadaltager、Rasalgethi 或 Orus；年轻/俏皮台词优先 Puck 或 Sadachbia；温柔/安抚台词优先 Achernar 或 Vindemiatrix；市井口语优先 Zubenelgenubi 或 Aoede。`,
     `- 从源章节标题以及 声线/音色/角色/说话人/speaker/voice/character/role 元数据中推导 line.speakerLabel、line.voice 和 promptProfiles[].speakers。`,

@@ -19,7 +19,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import crypto from "node:crypto";
 import type { VoiceLine } from "../domain/validators.js";
 import { env } from "../config/env.js";
-import { formatVoiceSelectionGuideForPrompt, inferVoiceForTextContext } from "../utils/voice.js";
+import { formatVoiceGenderSelectionRulesForPrompt, formatVoiceSelectionGuideForPrompt, inferVoiceForTextContext } from "../utils/voice.js";
 import {
   appendReadOnlyProbeArgs,
   getOpenCodeAuthPathCandidates,
@@ -2095,6 +2095,7 @@ export async function runOpenCodeNormalize(
     "Voice selection guide:",
     formatVoiceSelectionGuideForPrompt(),
     "音色选择规则：",
+    formatVoiceGenderSelectionRulesForPrompt(),
     "- 导演配置内容必须为简体中文；不要输出英文句子作为 audioProfile、scene、directorNotes、sampleContext、style、pacing、accent、emotion 或 performanceNotes。",
     "- Choose line.voice and promptProfiles[].speakers[].voice from the guide by matching role, age, gender, emotional intensity, scene, and transcript semantics.",
     "- Do not blindly use Zephyr for all lines. Zephyr is only a neutral bright fallback when role and transcript provide no better signal.",
@@ -2379,6 +2380,7 @@ export async function runBundleOpenCodeNormalize(
     "Voice selection guide:",
     formatVoiceSelectionGuideForPrompt(),
     "音色选择规则：",
+    formatVoiceGenderSelectionRulesForPrompt(),
     "- 所有用户可见的导演配置值必须为简体中文；不要输出英文句子作为 audioProfile、scene、directorNotes、sampleContext、style、pacing、accent、emotion 或 performanceNotes。",
     "- Choose line.voice and promptProfiles[].speakers[].voice from the guide by matching role, age, gender, emotional intensity, scene, and transcript semantics.",
     "- Do not blindly preserve candidate voice when the transcript clearly calls for a different timbre; candidate voice is a hint, not a command, unless it came from explicit source voice metadata.",

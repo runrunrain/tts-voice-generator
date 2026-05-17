@@ -237,6 +237,9 @@ describe("generateNormalizeRequestBundle", () => {
 
     const parsed = JSON.parse(fs.readFileSync(paths.candidateLinesPath, "utf-8"));
     expect(parsed.schemaVersion).toBe("tts.candidate-lines.v1");
+    expect(parsed.voiceSelectionGuide.policy).toContain("project-curated perceived gender");
+    expect(parsed.voiceSelectionGuide.policy).toContain("Google official docs list voice names/styles");
+    expect(parsed.voiceSelectionGuide.voices).toContain("项目感知性别=中性");
     expect(parsed.candidateLines).toEqual([{
       id: "candidate-1",
       order: 0,
@@ -420,6 +423,21 @@ describe("generateProductionListSchemaSnapshot", () => {
     expect(serialized).not.toMatch(/Bearer\s+\S+/i);
     expect(serialized).not.toMatch(/sk-[A-Za-z0-9]{8,}/);
   });
+
+  it("includes shared perceived gender policy without changing output schema fields", () => {
+    const snapshot = generateProductionListSchemaSnapshot();
+    const serialized = JSON.stringify(snapshot);
+
+    expect(serialized).toContain("project-curated perceived gender");
+    expect(serialized).toContain("Google official docs list voice names/styles");
+    expect(serialized).toContain("项目感知性别=女");
+    expect(serialized).toContain("project female voice: Kore, Leda, Aoede, Despina, Erinome, Laomedeia, Achernar, Sulafat");
+
+    const voiceLineFields = snapshot.nestedSchemas.VoiceLine.map((field) => field.name);
+    const promptSpeakerFields = snapshot.nestedSchemas.PromptSpeaker.map((field) => field.name);
+    expect(voiceLineFields).not.toContain("perceivedGender");
+    expect(promptSpeakerFields).not.toContain("perceivedGender");
+  });
 });
 
 describe("writeSchemaSnapshot", () => {
@@ -484,6 +502,26 @@ describe("writeInstructionMarkdown", () => {
     expect(content).toContain("不要发明不支持的内联音频标签");
     expect(content).toContain("当 line.style 会改变该行表演时必须保留");
     expect(content).toContain("所有导演配置值必须使用简体中文");
+  });
+
+  it("injects shared perceived gender rules into instruction markdown", () => {
+    const runId = crypto.randomUUID();
+    const paths = makeRunPaths(TASK_ID, runId);
+
+    writeInstructionMarkdown(paths.instructionPath, {
+      userInstruction: "",
+      taskTitle: "Gender Test",
+      taskDescription: "Voice production",
+      targetDatasetType: "production-list",
+      language: "zh-CN",
+      businessRules: [],
+    });
+
+    const content = fs.readFileSync(paths.instructionPath, "utf-8");
+    expect(content).toContain("project-curated perceived gender");
+    expect(content).toContain("Google official docs list voice names/styles");
+    expect(content).toContain("项目感知性别=男");
+    expect(content).toContain("project male voice: Puck, Charon, Fenrir, Orus, Iapetus, Algenib, Rasalgethi, Alnilam, Gacrux, Sadaltager");
   });
 });
 
@@ -978,6 +1016,9 @@ describe("runBundleOpenCodeNormalize", () => {
     // Prompt should be captured correctly
     expect(capturedPrompt).toContain("你是中文语音生产助理");
     expect(capturedPrompt).toContain("所有导演配置字段必须使用简体中文");
+    expect(capturedPrompt).toContain("project-curated perceived gender");
+    expect(capturedPrompt).toContain("Google official docs list voice names/styles");
+    expect(capturedPrompt).toContain("project female voice: Kore, Leda, Aoede, Despina, Erinome, Laomedeia, Achernar, Sulafat");
     // Prompt should reference paths, not content
     expect(capturedPrompt).toContain(paths.requestPath);
     expect(capturedPrompt).toContain(paths.draftPath);
@@ -2977,5 +3018,27 @@ describe("FQ-M1: legacy runner spawn receives sanitized env", () => {
         process.env.OPENROUTER_API_KEY = originalValue;
       }
     }
+  });
+
+  it("legacy runner prompt includes shared perceived gender policy", async () => {
+    let capturedPrompt = "";
+    _setSpawnRunner(async (file, args) => {
+      capturedPrompt = (args as string[]).find((arg) => arg.includes("你是中文语音生产助理")) ?? "";
+      return {
+        stdout: JSON.stringify({
+          type: "text",
+          part: { text: '{"lines":[{"id":"l1","order":0,"speaker":"narrator","text":"Hi"}],"speakers":[{"id":"narrator","label":"Narrator","voice":"Zephyr"}]}' },
+        }),
+        stderr: "",
+      };
+    });
+
+    await runOpenCodeNormalize({
+      documents: [{ id: "d1", fileName: "test.md", content: "Hi", enabled: true }],
+    });
+
+    expect(capturedPrompt).toContain("project-curated perceived gender");
+    expect(capturedPrompt).toContain("Google official docs list voice names/styles");
+    expect(capturedPrompt).toContain("project male voice: Puck, Charon, Fenrir, Orus, Iapetus, Algenib, Rasalgethi, Alnilam, Gacrux, Sadaltager");
   });
 });
