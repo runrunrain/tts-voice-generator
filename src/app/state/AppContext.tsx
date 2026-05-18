@@ -76,6 +76,9 @@ interface AppState {
   refreshVoices: () => void;
   /** Voice statistics from backend (availability report, error summary) */
   voiceStats: VoiceStats | null;
+  /** Globally selected voice shared by VoicesPage and RightPanel details */
+  selectedVoiceName: string | null;
+  setSelectedVoiceName: (voiceName: string | null) => void;
 
   // History
   historyRecords: HistoryRecord[];
@@ -95,6 +98,13 @@ interface AppState {
 }
 
 const AppContext = createContext<AppState | null>(null);
+
+function pickPreferredVoiceName(voices: VoiceProfile[], defaultVoice?: string | null): string | null {
+  const fallbackCandidates = [defaultVoice?.trim() || null, "Zephyr", voices[0]?.name ?? null]
+    .filter((value): value is string => Boolean(value));
+  if (voices.length === 0) return fallbackCandidates[0] ?? null;
+  return fallbackCandidates.find((candidate) => voices.some((voice) => voice.name === candidate)) ?? voices[0]?.name ?? null;
+}
 
 // ─── Provider ────────────────────────────────────────────────────────────────
 
@@ -444,6 +454,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [voicesLoading, setVoicesLoading] = useState(false);
   const [voicesError, setVoicesError] = useState<string | null>(null);
   const [voicesLoaded, setVoicesLoaded] = useState(false);
+  const [selectedVoiceName, setSelectedVoiceName] = useState<string | null>(null);
   const voicesRequestIdRef = useRef(0);
 
   const loadVoices = useCallback(() => {
@@ -478,6 +489,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     loadVoices();
   }, [loadVoices]);
+
+  useEffect(() => {
+    setSelectedVoiceName((current) => {
+      if (current && (voices.length === 0 || voices.some((voice) => voice.name === current))) return current;
+      return pickPreferredVoiceName(voices, settings.defaultVoice);
+    });
+  }, [settings.defaultVoice, voices]);
 
   // --- History ---
   const [historyRecords, setHistoryRecords] = useState<HistoryRecord[]>([]);
@@ -561,6 +579,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     voicesLoaded,
     refreshVoices,
     voiceStats,
+    selectedVoiceName,
+    setSelectedVoiceName,
     historyRecords,
     historyTotalPages,
     historyFilter,

@@ -3,6 +3,7 @@ import { getDb } from "../../db/index.js";
 import { directorProfile as dpTable } from "../../db/schema-extended.js";
 import type { GenerateSpeechRequest } from "../../services/tts-generator.js";
 import type { PromptAssemblyInput } from "../../services/prompt-assembly.js";
+import { deriveLineStyleFromTranscript } from "../../utils/line-style-deriver.js";
 
 type PromptProfileSnapshot = {
   id: string;
@@ -156,6 +157,9 @@ export function resolvePromptAssemblyInput(
     ...normalizeOverride(line.directorOverrideJson),
   };
 
+  const transcript = readString(artifactLine.transcript) ?? readString(artifactLine.text) ?? line.text;
+  const explicitLineStyle = readString(artifactLine.style) ?? readString(line.style);
+
   const input: PromptAssemblyInput = {
     audioProfile: override.audioProfile ?? profile.audioProfile ?? "",
     scene: override.scene ?? profile.scene ?? "",
@@ -166,8 +170,8 @@ export function resolvePromptAssemblyInput(
     accent: override.accent ?? profile.accent ?? "",
     emotion: override.emotion ?? profile.emotion ?? "",
     performanceNotes: combineNotes(profile.performanceNotes, override.performanceNotes),
-    lineStyle: readString(artifactLine.style) ?? readString(line.style) ?? "",
-    transcript: readString(artifactLine.transcript) ?? readString(artifactLine.text) ?? line.text,
+    lineStyle: explicitLineStyle ?? deriveLineStyleFromTranscript(transcript),
+    transcript,
     speakers: override.speakers ?? normalizeSpeakers(profile.speakers) ?? [],
   };
 

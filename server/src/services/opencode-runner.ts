@@ -672,6 +672,14 @@ export type CandidateFilterReason =
   | "non_speech_description"
   | "stage_direction";
 
+type PlainTextMode = "unknown" | "dialogue" | "context";
+
+type PlainLineAdmission = {
+  allowed: boolean;
+  reason?: CandidateFilterReason;
+  evidence: string[];
+};
+
 export interface CandidateExtractionQualitySummary {
   inputLineCount: number;
   candidateLineCount: number;
@@ -1484,7 +1492,7 @@ function emptyCandidateReasonCounts(): Record<CandidateFilterReason, number> {
 function isContextOnlySection(sectionTitle: string | null): boolean {
   const normalized = stripMarkdownDecorators(sectionTitle ?? "").trim();
   if (!normalized) return false;
-  return /^(?:音频档案|音频资料|声音档案|场景|导演备注|表演备注|示例上下文|上下文|语境|世界观|角色设定|人物设定|背景设定|参考资料|制作要求|生成要求|profile|audio\s*profile|scene|context|director(?:'s|s)?\s+notes|sample\s+context|background|reference)(?:\s|[：:]|$)/i.test(normalized);
+  return /^(?:音频档案|音频资料|声音档案|场景|导演备注|表演备注|示例上下文|上下文|语境|世界观|角色设定|人物设定|背景设定|参考资料|制作要求|生成要求|需求说明|说明|要求|验收标准|质量标准|输出格式|生成策略|profile|audio\s*profile|scene|context|director(?:'s|s)?\s+notes|sample\s+context|background|reference|requirements?|specification|instructions?|output\s*format)(?:\s|[：:]|$)/i.test(normalized);
 }
 
 function isDialogueSection(sectionTitle: string | null): boolean {
@@ -1506,6 +1514,20 @@ function stripLeadingListMarker(line: string): string {
     .replace(/^\s*(?:[-*+•]\s*)?\[[ xX]\]\s*/, "")
     .replace(/^\s*(?:[-*+•]|[0-9０-９]+[.)、．]|[一二三四五六七八九十百千万]+[.)、．])\s*/, "")
     .trim();
+}
+
+function isBulletListLine(line: string): boolean {
+  return /^\s*(?:[-*+•]|[0-9０-９]+[.)、．]|[一二三四五六七八九十百千万]+[.)、．])\s+/.test(line);
+}
+
+function isDialogueLabelLine(line: string): boolean {
+  const normalized = stripLeadingListMarker(stripMarkdownDecorators(line)).trim();
+  return /^(?:台词|对白|语音台词|文本|内容|transcript|dialogue|script|lines?)\s*[：:]\s*$/i.test(normalized);
+}
+
+function isContextLabelLine(line: string): boolean {
+  const normalized = stripLeadingListMarker(stripMarkdownDecorators(line)).trim();
+  return /^(?:场景|上下文|语境|背景|导演备注|表演备注|示例上下文|制作要求|生成要求|需求说明|文档说明|说明|要求|验收标准|质量标准|输出格式|生成策略|参考资料|scene|context|background|director(?:'s|s)?\s+notes|sample\s+context|requirements?|specification|instructions?|output\s*format)\s*[：:]\s*$/i.test(normalized);
 }
 
 function cleanSpeakableText(line: string): string {
@@ -1630,10 +1652,43 @@ function recordCandidateSkip(
   }
 }
 
+function classifyRequirementProseLine(line: string): CandidateFilterReason | null {
+  const normalized = stripLeadingListMarker(stripMarkdownDecorators(line)).trim();
+  if (!normalized) return "empty";
+
+  if (/^(?:需求说明|文档说明|制作要求|生成要求|风格要求|筛选条件|质量标准|验收标准|输出格式|生成策略|说明|要求|目标|目的|用途|注意事项|metadata|requirements?|specification|instructions?|output\s*format)\s*[：:].+$/i.test(normalized)) {
+    return "non_speech_description";
+  }
+
+  if (/^(?:本需求|本文档|本模块|本功能|该功能|该模块|本文|本文内容|本段内容|目标是|目标为|目的在于|用于|用来|生成策略|输出格式|风格要求|制作要求|筛选条件|质量标准|验收标准|说明如下|要求如下)/i.test(normalized)) {
+    return "non_speech_description";
+  }
+
+  if (/^(?:需要|应当|必须|请勿|不要|不得|仅保留|只保留|只朗读|不要朗读).*(?:需求|说明|文档|系统|模型|OpenCode|候选|生产列表|制作列表|台词列表|输出|生成|筛选|过滤|提交|朗读|音频|配音)/i.test(normalized)) {
+    return "non_speech_description";
+  }
+
+  if (/(?:请根据以下|请基于以下|根据以下|基于以下|如下说明|说明如下|要求如下|sourceAnnotations|candidateLines|candidate\s*lines|source\s*annotations)/i.test(normalized)) {
+    return "non_speech_description";
+  }
+
+  if (/^(?:requirements?|specification|instructions?|metadata|goal|objective|purpose|acceptance\s+criteria|quality\s+standard|output\s+format|generation\s+strategy)\b/i.test(normalized)) {
+    return "non_speech_description";
+  }
+
+  if (/^(?:please\s+)?(?:use|keep|remove|filter|exclude|include|submit|output|normalize|generate|create)\b.*\b(?:requirements?|instructions?|metadata|source|candidate\s*lines?|production\s*list|dialogue|transcript|audio|tts)\b/i.test(normalized)) {
+    return "non_speech_description";
+  }
+
+  return null;
+}
+
 function classifyNonSpeechCandidateLine(line: string): CandidateFilterReason | null {
   const normalized = stripLeadingListMarker(stripMarkdownDecorators(line)).trim();
   if (!normalized) return "empty";
   if (isGenerationInstructionLine(normalized)) return "non_speech_description";
+  const requirementProseReason = classifyRequirementProseLine(normalized);
+  if (requirementProseReason) return requirementProseReason;
   if (isStageDirectionLine(normalized)) return "stage_direction";
   if (/^https?:\/\/\S+$/i.test(normalized)) return "url_only";
   if (/^(?:来源|出处|数据来源|source|url|link|链接)\s*[：:].*$/i.test(normalized)) return "metadata_source";
@@ -1645,7 +1700,7 @@ function classifyNonSpeechCandidateLine(line: string): CandidateFilterReason | n
     return "section_marker";
   }
   if (/^#{1,6}\s+/.test(line.trim())) return "section_marker";
-  if (/^(?:台词|对白|文本|内容|声线|音色|角色|角色\/身份|身份|姓名|性别|年龄|主要颜色|外貌特征|性格特征|说话人|speaker|voice|voice\s*name|character|role)\s*[：:]\s*$/i.test(normalized)) {
+  if (/^(?:台词|对白|文本|内容|声线|音色|角色|角色\/身份|身份|姓名|性别|年龄|主要颜色|外貌特征|性格特征|说话人|场景|上下文|背景|导演备注|表演备注|制作要求|生成要求|需求说明|文档说明|说明|要求|验收标准|质量标准|输出格式|生成策略|speaker|voice|voice\s*name|character|role|scene|context|background|requirements?|specification|instructions?|output\s*format)\s*[：:]\s*$/i.test(normalized)) {
     return "label_only";
   }
   if (/^(?:声线|音色|角色|角色\/身份|身份|说话人|speaker|voice|voice\s*name|character|role)\s*[：:].+$/i.test(normalized)) {
@@ -1661,6 +1716,32 @@ function classifyNonSpeechCandidateLine(line: string): CandidateFilterReason | n
     return "non_speech_description";
   }
   return null;
+}
+
+function admitPlainLineAsCandidate(options: {
+  rawLine: string;
+  text: string;
+  plainTextMode: PlainTextMode;
+  activeVoiceMetadata: VoiceMetadata | null;
+}): PlainLineAdmission {
+  const requirementProseReason = classifyRequirementProseLine(options.text);
+  if (requirementProseReason) {
+    return { allowed: false, reason: requirementProseReason, evidence: ["requirement_prose_filtered", requirementProseReason] };
+  }
+
+  if (options.plainTextMode === "context") {
+    return { allowed: false, reason: "non_speech_description", evidence: ["context_plain_text_filtered"] };
+  }
+
+  if (options.plainTextMode === "dialogue") {
+    return { allowed: true, evidence: ["dialogue_section_plain_line"] };
+  }
+
+  if (options.activeVoiceMetadata && isBulletListLine(options.rawLine)) {
+    return { allowed: true, evidence: ["role_section_plain_line"] };
+  }
+
+  return { allowed: true, evidence: ["plain_text_fallback_line"] };
 }
 
 function stripTranscriptFieldLabel(line: string): { text: string; stripped: boolean } {
@@ -1921,6 +2002,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
     const docRawLines = doc.content.split(/\r?\n/);
     let currentSectionTitle: string | null = null;
     let activeVoiceMetadata: VoiceMetadata | null = null;
+    let plainTextMode: PlainTextMode = "unknown";
 
     // Phase 1: Identify table blocks (header + separator + body).
     // A table block must have consecutive: header row, separator row, body row(s).
@@ -1990,6 +2072,13 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
       const headingTitle = extractMarkdownHeading(trimmed);
       if (headingTitle) {
         currentSectionTitle = headingTitle;
+        if (isDialogueSection(headingTitle)) {
+          plainTextMode = "dialogue";
+        } else if (isContextOnlySection(headingTitle) || isGenerationInstructionLine(headingTitle) || classifyRequirementProseLine(headingTitle)) {
+          plainTextMode = "context";
+        } else {
+          plainTextMode = "unknown";
+        }
         if (!isContextOnlySection(headingTitle) && !isDialogueSection(headingTitle)) {
           activeVoiceMetadata = null;
         }
@@ -2142,6 +2231,12 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
       }
 
       // Non-table line: apply existing filtering logic
+
+      if (isDialogueLabelLine(trimmed)) {
+        plainTextMode = "dialogue";
+      } else if (isContextLabelLine(trimmed)) {
+        plainTextMode = "context";
+      }
 
       // Skip standalone Markdown table separator rows
       if (isTableSeparator(trimmed)) {
@@ -2301,6 +2396,28 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
         continue;
       }
 
+      const admission = admitPlainLineAsCandidate({
+        rawLine: trimmed,
+        text,
+        plainTextMode,
+        activeVoiceMetadata,
+      });
+      if (!admission.allowed) {
+        const reason = admission.reason ?? "non_speech_description";
+        metadataRowsSkipped++;
+        recordCandidateSkip(skippedByReason, examplesByReason, reason, trimmed);
+        sourceAnnotations.push(createSourceAnnotation({
+          role: contentRoleForSkip(reason, text, currentSectionTitle),
+          doc,
+          lineIdx,
+          rawLine,
+          text,
+          sectionTitle: currentSectionTitle,
+          evidence: admission.evidence,
+        }));
+        continue;
+      }
+
       const speaker = registerSpeaker(speakerMap, speakerLabel, activeVoiceMetadata?.inferredVoice ?? "Zephyr");
       const candidateId = crypto.randomUUID();
       candidateLines.push({
@@ -2311,7 +2428,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
         transcript: text,
         voice: speaker.voice,
         sourceRole: "speakable_line",
-        evidence: ["plain_or_bullet_line"],
+        evidence: admission.evidence,
         sectionTitle: currentSectionTitle ?? undefined,
         sourceDocumentId: doc.id,
         sourceFileName: doc.fileName,
@@ -2327,7 +2444,7 @@ export function extractCandidateLines(input: NormalizeRequirementsInput): Candid
         sectionTitle: currentSectionTitle,
         linkedCandidateId: candidateId,
         voiceMetadataId: activeVoiceMetadata?.id,
-        evidence: ["plain_or_bullet_line"],
+        evidence: admission.evidence,
       }));
 
       order++;

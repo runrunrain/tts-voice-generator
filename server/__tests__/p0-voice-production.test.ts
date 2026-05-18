@@ -337,7 +337,7 @@ describe("OpenCode Runner", () => {
       documents: [{
         id: "d1",
         fileName: "script.txt",
-        content: "Hello world\nThis is a test\n# comment line\n",
+        content: "#### 台词\nHello world\nThis is a test\n# comment line\n",
         enabled: true,
       }],
     });
@@ -347,6 +347,59 @@ describe("OpenCode Runner", () => {
     expect(result.productionList.lines[0].speaker).toBe("narrator");
     expect(result.productionList.speakers).toHaveLength(1);
     expect(result.productionList.speakers[0].label).toBe("旁白");
+  });
+
+  it("fallbackNormalize preserves ordinary plain text without dialogue sections while filtering non-speech prose", () => {
+    const result = fallbackNormalize({
+      documents: [{
+        id: "d1",
+        fileName: "plain-with-requirements.txt",
+        content: [
+          "Line one",
+          "说明：本需求用于生成战地音频，不应作为台词朗读。",
+          "请根据以下文本输出生产列表。",
+          "Line two",
+          "制作要求：仅保留可朗读台词。",
+          "Line three",
+        ].join("\n"),
+        enabled: true,
+      }],
+    });
+
+    const transcripts = result.productionList.lines.map((line) => line.text);
+
+    expect(transcripts).toEqual(["Line one", "Line two", "Line three"]);
+    expect(transcripts.some((text) => /(?:说明|本需求|请根据以下|制作要求|生产列表)/.test(text))).toBe(false);
+    expect(result.parseStats?.voiceLinesCreated).toBe(3);
+    expect(result.parseStats?.metadataRowsSkipped).toBeGreaterThanOrEqual(3);
+  });
+
+  it("extractCandidateLines filters requirement prose while preserving explicit narration and polite dialogue", () => {
+    const result = extractCandidateLines({
+      documents: [{
+        id: "doc-requirement-prose-filter",
+        fileName: "requirements.md",
+        enabled: true,
+        content: [
+          "说明：本需求用于生成战地音频，不应作为台词朗读。",
+          "制作要求：请根据以下文本输出生产列表。",
+          "本需求要求音色沉稳，用于测试非台词过滤。",
+          "旁白：战火在远处渐渐熄灭。",
+          "护士：请你把药拿来，我还能撑住。",
+        ].join("\n"),
+      }],
+    });
+
+    const transcripts = result.candidateLines.map((line) => line.transcript);
+
+    expect(transcripts).toEqual([
+      "战火在远处渐渐熄灭。",
+      "请你把药拿来，我还能撑住。",
+    ]);
+    expect(result.candidateLines[0]).toMatchObject({ speakerLabel: "旁白" });
+    expect(result.candidateLines[1]).toMatchObject({ speakerLabel: "护士" });
+    expect(transcripts.some((text) => /(?:说明|制作要求|本需求|输出生产列表)/.test(text))).toBe(false);
+    expect(result.qualitySummary.skippedByReason.non_speech_description).toBeGreaterThanOrEqual(3);
   });
 
   it("fallbackNormalize parses multi-speaker content", () => {
@@ -615,6 +668,33 @@ describe("OpenCode Runner", () => {
     expect(report.issues.some((issue) => issue.lineId === "l3" && issue.code === "TRANSCRIPT_NON_SPEECH_DESCRIPTION")).toBe(true);
     expect(report.issues.some((issue) => issue.lineId === "l4" && issue.code === "TRANSCRIPT_NON_SPEECH_DESCRIPTION")).toBe(true);
     expect(report.issues.some((issue) => issue.lineId === "l5")).toBe(false);
+  });
+
+  it("validateBusinessQualityGate blocks requirement prose without rejecting polite speech", () => {
+    const draft = {
+      schemaVersion: "tts.production-list.v2",
+      promptProfiles: [{
+        id: "profile_a",
+        name: "战地女声",
+        audioProfile: "清晰自然的年轻女性声线，适合战地对话。",
+        scene: "军医与同伴在撤离前进行短暂交流。",
+        directorNotes: "只朗读角色台词，不朗读需求说明。",
+        sampleContext: "源文档可能包含需求说明和实际台词。",
+        speakers: [{ id: "speaker-a", label: "Speaker A", voice: "Leda" }],
+      }],
+      lines: [
+        { id: "l1", order: 0, speaker: "speaker-a", speakerLabel: "Speaker A", transcript: "说明：本需求用于生成战地音频，不应朗读。", promptProfileId: "profile_a", voice: "Leda" },
+        { id: "l2", order: 1, speaker: "speaker-a", speakerLabel: "Speaker A", transcript: "本需求要求音色沉稳，用于测试非台词过滤。", promptProfileId: "profile_a", voice: "Leda" },
+        { id: "l3", order: 2, speaker: "speaker-a", speakerLabel: "Speaker A", transcript: "请你把药拿来，我还能撑住。", promptProfileId: "profile_a", voice: "Leda" },
+      ],
+    };
+
+    const report = validateBusinessQualityGate({ draft, candidateLineCount: 3, voiceMetadataCount: 1, voiceMetadataIdentityCount: 1 });
+
+    expect(report.passed).toBe(false);
+    expect(report.issues.some((issue) => issue.lineId === "l1" && issue.code === "TRANSCRIPT_NON_SPEECH_DESCRIPTION")).toBe(true);
+    expect(report.issues.some((issue) => issue.lineId === "l2" && issue.code === "TRANSCRIPT_NON_SPEECH_DESCRIPTION")).toBe(true);
+    expect(report.issues.some((issue) => issue.lineId === "l3")).toBe(false);
   });
 
   it("extractCandidateLines keeps the three real requirement documents deterministic and clean", () => {

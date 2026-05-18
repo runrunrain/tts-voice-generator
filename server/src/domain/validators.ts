@@ -630,10 +630,43 @@ function isGenerationInstructionLine(line: string): boolean {
   return false;
 }
 
+function classifyRequirementProseTranscriptLine(line: string): QualityIssueCode | null {
+  const normalized = normalizeGenerationInstructionLine(line);
+  if (!normalized) return "TRANSCRIPT_EMPTY_OR_PUNCTUATION_ONLY";
+
+  if (/^(?:需求说明|文档说明|制作要求|生成要求|风格要求|筛选条件|质量标准|验收标准|输出格式|生成策略|说明|要求|目标|目的|用途|注意事项|metadata|requirements?|specification|instructions?|output\s*format)\s*[：:].+$/i.test(normalized)) {
+    return "TRANSCRIPT_NON_SPEECH_DESCRIPTION";
+  }
+
+  if (/^(?:本需求|本文档|本模块|本功能|该功能|该模块|本文|本文内容|本段内容|目标是|目标为|目的在于|用于|用来|生成策略|输出格式|风格要求|制作要求|筛选条件|质量标准|验收标准|说明如下|要求如下)/i.test(normalized)) {
+    return "TRANSCRIPT_NON_SPEECH_DESCRIPTION";
+  }
+
+  if (/^(?:需要|应当|必须|请勿|不要|不得|仅保留|只保留|只朗读|不要朗读).*(?:需求|说明|文档|系统|模型|OpenCode|候选|生产列表|制作列表|台词列表|输出|生成|筛选|过滤|提交|朗读|音频|配音)/i.test(normalized)) {
+    return "TRANSCRIPT_NON_SPEECH_DESCRIPTION";
+  }
+
+  if (/(?:请根据以下|请基于以下|根据以下|基于以下|如下说明|说明如下|要求如下|sourceAnnotations|candidateLines|candidate\s*lines|source\s*annotations)/i.test(normalized)) {
+    return "TRANSCRIPT_NON_SPEECH_DESCRIPTION";
+  }
+
+  if (/^(?:requirements?|specification|instructions?|metadata|goal|objective|purpose|acceptance\s+criteria|quality\s+standard|output\s+format|generation\s+strategy)\b/i.test(normalized)) {
+    return "TRANSCRIPT_NON_SPEECH_DESCRIPTION";
+  }
+
+  if (/^(?:please\s+)?(?:use|keep|remove|filter|exclude|include|submit|output|normalize|generate|create)\b.*\b(?:requirements?|instructions?|metadata|source|candidate\s*lines?|production\s*list|dialogue|transcript|audio|tts)\b/i.test(normalized)) {
+    return "TRANSCRIPT_NON_SPEECH_DESCRIPTION";
+  }
+
+  return null;
+}
+
 function classifyTranscriptQualityIssue(transcript: string): QualityIssueCode | null {
   const normalized = transcript.trim();
   if (!normalized || !hasSemanticTranscript(normalized)) return "TRANSCRIPT_EMPTY_OR_PUNCTUATION_ONLY";
   if (isGenerationInstructionLine(normalized)) return "TRANSCRIPT_NON_SPEECH_DESCRIPTION";
+  const requirementProseIssue = classifyRequirementProseTranscriptLine(normalized);
+  if (requirementProseIssue) return requirementProseIssue;
   if (/^(?:show|scene|hide|with|play|stop|pause|jump|call|return|menu|label|define|image|window)\b/i.test(normalized)) {
     return "TRANSCRIPT_NON_SPEECH_DESCRIPTION";
   }

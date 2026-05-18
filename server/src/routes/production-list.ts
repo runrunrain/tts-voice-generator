@@ -170,6 +170,62 @@ function findAudioAsset(assetId: number | null, jobId: string | null) {
   return null;
 }
 
+function candidateMatchesRequestedLineId(candidate: Record<string, unknown>, lineId: string): boolean {
+  for (const field of ["id", "lineId", "voiceLineId"] as const) {
+    if (normalizeNullableString(candidate[field]) === lineId) return true;
+  }
+  return false;
+}
+
+function historyLineHasAudioRefs(line: Record<string, unknown>): boolean {
+  return normalizeNullableString(line.relatedJobId) !== null || normalizeNullableNumber(line.relatedAssetId) !== null;
+}
+
+function dbLineToHistoryRecord(line: VoiceLineRow): Record<string, unknown> {
+  return {
+    id: logicalLineId(line),
+    lineId: line.lineId ?? null,
+    voiceLineId: line.id,
+    order: line.order,
+    speaker: line.speaker,
+    text: line.text,
+    voice: line.voice,
+    style: line.style,
+    notes: line.notes,
+    status: line.status,
+    directorProfileId: line.directorProfileId ?? null,
+    directorOverrideJson: line.directorOverrideJson ?? null,
+    generationStatus: line.generationStatus ?? "draft",
+    generationErrorCode: line.generationErrorCode ?? null,
+    generationErrorMessage: line.generationErrorMessage ?? null,
+    relatedJobId: line.relatedJobId ?? null,
+    relatedAssetId: line.relatedAssetId ?? null,
+    lastGenerationSignature: line.lastGenerationSignature ?? null,
+    lastGenerationSnapshotJson: line.lastGenerationSnapshotJson ?? null,
+  };
+}
+
+function findDbLineForHistory(versionId: string, lineId: string): Record<string, unknown> | null {
+  const db = getDb();
+  const lines = db.select().from(voiceLine)
+    .where(eq(voiceLine.versionId, versionId))
+    .orderBy(voiceLine.order)
+    .all();
+  const matched = lines.find((line) => line.lineId === lineId || line.id === lineId);
+  return matched ? dbLineToHistoryRecord(matched) : null;
+}
+
+function pickHistoryLine(taskId: string, version: typeof productionListVersion.$inferSelect, lineId: string): Record<string, unknown> | null {
+  const versionLines = loadVersionLines(taskId, version);
+  const artifactLine = versionLines.find((candidate) => candidateMatchesRequestedLineId(candidate, lineId)) ?? null;
+  if (artifactLine && historyLineHasAudioRefs(artifactLine)) return artifactLine;
+
+  const dbLine = findDbLineForHistory(version.id, lineId);
+  if (dbLine && historyLineHasAudioRefs(dbLine)) return dbLine;
+
+  return artifactLine;
+}
+
 function prepareGenerationForLine(input: {
   line: VoiceLineRow;
   productionArtifact: { lines?: Array<Record<string, unknown>> } | null;
@@ -1051,8 +1107,7 @@ app.get("/api/tasks/:taskId/production-list/lines/:lineId/audio-history", (c) =>
 
   const history = [];
   for (const version of versions) {
-    const versionLines = loadVersionLines(taskId, version);
-    const line = versionLines.find((candidate) => candidate.id === lineId);
+    const line = pickHistoryLine(taskId, version, lineId);
     if (!line) continue;
 
     const relatedJobId = normalizeNullableString(line.relatedJobId);

@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { Search, Filter, Play, Loader2, AlertTriangle, AlertCircle, RefreshCw } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import type { VoiceAuditionResult, VoiceStatus } from "../types";
-import { formatVoiceCompactLabel, getVoiceDisplayMeta, voiceMatchesQuery } from "../utils/voiceDisplay";
+import { formatVoiceCompactLabel, formatVoiceGenderLabel, getVoiceDisplayMeta, voiceMatchesGender, voiceMatchesQuery, type VoiceGenderFilter } from "../utils/voiceDisplay";
 
 type TabFilter = "all" | "verified" | "candidate" | "custom" | "failed";
 type AuditionPhase = "idle" | "loading" | "playing" | "success" | "error";
@@ -86,10 +86,10 @@ function formatAuditionErrorMessage(error: VoiceAuditionResult["error"] | undefi
 }
 
 export function VoicesPage() {
-  const { voices, adapter, voicesLoading, voicesError, refreshVoices, voicesLoaded, voiceStats } = useAppState();
+  const { voices, adapter, voicesLoading, voicesError, refreshVoices, voicesLoaded, voiceStats, selectedVoiceName, setSelectedVoiceName } = useAppState();
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<TabFilter>("all");
-  const [selectedVoice, setSelectedVoice] = useState<string>("Zephyr");
+  const [genderFilter, setGenderFilter] = useState<VoiceGenderFilter>("all");
   const [probeStatuses, setProbeStatuses] = useState<Record<string, "idle" | "loading" | "success" | "error">>({});
   const [probeErrors, setProbeErrors] = useState<Record<string, string | null>>({});
   const [probeMeta, setProbeMeta] = useState<Record<string, { cached?: boolean; cacheTtlSeconds?: number | null; lastVerified?: string | null }>>({});
@@ -142,8 +142,7 @@ export function VoicesPage() {
     };
   }, [cleanupActiveAudition]);
 
-  // Filter voices
-  const filteredVoices = voices.filter((v) => {
+  const matchesSearchAndStatus = (v: typeof voices[number]) => {
     if (searchQuery && !voiceMatchesQuery(v, searchQuery)) {
       return false;
     }
@@ -154,7 +153,27 @@ export function VoicesPage() {
       case "failed": return v.status === "error";
       default: return true;
     }
-  });
+  };
+
+  // Filter voices: search query -> status tab -> gender filter.
+  const statusFilteredVoices = voices.filter(matchesSearchAndStatus);
+  const filteredVoices = statusFilteredVoices.filter((v) => voiceMatchesGender(v.name, genderFilter));
+  const genderCounts: Record<VoiceGenderFilter, number> = {
+    all: statusFilteredVoices.length,
+    male: statusFilteredVoices.filter((v) => voiceMatchesGender(v.name, "male")).length,
+    female: statusFilteredVoices.filter((v) => voiceMatchesGender(v.name, "female")).length,
+  };
+  const selectedVoiceHidden = Boolean(
+    selectedVoiceName
+    && voices.some((voice) => voice.name === selectedVoiceName)
+    && !filteredVoices.some((voice) => voice.name === selectedVoiceName),
+  );
+
+  const showAllFilters = () => {
+    setSearchQuery("");
+    setActiveTab("all");
+    setGenderFilter("all");
+  };
 
   // Tab counts
   const tabCounts: Record<TabFilter, number> = {
@@ -382,6 +401,31 @@ export function VoicesPage() {
         ))}
       </div>
 
+      {/* Gender filter */}
+      <div className="px-6 py-2 border-b border-border-subtle bg-bg-sunken/50 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-text-tertiary">性别筛选</span>
+          {([
+            ["all", "全部性别"],
+            ["male", "男声"],
+            ["female", "女声"],
+          ] as const).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              className={`rounded-full border px-3 py-1 transition-colors ${
+                genderFilter === key
+                  ? "border-accent/40 bg-accent-muted text-accent"
+                  : "border-border bg-bg-base text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+              }`}
+              onClick={() => setGenderFilter(key)}
+            >
+              {label} ({genderCounts[key]})
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Voice Stats Summary */}
       {voiceStats && (
         <div className="px-6 py-2.5 border-b border-border-subtle bg-bg-sunken shrink-0">
@@ -473,28 +517,43 @@ export function VoicesPage() {
                 正在刷新音色列表...
               </div>
             )}
+            {selectedVoiceHidden && selectedVoiceName && (
+              <div className="mb-4 flex flex-wrap items-center gap-3 rounded-md border border-warning/20 bg-warning-muted/25 px-4 py-2 text-xs text-warning">
+                <AlertTriangle size={14} className="shrink-0" />
+                <span className="min-w-0 flex-1">当前选中音色 <span className="font-semibold text-text-primary">{formatVoiceCompactLabel(selectedVoiceName)}</span> 已被筛选隐藏，右侧详情仍保持该音色。</span>
+                <button
+                  type="button"
+                  className="rounded border border-warning/30 px-2 py-1 text-[11px] font-medium hover:bg-warning-muted"
+                  onClick={showAllFilters}
+                >
+                  显示全部
+                </button>
+              </div>
+            )}
             {filteredVoices.length === 0 ? (
               /* No match: filter produced no results */
               <div className="flex flex-col items-center justify-center h-64 text-center">
                 <p className="text-text-tertiary text-sm">没有匹配的音色</p>
-                <p className="text-text-tertiary text-xs mt-1">尝试调整筛选条件</p>
+                <p className="text-text-tertiary text-xs mt-1">尝试调整搜索、状态或性别筛选</p>
+                <button type="button" className="mt-4 rounded border border-border px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-hover hover:text-text-primary" onClick={showAllFilters}>显示全部音色</button>
               </div>
             ) : (
               <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">
             {filteredVoices.map((v) => {
               const displayMeta = getVoiceDisplayMeta(v.name);
+              const genderLabel = formatVoiceGenderLabel(v.name);
               const auditionState = auditionStates[v.name] ?? { phase: "idle" };
               const isAuditionLoading = auditionState.phase === "loading";
               const isAuditionRefreshing = isAuditionLoading && auditionState.action === "refresh";
               const isAuditionPlaying = auditionState.phase === "playing";
               return <div
                  key={v.name}
-                 className={`p-3 rounded-lg border cursor-pointer transition-colors ${
-                   selectedVoice === v.name
-                    ? "bg-accent-subtle border-accent/30"
-                    : "bg-bg-surface border-border hover:border-border-subtle hover:bg-bg-hover"
+                  className={`p-3 rounded-lg border cursor-pointer transition-colors ${
+                    selectedVoiceName === v.name
+                     ? "bg-accent-subtle border-accent/30"
+                     : "bg-bg-surface border-border hover:border-border-subtle hover:bg-bg-hover"
                 }`}
-                onClick={() => setSelectedVoice(v.name)}
+                onClick={() => setSelectedVoiceName(v.name)}
               >
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
@@ -503,6 +562,11 @@ export function VoicesPage() {
                     {v.isDefault && (
                       <span className="px-1.5 py-0.5 rounded text-[10px] bg-bg-sunken text-text-secondary border border-border-subtle">
                         默认
+                      </span>
+                    )}
+                    {genderLabel && (
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] border ${genderLabel === "男声" ? "bg-accent-muted/15 text-accent border-accent/20" : "bg-success-muted/15 text-success border-success/20"}`}>
+                        {genderLabel}
                       </span>
                     )}
                     <span className={`px-1.5 py-0.5 rounded text-[10px] border ${
@@ -514,7 +578,7 @@ export function VoicesPage() {
                       {statusLabel(v.status)}
                     </span>
                   </div>
-                  {selectedVoice === v.name && <span className="text-[10px] text-accent">当前选中</span>}
+                  {selectedVoiceName === v.name && <span className="text-[10px] text-accent">当前选中</span>}
                 </div>
 
                 <div className="flex flex-col gap-1 text-[11px] text-text-secondary mb-3">

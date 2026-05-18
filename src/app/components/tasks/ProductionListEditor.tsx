@@ -1,5 +1,6 @@
 import { AlertCircle, CheckCircle2, Circle, Copy, Download, FileWarning, History, Loader2, Lock, PanelBottomOpen, Play, Plus, RefreshCw, Save, Scissors, Square, Trash2, Wand2, XCircle } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useAppState } from "../../state/AppContext";
 import { useProductionList } from "../../hooks/useProductionList";
 import { getLineGenerationStatus, isGeneratableVoiceLine, useProductionGeneration } from "../../hooks/useProductionGeneration";
@@ -295,19 +296,19 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
         {draftLines.length === 0 ? (
           <PanelState icon={<Plus size={18} />} title="暂无生产行" hint="点击新增行创建第一条语音台词，或在右侧 Agent 面板“重新生成生产列表草稿”。生成音频需先保存生产列表并选中行。" />
         ) : (
-          <table className="w-full min-w-[1120px] min-[1200px]:min-w-[1240px] min-[1440px]:min-w-[1360px] border-collapse text-xs">
+          <table className="w-full min-w-[1360px] min-[1200px]:min-w-[1480px] min-[1440px]:min-w-[1560px] border-collapse text-xs">
             <thead className="sticky top-0 z-10 bg-bg-sunken text-text-tertiary border-b border-border-subtle">
               <tr>
-                <Th className="w-16"><label className="flex items-center gap-2"><input type="checkbox" className="accent-accent" checked={allSelected} onChange={toggleAll} disabled={saving || generating} /> #</label></Th>
-                <Th className="w-28">模块</Th>
-                <Th className="w-40">标题</Th>
-                <Th className="w-28">角色</Th>
-                <Th>语音文本</Th>
-                <Th className="w-48">行级风格</Th>
-                <Th className="w-32">音色</Th>
-                <Th className="w-36">导演</Th>
-                <Th className="w-36">状态</Th>
-                <Th className="w-28">操作</Th>
+                <Th className="w-16 min-w-16"><label className="flex items-center gap-2"><input type="checkbox" className="accent-accent" checked={allSelected} onChange={toggleAll} disabled={saving || generating} /> #</label></Th>
+                <Th className="w-[11rem] min-w-[11rem]">状态</Th>
+                <Th className="w-24 min-w-24">操作</Th>
+                <Th className="w-28 min-w-28">模块</Th>
+                <Th className="w-36 min-[1440px]:w-40">标题</Th>
+                <Th className="w-28 min-w-28">角色</Th>
+                <Th className="min-w-[300px]">语音文本</Th>
+                <Th className="w-48 min-w-48">行级风格</Th>
+                <Th className="w-36 min-w-36">音色</Th>
+                <Th className="w-40 min-w-40">导演</Th>
               </tr>
             </thead>
             <tbody>
@@ -413,16 +414,16 @@ function ProductionRow({ taskId, line, index, voices, directorProfiles, profileB
   return (
     <>
       <tr aria-selected={selected} className={`border-b border-border-subtle hover:bg-bg-hover/60 ${selected ? "bg-accent-muted/30" : ""} ${toneClass}`}>
-        <Td className="text-text-tertiary font-mono"><label className="flex items-center gap-2"><input type="checkbox" className="accent-accent" checked={selected} onChange={onToggleSelected} disabled={disabled} aria-label={`选择第 ${index + 1} 行`} />{rowLocked && <LockIcon />} {String(index + 1).padStart(2, "0")}</label></Td>
-        <Td><ShortInput value={line.moduleName ?? ""} fieldLabel="模块" onChange={(value) => onChange({ moduleName: value })} disabled={disabled || rowLocked} placeholder="未分组" /></Td>
-        <Td><ShortInput value={line.title ?? ""} fieldLabel="标题" onChange={(value) => onChange({ title: value })} disabled={disabled || rowLocked} placeholder={line.transcript.slice(0, 18) || "标题"} /></Td>
-        <Td><ShortInput value={line.speakerLabel ?? ""} fieldLabel="角色" onChange={(value) => onChange({ speakerLabel: value })} disabled={disabled || rowLocked} placeholder="旁白" /></Td>
-        <Td><div className="truncate text-text-secondary max-w-[280px] min-[1200px]:max-w-[360px] min-[1440px]:max-w-[420px]" title={line.transcript}>{line.transcript || <span className="text-text-tertiary">待填写台词</span>}</div><div className={`mt-1 text-[10px] ${charCount > MAX_TRANSCRIPT_CHARS ? "text-warning" : "text-text-tertiary"}`}>{charCount}/{MAX_TRANSCRIPT_CHARS} 字符</div></Td>
-        <Td><LineStyleSummary value={line.style} /></Td>
-        <Td><select className="w-full h-8 bg-bg-base border border-border rounded px-2 text-xs outline-none focus:border-border-focus" value={line.voice} onChange={(event) => onChange({ voice: event.target.value })} disabled={disabled || rowLocked} title={formatVoiceOptionLabel(line.voice)} aria-label={`第 ${index + 1} 行音色`}>{voices.map((voice) => <option key={voice} value={voice}>{formatVoiceOptionLabel(voice)}</option>)}</select></Td>
-        <Td><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${currentProfileId ? "bg-success" : "bg-error"}`} /><span className="truncate" title={currentProfile?.name ?? "未绑定"}>{currentProfile?.name ?? "未绑定"}</span></div></Td>
-        <Td><StatusStack taskId={taskId} status={generationStatus} issues={issues} result={result} line={line} rowIndex={index + 1} /></Td>
-        <Td><div className="flex items-center gap-1"><button className="p-1.5 rounded border border-border hover:bg-bg-hover" onClick={onToggleExpanded} title={expanded ? "收起详情" : "展开详情"}><PanelBottomOpen size={13} /></button><button className="p-1.5 rounded border border-border text-error hover:bg-error-muted disabled:opacity-50" onClick={onDelete} disabled={disabled || rowLocked} title="删除行"><Trash2 size={13} /></button></div></Td>
+        <Td className="w-16 min-w-16 text-text-tertiary font-mono"><label className="flex items-center gap-2"><input type="checkbox" className="accent-accent" checked={selected} onChange={onToggleSelected} disabled={disabled} aria-label={`选择第 ${index + 1} 行`} />{rowLocked && <LockIcon />} {String(index + 1).padStart(2, "0")}</label></Td>
+        <Td className="w-[11rem] min-w-[11rem]"><StatusStack taskId={taskId} status={generationStatus} issues={issues} result={result} line={line} rowIndex={index + 1} /></Td>
+        <Td className="w-24 min-w-24"><div className="flex items-center gap-1"><button className="p-1.5 rounded border border-border hover:bg-bg-hover" onClick={onToggleExpanded} title={expanded ? "收起详情" : "展开详情"}><PanelBottomOpen size={13} /></button><button className="p-1.5 rounded border border-border text-error hover:bg-error-muted disabled:opacity-50" onClick={onDelete} disabled={disabled || rowLocked} title="删除行"><Trash2 size={13} /></button></div></Td>
+        <Td className="w-28 min-w-28"><ShortInput value={line.moduleName ?? ""} fieldLabel="模块" onChange={(value) => onChange({ moduleName: value })} disabled={disabled || rowLocked} placeholder="未分组" /></Td>
+        <Td className="w-36 min-[1440px]:w-40"><ShortInput value={line.title ?? ""} fieldLabel="标题" onChange={(value) => onChange({ title: value })} disabled={disabled || rowLocked} placeholder={line.transcript.slice(0, 18) || "标题"} /></Td>
+        <Td className="w-28 min-w-28"><ShortInput value={line.speakerLabel ?? ""} fieldLabel="角色" onChange={(value) => onChange({ speakerLabel: value })} disabled={disabled || rowLocked} placeholder="旁白" /></Td>
+        <Td className="min-w-[300px]"><div className="truncate text-text-secondary max-w-[280px] min-[1200px]:max-w-[360px] min-[1440px]:max-w-[420px]" title={line.transcript}>{line.transcript || <span className="text-text-tertiary">待填写台词</span>}</div><div className={`mt-1 text-[10px] ${charCount > MAX_TRANSCRIPT_CHARS ? "text-warning" : "text-text-tertiary"}`}>{charCount}/{MAX_TRANSCRIPT_CHARS} 字符</div></Td>
+        <Td className="w-48 min-w-48"><LineStyleSummary value={line.style} /></Td>
+        <Td className="w-36 min-w-36"><select className="w-full h-8 bg-bg-base border border-border rounded px-2 text-xs outline-none focus:border-border-focus" value={line.voice} onChange={(event) => onChange({ voice: event.target.value })} disabled={disabled || rowLocked} title={formatVoiceOptionLabel(line.voice)} aria-label={`第 ${index + 1} 行音色`}>{voices.map((voice) => <option key={voice} value={voice}>{formatVoiceOptionLabel(voice)}</option>)}</select></Td>
+        <Td className="w-40 min-w-40"><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${currentProfileId ? "bg-success" : "bg-error"}`} /><span className="truncate" title={currentProfile?.name ?? "未绑定"}>{currentProfile?.name ?? "未绑定"}</span></div></Td>
       </tr>
       {expanded && (
         <tr className="border-b border-border-subtle bg-bg-base">
@@ -487,9 +488,9 @@ function LineDetailPanel({ taskId, line, rowIndex, voices, directorProfiles, pro
               value={line.style ?? ""}
               onChange={(event) => onChange({ style: event.target.value })}
               disabled={editDisabled}
-              placeholder="未设置，使用导演配置/角色风格"
+              placeholder="未设置时，生成时将根据语音文本自动推断；手动填写后优先使用此内容"
             />
-            <span className="text-[10px] text-text-tertiary">仅保存到 style 字段；制作备注请写入下方备注，不会互相回填。</span>
+            <span className="text-[10px] text-text-tertiary">仅手动填写的内容会保存到 style 字段；自动推断只在生成 prompt 时临时生效，不会写回。</span>
           </Field>
           <Field label="备注" className="col-span-2"><textarea className={`${CONTROL_CLASS} h-16`} value={line.notes ?? ""} onChange={(event) => onChange({ notes: event.target.value })} disabled={editDisabled} placeholder="制作备注，不作为行级风格" /></Field>
           <div className={`col-span-2 text-[10px] ${line.transcript.length > MAX_TRANSCRIPT_CHARS ? "text-warning" : "text-text-tertiary"}`}>字符数 {line.transcript.length}/{MAX_TRANSCRIPT_CHARS}</div>
@@ -560,7 +561,7 @@ function BulkActionBar({ selectedCount, directorProfiles, voices, bulkProfileId,
 function LineStyleSummary({ value }: { value?: string }) {
   const trimmed = value?.trim() ?? "";
   if (!trimmed) {
-    return <span className="inline-flex max-w-full rounded border border-border-subtle bg-bg-sunken px-2 py-1 text-[10px] text-text-tertiary">继承导演配置/角色风格</span>;
+    return <span className="inline-flex max-w-full rounded border border-border-subtle bg-bg-sunken px-2 py-1 text-[10px] text-text-tertiary" title="未手动设置 style；生成时将根据语音文本自动补齐行级风格，不写回列表。">生成时自动推断</span>;
   }
   return <span className="block max-w-[180px] truncate rounded border border-accent/20 bg-accent-muted/25 px-2 py-1 text-[10px] text-accent" title={trimmed}>{trimmed}</span>;
 }
@@ -628,19 +629,113 @@ function safeAccessibleContext(value?: string | null) {
   return redacted.length > 56 ? `${redacted.slice(0, 56)}…` : redacted;
 }
 
+type HistoryPopoverPlacement = {
+  top: number;
+  left: number;
+  width: number;
+  maxHeight: number;
+  side: "top" | "bottom";
+};
+
+const HISTORY_POPOVER_WIDTH = 420;
+const HISTORY_POPOVER_MARGIN = 16;
+const HISTORY_POPOVER_GAP = 8;
+const HISTORY_POPOVER_MAX_HEIGHT = 360;
+const HISTORY_POPOVER_MIN_HEIGHT = 140;
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function calculateHistoryPopoverPlacement(
+  anchorRect: DOMRect,
+  viewport: { width: number; height: number },
+  popoverWidth: number,
+  margin = HISTORY_POPOVER_MARGIN,
+  measuredHeight?: number,
+): HistoryPopoverPlacement {
+  const width = Math.min(popoverWidth, Math.max(HISTORY_POPOVER_MIN_HEIGHT, viewport.width - margin * 2));
+  const belowSpace = viewport.height - anchorRect.bottom - HISTORY_POPOVER_GAP - margin;
+  const aboveSpace = anchorRect.top - HISTORY_POPOVER_GAP - margin;
+  const side: HistoryPopoverPlacement["side"] = belowSpace < 220 && aboveSpace > belowSpace ? "top" : "bottom";
+  const availableHeight = Math.max(HISTORY_POPOVER_MIN_HEIGHT, side === "top" ? aboveSpace : belowSpace);
+  const maxHeight = Math.min(HISTORY_POPOVER_MAX_HEIGHT, availableHeight);
+  const renderedHeight = Math.min(measuredHeight ?? maxHeight, maxHeight);
+  const left = clampNumber(anchorRect.right - width, margin, Math.max(margin, viewport.width - width - margin));
+  const preferredTop = side === "top"
+    ? anchorRect.top - HISTORY_POPOVER_GAP - renderedHeight
+    : anchorRect.bottom + HISTORY_POPOVER_GAP;
+  const top = clampNumber(preferredTop, margin, Math.max(margin, viewport.height - renderedHeight - margin));
+
+  return { top, left, width, maxHeight, side };
+}
+
 function LineAudioHistoryButton({ taskId, line, rowIndex }: { taskId: string; line: VoiceLine; rowIndex?: number }) {
   const [open, setOpen] = useState(false);
   const [phase, setPhase] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [history, setHistory] = useState<LineAudioHistoryEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [placement, setPlacement] = useState<HistoryPopoverPlacement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
   const accessibleLabel = buildLineAudioHistoryAccessibleLabel(line, rowIndex);
+
+  const updatePlacement = useCallback(() => {
+    if (typeof window === "undefined" || !buttonRef.current) return;
+    const anchorRect = buttonRef.current.getBoundingClientRect();
+    const measuredHeight = popoverRef.current?.offsetHeight;
+    setPlacement(calculateHistoryPopoverPlacement(
+      anchorRect,
+      { width: window.innerWidth, height: window.innerHeight },
+      HISTORY_POPOVER_WIDTH,
+      HISTORY_POPOVER_MARGIN,
+      measuredHeight,
+    ));
+  }, []);
 
   useEffect(() => {
     setOpen(false);
     setPhase("idle");
     setHistory([]);
     setError(null);
+    setPlacement(null);
   }, [taskId, line.id]);
+
+  useEffect(() => {
+    if (!open) return;
+    updatePlacement();
+
+    const handleViewportChange = () => updatePlacement();
+    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("scroll", handleViewportChange, true);
+    return () => {
+      window.removeEventListener("resize", handleViewportChange);
+      window.removeEventListener("scroll", handleViewportChange, true);
+    };
+  }, [open, updatePlacement]);
+
+  useEffect(() => {
+    if (open) updatePlacement();
+  }, [history.length, open, phase, updatePlacement]);
+
+  useEffect(() => {
+    if (!open || typeof document === "undefined") return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (buttonRef.current?.contains(target) || popoverRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
 
   const loadHistory = async () => {
     if (!taskId || !line.id) return;
@@ -662,9 +757,47 @@ function LineAudioHistoryButton({ taskId, line, rowIndex }: { taskId: string; li
     if (nextOpen && phase === "idle") void loadHistory();
   };
 
+  const popover = open ? (
+    <div
+      ref={popoverRef}
+      className="fixed z-[100] flex w-[min(420px,calc(100vw-2rem))] flex-col rounded-md border border-border bg-bg-elevated p-3 text-text-primary shadow-shadow-lg"
+      role="dialog"
+      aria-label={`${accessibleLabel}弹层`}
+      data-placement={placement?.side ?? "bottom"}
+      style={{
+        top: placement?.top ?? 0,
+        left: placement?.left ?? HISTORY_POPOVER_MARGIN,
+        width: placement?.width ?? `min(${HISTORY_POPOVER_WIDTH}px, calc(100vw - ${HISTORY_POPOVER_MARGIN * 2}px))`,
+        maxHeight: placement?.maxHeight ?? HISTORY_POPOVER_MAX_HEIGHT,
+      }}
+    >
+      <div className="mb-2 flex shrink-0 items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold">旧版本音频历史</div>
+          <div className="mt-0.5 max-w-[320px] truncate font-mono text-[9px] text-text-tertiary" title={line.id}>line {line.id}</div>
+        </div>
+        <button type="button" className="rounded border border-border px-1.5 py-0.5 text-[10px] text-text-secondary hover:bg-bg-hover" onClick={() => setOpen(false)}>关闭</button>
+      </div>
+      {phase === "loading" && <div className="flex items-center gap-2 rounded border border-border-subtle bg-bg-sunken px-2 py-3 text-[10px] text-text-secondary"><Loader2 size={12} className="animate-spin" /> 正在加载音频历史...</div>}
+      {phase === "error" && (
+        <div className="rounded border border-error/20 bg-error-muted/25 px-2 py-2 text-[10px] text-error">
+          <div className="flex items-start gap-1"><AlertCircle size={12} className="mt-0.5 shrink-0" />{error ?? "音频历史加载失败"}</div>
+          <button type="button" className="mt-2 rounded border border-error/30 px-2 py-1 hover:bg-error-muted" onClick={() => void loadHistory()}>重试</button>
+        </div>
+      )}
+      {phase === "success" && history.length === 0 && <div className="rounded border border-border-subtle bg-bg-sunken px-2 py-3 text-[10px] text-text-tertiary">暂无历史音频。当前行尚未在任何生产列表版本中生成可用音频。</div>}
+      {phase === "success" && history.length > 0 && (
+        <div className="min-h-0 space-y-2 overflow-auto pr-1" style={{ maxHeight: placement ? Math.max(120, placement.maxHeight - 70) : 288 }}>
+          {history.map((entry) => <LineAudioHistoryItem key={`${entry.version}-${entry.relatedAssetId ?? entry.relatedJobId ?? entry.createdAt}`} entry={entry} />)}
+        </div>
+      )}
+    </div>
+  ) : null;
+
   return (
     <div className="relative w-fit">
       <button
+        ref={buttonRef}
         type="button"
         className="inline-flex h-6 w-fit items-center gap-1 rounded border border-border bg-bg-base px-2 text-[10px] text-text-secondary hover:bg-bg-hover"
         onClick={toggle}
@@ -675,30 +808,7 @@ function LineAudioHistoryButton({ taskId, line, rowIndex }: { taskId: string; li
         <History size={11} />
         历史
       </button>
-      {open && (
-        <div className="absolute right-0 top-7 z-30 w-[min(420px,calc(100vw-2rem))] rounded-md border border-border bg-bg-elevated p-3 text-text-primary shadow-shadow-lg" role="dialog" aria-label={`${accessibleLabel}弹层`}>
-          <div className="mb-2 flex items-start justify-between gap-3">
-            <div>
-              <div className="text-xs font-semibold">旧版本音频历史</div>
-              <div className="mt-0.5 max-w-[320px] truncate font-mono text-[9px] text-text-tertiary" title={line.id}>line {line.id}</div>
-            </div>
-            <button type="button" className="rounded border border-border px-1.5 py-0.5 text-[10px] text-text-secondary hover:bg-bg-hover" onClick={() => setOpen(false)}>关闭</button>
-          </div>
-          {phase === "loading" && <div className="flex items-center gap-2 rounded border border-border-subtle bg-bg-sunken px-2 py-3 text-[10px] text-text-secondary"><Loader2 size={12} className="animate-spin" /> 正在加载音频历史...</div>}
-          {phase === "error" && (
-            <div className="rounded border border-error/20 bg-error-muted/25 px-2 py-2 text-[10px] text-error">
-              <div className="flex items-start gap-1"><AlertCircle size={12} className="mt-0.5 shrink-0" />{error ?? "音频历史加载失败"}</div>
-              <button type="button" className="mt-2 rounded border border-error/30 px-2 py-1 hover:bg-error-muted" onClick={() => void loadHistory()}>重试</button>
-            </div>
-          )}
-          {phase === "success" && history.length === 0 && <div className="rounded border border-border-subtle bg-bg-sunken px-2 py-3 text-[10px] text-text-tertiary">暂无历史音频。当前行尚未在任何生产列表版本中生成可用音频。</div>}
-          {phase === "success" && history.length > 0 && (
-            <div className="max-h-80 space-y-2 overflow-auto pr-1">
-              {history.map((entry) => <LineAudioHistoryItem key={`${entry.version}-${entry.relatedAssetId ?? entry.relatedJobId ?? entry.createdAt}`} entry={entry} />)}
-            </div>
-          )}
-        </div>
-      )}
+      {popover && typeof document !== "undefined" ? createPortal(popover, document.body) : null}
     </div>
   );
 }

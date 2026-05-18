@@ -11,8 +11,9 @@ type VoiceDisplayMeta = {
 };
 
 export type VoicePerceivedGender = "male" | "female";
+export type VoiceGenderFilter = "all" | VoicePerceivedGender;
 
-const PERCEIVED_GENDER_LABEL_ZH: Record<VoicePerceivedGender, string> = {
+export const PERCEIVED_GENDER_LABEL_ZH: Record<VoicePerceivedGender, string> = {
   male: "男声",
   female: "女声",
 };
@@ -52,6 +53,20 @@ export const GEMINI_VOICE_DISPLAY: Record<string, VoiceDisplayMeta> = {
 
 export function getVoiceDisplayMeta(voiceName: string): VoiceDisplayMeta {
   return GEMINI_VOICE_DISPLAY[voiceName] ?? { displayName: voiceName, toneDescription: "自定义音色" };
+}
+
+export function getVoicePerceivedGender(voiceName: string): VoicePerceivedGender | null {
+  return getVoiceDisplayMeta(voiceName).perceivedGender ?? null;
+}
+
+export function formatVoiceGenderLabel(voiceName: string): string | null {
+  const gender = getVoicePerceivedGender(voiceName);
+  return gender ? PERCEIVED_GENDER_LABEL_ZH[gender] : null;
+}
+
+export function voiceMatchesGender(voiceName: string, filter: VoiceGenderFilter): boolean {
+  if (filter === "all") return true;
+  return getVoicePerceivedGender(voiceName) === filter;
 }
 
 export function getVoiceDisplayName(voiceName: string): string {

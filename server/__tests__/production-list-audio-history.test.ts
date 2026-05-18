@@ -203,6 +203,196 @@ describe("production-list line audio history", () => {
     expect(serialized).not.toContain("private-audio");
   });
 
+  it("returns audio history for the last production-list row", async () => {
+    const task = await createTask(app);
+    const lastAsset = insertAudioAsset("job-history-last-row", "2026/05/18/job-history-last-row.wav", new Date("2026-05-18T02:30:00.000Z"));
+
+    await putProductionList(app, task.id, 0, [
+      { id: "line-first", text: "First line", generationStatus: "draft" },
+      { id: "line-middle", text: "Middle line", generationStatus: "draft" },
+      {
+        id: "line-last",
+        text: "Last line",
+        relatedJobId: "job-history-last-row",
+        relatedAssetId: lastAsset.id,
+        generationStatus: "succeeded",
+      },
+    ]);
+
+    const res = await req(app, `/api/tasks/${task.id}/production-list/lines/line-last/audio-history`);
+    expect(res.status).toBe(200);
+    const body = await jsonRes(res);
+    expect(body.history).toHaveLength(1);
+    expect(body.history[0]).toMatchObject({
+      lineId: "line-last",
+      sortOrder: 2,
+      relatedJobId: "job-history-last-row",
+      relatedAssetId: lastAsset.id,
+      audioUrl: `/api/audio/${lastAsset.id}`,
+      isCurrent: true,
+    });
+    expect(JSON.stringify(body)).not.toContain("filePath");
+  });
+
+  it("falls back to the same-version DB voiceLine when historical artifact ids mismatch or lack audio refs", async () => {
+    const task = await createTask(app);
+    const db = getDb();
+    const versionOneId = crypto.randomUUID();
+    const versionTwoId = crypto.randomUUID();
+    const now = new Date("2026-05-18T03:30:00.000Z");
+    const asset = insertAudioAsset("job-history-db-fallback", path.join(os.tmpdir(), "private-audio", "job-history-db-fallback.wav"), now);
+
+    db.insert(productionListVersion).values({
+      id: versionOneId,
+      taskId: task.id,
+      version: 1,
+      speakersJson: "[]",
+      metadataJson: "{}",
+      lineCount: 1,
+      createdAt: now,
+    }).run();
+    db.insert(productionListVersion).values({
+      id: versionTwoId,
+      taskId: task.id,
+      version: 2,
+      speakersJson: "[]",
+      metadataJson: "{}",
+      lineCount: 1,
+      createdAt: new Date("2026-05-18T03:40:00.000Z"),
+    }).run();
+    db.insert(voiceLine).values({
+      id: crypto.randomUUID(),
+      lineId: "stable-db-fallback-line",
+      taskId: task.id,
+      versionId: versionOneId,
+      order: 0,
+      speaker: "narrator",
+      text: "Historical transcript",
+      voice: "Zephyr",
+      style: "",
+      notes: "",
+      status: "pending",
+      generationStatus: "succeeded",
+      relatedJobId: "job-history-db-fallback",
+      relatedAssetId: asset.id,
+      createdAt: now,
+      updatedAt: now,
+    }).run();
+    db.insert(voiceLine).values({
+      id: crypto.randomUUID(),
+      lineId: "stable-db-fallback-line",
+      taskId: task.id,
+      versionId: versionTwoId,
+      order: 0,
+      speaker: "narrator",
+      text: "Current transcript",
+      voice: "Zephyr",
+      style: "",
+      notes: "",
+      status: "pending",
+      generationStatus: "draft",
+      createdAt: now,
+      updatedAt: now,
+    }).run();
+
+    const legacyArtifact = {
+      version: 1,
+      versionId: versionOneId,
+      lines: [{
+        id: "legacy-artifact-only-id",
+        order: 0,
+        speaker: "narrator",
+        text: "Historical transcript",
+        transcript: "Historical transcript",
+        voice: "Zephyr",
+        generationStatus: "draft",
+      }],
+      speakers: [],
+      metadata: {},
+      updatedAt: now.toISOString(),
+    };
+    writeArtifact(task.id, productionListVersionArtifactName(1), legacyArtifact);
+
+    const res = await req(app, `/api/tasks/${task.id}/production-list/lines/stable-db-fallback-line/audio-history`);
+    expect(res.status).toBe(200);
+    const body = await jsonRes(res);
+    expect(body.history).toHaveLength(1);
+    expect(body.history[0]).toMatchObject({
+      version: 1,
+      versionId: versionOneId,
+      lineId: "stable-db-fallback-line",
+      relatedJobId: "job-history-db-fallback",
+      relatedAssetId: asset.id,
+      audioUrl: `/api/audio/${asset.id}`,
+      isCurrent: false,
+    });
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain("filePath");
+    expect(serialized).not.toContain("private-audio");
+  });
+
+  it("matches historical artifact alternate line id fields without changing the response schema", async () => {
+    const task = await createTask(app);
+    const db = getDb();
+    const versionOneId = crypto.randomUUID();
+    const versionTwoId = crypto.randomUUID();
+    const now = new Date("2026-05-18T03:50:00.000Z");
+    const asset = insertAudioAsset("job-history-alt-line-id", "2026/05/18/job-history-alt-line-id.wav", now);
+
+    db.insert(productionListVersion).values({
+      id: versionOneId,
+      taskId: task.id,
+      version: 1,
+      speakersJson: "[]",
+      metadataJson: "{}",
+      lineCount: 1,
+      createdAt: now,
+    }).run();
+    db.insert(productionListVersion).values({
+      id: versionTwoId,
+      taskId: task.id,
+      version: 2,
+      speakersJson: "[]",
+      metadataJson: "{}",
+      lineCount: 0,
+      createdAt: new Date("2026-05-18T03:55:00.000Z"),
+    }).run();
+
+    writeArtifact(task.id, productionListVersionArtifactName(1), {
+      version: 1,
+      versionId: versionOneId,
+      lines: [{
+        id: "legacy-artifact-id",
+        voiceLineId: "stable-alt-field-line",
+        order: 0,
+        speaker: "narrator",
+        text: "Artifact transcript",
+        voice: "Zephyr",
+        generationStatus: "succeeded",
+        relatedJobId: "job-history-alt-line-id",
+        relatedAssetId: asset.id,
+      }],
+      speakers: [],
+      metadata: {},
+      updatedAt: now.toISOString(),
+    });
+
+    const res = await req(app, `/api/tasks/${task.id}/production-list/lines/stable-alt-field-line/audio-history`);
+    expect(res.status).toBe(200);
+    const body = await jsonRes(res);
+    expect(Object.keys(body).sort()).toEqual(["history", "lineId", "ok", "requestId", "taskId"].sort());
+    expect(body.history).toHaveLength(1);
+    expect(body.history[0]).toMatchObject({
+      version: 1,
+      lineId: "stable-alt-field-line",
+      relatedJobId: "job-history-alt-line-id",
+      relatedAssetId: asset.id,
+      audioUrl: `/api/audio/${asset.id}`,
+      downloadUrl: `/api/audio/${asset.id}?download=1`,
+    });
+    expect(JSON.stringify(body)).not.toContain("filePath");
+  });
+
   it("returns an empty history for lines without historical audio", async () => {
     const task = await createTask(app);
     await putProductionList(app, task.id, 0, [{ id: "line-empty", generationStatus: "draft" }]);

@@ -2,10 +2,9 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useLocation, Link } from "react-router";
 import { X, Play, Download, Loader2, PlayCircle, AlertCircle, RefreshCw, Clock, Settings, CheckCircle2 } from "lucide-react";
 import { useAppState } from "../state/AppContext";
-import type { VoiceProfile } from "../types";
 import { AgentAutomationPanel } from "./tasks/AgentAutomationPanel";
 import { useTaskWorkspaceUi } from "../context/TaskWorkspaceUiContext";
-import { formatVoiceCompactLabel, formatVoiceOptionLabel, getVoiceDisplayMeta } from "../utils/voiceDisplay";
+import { formatVoiceCompactLabel, formatVoiceGenderLabel, formatVoiceOptionLabel, getVoiceDisplayMeta } from "../utils/voiceDisplay";
 import { PromptTextBlock } from "./PromptTextBlock";
 import { createAudioElementFromAsset, downloadAudioAsset } from "../services/audioAsset";
 
@@ -401,26 +400,18 @@ function GenerateOutputPanel() {
 // ─── Voices Detail Panel ─────────────────────────────────────────────────────
 
 function VoicesDetailPanel() {
-  const { voices, adapter, voicesLoading, voicesError, voicesLoaded, refreshVoices } = useAppState();
-  const [selectedVoice, setSelectedVoice] = useState<VoiceProfile | null>(voices[0] ?? null);
+  const { voices, adapter, voicesLoading, voicesError, voicesLoaded, refreshVoices, selectedVoiceName, setSelectedVoiceName } = useAppState();
   const [probeStatus, setProbeStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [probeLatency, setProbeLatency] = useState("");
   const [probeError, setProbeError] = useState<string | null>(null);
+  const selectedVoice = selectedVoiceName ? voices.find((voice) => voice.name === selectedVoiceName) ?? null : null;
+  const selectedVoiceGenderLabel = selectedVoice ? formatVoiceGenderLabel(selectedVoice.name) : null;
 
-  // Sync selectedVoice when voices populate after initial empty state
   useEffect(() => {
-    if (!selectedVoice && voices.length > 0) {
-      setSelectedVoice(voices[0]);
-    }
-  }, [voices, selectedVoice]);
-
-  // If selectedVoice was removed from the list (e.g. after a refresh that returns different data),
-  // fall back to the first available voice
-  useEffect(() => {
-    if (selectedVoice && voices.length > 0 && !voices.some((v) => v.name === selectedVoice.name)) {
-      setSelectedVoice(voices[0]);
-    }
-  }, [voices, selectedVoice]);
+    setProbeStatus("idle");
+    setProbeLatency("");
+    setProbeError(null);
+  }, [selectedVoiceName]);
 
   const handleProbe = async () => {
     if (!selectedVoice) return;
@@ -504,8 +495,7 @@ function VoicesDetailPanel() {
         className="bg-bg-sunken border border-border rounded-md px-3 py-1.5 text-sm outline-none focus:border-border-focus"
         value={selectedVoice.name}
         onChange={(e) => {
-          const v = voices.find((v) => v.name === e.target.value);
-          if (v) setSelectedVoice(v);
+          setSelectedVoiceName(e.target.value || null);
         }}
       >
         {voices.map((v) => (
@@ -522,6 +512,9 @@ function VoicesDetailPanel() {
             <h2 className="text-lg font-semibold">{formatVoiceCompactLabel(selectedVoice.name)}</h2>
             {selectedVoice.isDefault && (
               <span className="px-1.5 py-0.5 text-[10px] rounded bg-bg-surface border border-border text-text-secondary">默认</span>
+            )}
+            {selectedVoiceGenderLabel && (
+              <span className="px-1.5 py-0.5 text-[10px] rounded bg-accent-muted/20 border border-accent/20 text-accent">{selectedVoiceGenderLabel}</span>
             )}
           </div>
           <div className={`text-xs flex items-center gap-1 mt-1 ${
@@ -546,6 +539,10 @@ function VoicesDetailPanel() {
         <div className="flex items-center py-1">
           <span className="w-20 text-text-tertiary">英文名</span>
           <span className="text-text-primary font-mono text-xs">{selectedVoice.name}</span>
+        </div>
+        <div className="flex items-center py-1">
+          <span className="w-20 text-text-tertiary">性别</span>
+          <span className="text-text-primary">{selectedVoiceGenderLabel ?? "未标注"}</span>
         </div>
         <div className="flex items-center py-1">
           <span className="w-20 text-text-tertiary">供应商</span>

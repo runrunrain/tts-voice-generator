@@ -264,7 +264,7 @@ export function DirectorPage() {
   const Section = ({ id, icon, title, children, required }: { id: string; icon: React.ReactNode; title: string; children: React.ReactNode; required?: boolean }) => {
     const isCollapsed = collapsed[id] ?? false;
     return (
-      <div className={`border rounded-lg bg-bg-surface overflow-hidden ${isCollapsed ? "" : "flex-1 flex flex-col min-h-[120px]"}`}>
+      <div className={`border rounded-lg bg-bg-surface overflow-hidden ${isCollapsed ? "" : "@5xl/director:flex-1 @5xl/director:flex @5xl/director:flex-col @5xl/director:min-h-[120px]"}`}>
         <div
           className="h-9 px-3 flex items-center justify-between border-b border-border-subtle cursor-pointer hover:bg-bg-hover transition-colors shrink-0"
           onClick={() => toggleCollapse(id)}
@@ -294,10 +294,10 @@ export function DirectorPage() {
   // Step: Edit (initial state)
   if (step === "edit") {
     return (
-      <div className="flex flex-col h-full">
-        <div className="flex-1 flex overflow-hidden">
+      <div className="@container/director flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+        <div className="flex-1 min-h-0 min-w-0 overflow-y-auto @5xl/director:grid @5xl/director:grid-cols-[minmax(0,1fr)_320px] @5xl/director:overflow-hidden @6xl/director:grid-cols-[minmax(0,1fr)_360px] @7xl/director:grid-cols-[minmax(0,1fr)_400px]">
           {/* Left Column: Editor */}
-          <div className="flex-1 p-6 overflow-y-auto flex flex-col gap-4">
+          <div className="min-h-0 min-w-0 p-4 [@media(max-height:760px)]:p-3 @6xl/director:p-6 overflow-visible @5xl/director:overflow-y-auto flex flex-col gap-4 [@media(max-height:760px)]:gap-3">
             <Section id="audioProfile" icon={<span className="text-text-tertiary text-xs">*</span>} title={DIRECTOR_FIELD_LABELS.audioProfile}>
               <div className="flex flex-col gap-2">
                 <div className="rounded-md border border-border-subtle bg-bg-surface/70 px-3 py-2 text-xs leading-relaxed text-text-secondary">
@@ -345,7 +345,7 @@ export function DirectorPage() {
               />
             </Section>
 
-            <div className="border border-border-focus rounded-lg bg-bg-surface overflow-hidden flex-1 flex flex-col min-h-[200px]">
+            <div className="border border-border-focus rounded-lg bg-bg-surface overflow-hidden flex flex-col min-h-[220px] @5xl/director:flex-1 @5xl/director:min-h-[200px]">
               <div className="h-9 px-3 flex items-center justify-between border-b border-border-subtle bg-bg-hover">
                 <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
                   <span className="text-accent">*</span> {DIRECTOR_FIELD_LABELS.transcript}
@@ -365,13 +365,13 @@ export function DirectorPage() {
           </div>
 
           {/* Right Column: Config */}
-          <div className="w-[400px] border-l border-border-subtle bg-bg-base overflow-y-auto p-6 flex flex-col gap-6">
+          <aside className="min-h-0 min-w-0 border-t @5xl/director:border-t-0 @5xl/director:border-l border-border-subtle bg-bg-base p-4 [@media(max-height:760px)]:p-3 @6xl/director:p-5 @7xl/director:p-6 overflow-visible @5xl/director:overflow-y-auto flex flex-col gap-5 [@media(max-height:760px)]:gap-4 @7xl/director:gap-6">
             {/* Speakers */}
             <div className="flex flex-col gap-4">
               <h3 className="text-sm font-semibold text-text-primary flex items-center justify-between">
                 说话者配置
                 <button
-                  className={`text-xs font-medium flex items-center gap-1 transition-colors ${
+                  className={`text-xs font-medium flex min-w-0 items-center gap-1 transition-colors ${
                     isSpeakerLimitReached
                       ? "text-text-tertiary cursor-not-allowed"
                       : "text-accent hover:text-accent-hover"
@@ -387,7 +387,7 @@ export function DirectorPage() {
               {isSpeakerLimitReached && <SpeakerLimitBanner />}
 
               {speakers.map((speaker, index) => (
-                <div key={speaker.id} className="border border-border rounded-md p-3 bg-bg-surface flex flex-col gap-3">
+                <div key={speaker.id} className="min-w-0 border border-border rounded-md p-3 bg-bg-surface flex flex-col gap-3">
                   <div className="flex justify-between items-center text-xs font-medium text-text-secondary">
                     <span>{displaySpeakerLabel(speaker.label)}</span>
                     {speaker.id !== "a" && (
@@ -399,28 +399,28 @@ export function DirectorPage() {
                       </button>
                     )}
                   </div>
-                  <div className="flex items-center gap-2 text-sm">
+                  <div className="flex min-w-0 items-center gap-2 text-sm">
                     <label className="w-10 text-text-tertiary">名称:</label>
                     <input
-                      className="flex-1 bg-bg-sunken border border-border rounded px-2 py-1 outline-none focus:border-border-focus text-text-primary"
+                      className="min-w-0 flex-1 bg-bg-sunken border border-border rounded px-2 py-1 outline-none focus:border-border-focus text-text-primary"
                       value={speaker.name}
                       onChange={(e) => updateSpeaker(speaker.id, "name", e.target.value)}
                     />
                   </div>
-                  <div className="flex items-center gap-2 text-sm">
+                  <div className="flex min-w-0 items-center gap-2 text-sm">
                     <label className="w-10 text-text-tertiary">音色:</label>
                     <select
-                      className="flex-1 bg-bg-sunken border border-border rounded px-2 py-1 outline-none focus:border-border-focus text-text-primary"
+                      className="min-w-0 flex-1 bg-bg-sunken border border-border rounded px-2 py-1 outline-none focus:border-border-focus text-text-primary"
                       value={speaker.voice}
                       onChange={(e) => updateSpeaker(speaker.id, "voice", e.target.value)}
                     >
                       {voiceOptions.map((v) => <option key={v} value={v}>{formatVoiceOptionLabel(v)}</option>)}
                     </select>
                   </div>
-                  <div className="flex items-center gap-2 text-sm">
+                  <div className="flex min-w-0 items-center gap-2 text-sm">
                     <label className="w-10 text-text-tertiary">风格:</label>
                     <input
-                      className="flex-1 bg-bg-sunken border border-border rounded px-2 py-1 outline-none focus:border-border-focus text-text-primary"
+                      className="min-w-0 flex-1 bg-bg-sunken border border-border rounded px-2 py-1 outline-none focus:border-border-focus text-text-primary"
                       value={speaker.style}
                       onChange={(e) => updateSpeaker(speaker.id, "style", e.target.value)}
                     />
@@ -441,7 +441,7 @@ export function DirectorPage() {
                   {EMOTIONAL_SCENES.map((sceneOption) => (
                     <button
                       key={sceneOption.id}
-                      className={`px-3 py-2 text-left font-medium transition-colors ${
+                      className={`px-3 py-2 text-left font-medium leading-snug transition-colors ${
                         activeSceneId === sceneOption.id
                           ? "bg-bg-active text-accent"
                           : "text-text-secondary hover:bg-bg-hover hover:text-text-primary"
@@ -503,14 +503,14 @@ export function DirectorPage() {
                 </div>
               </div>
             </div>
-          </div>
+          </aside>
         </div>
 
         {/* Bottom Action Bar */}
-        <div className="h-[52px] bg-bg-sunken border-t border-border-subtle shrink-0 px-6 flex items-center justify-between sticky bottom-0">
-          <div className="flex items-center gap-4">
+        <div className="min-h-[52px] h-auto max-h-[104px] overflow-y-auto bg-bg-sunken border-t border-border-subtle shrink-0 px-4 py-2 sm:px-6 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-4">
             <select
-              className="bg-bg-surface border border-border rounded-md px-3 py-1.5 text-sm outline-none focus:border-border-focus transition-colors text-text-primary"
+              className="min-w-0 max-w-full bg-bg-surface border border-border rounded-md px-3 py-1.5 text-sm outline-none focus:border-border-focus transition-colors text-text-primary"
               value={voice}
               onChange={(e) => setVoice(e.target.value)}
               disabled={assemblePhase === "loading"}
@@ -518,7 +518,7 @@ export function DirectorPage() {
               {voiceOptions.map((v) => <option key={v} value={v}>{formatVoiceOptionLabel(v)}</option>)}
             </select>
 
-            <div className="flex items-center bg-bg-surface border border-border rounded-md overflow-hidden text-sm">
+            <div className="flex min-w-0 items-center bg-bg-surface border border-border rounded-md overflow-hidden text-sm">
               <button
                 className={`px-3 py-1.5 transition-colors ${format === "wav" ? "bg-bg-active text-text-primary" : "text-text-tertiary hover:bg-bg-hover hover:text-text-secondary"}`}
                 onClick={() => setFormat("wav")}
@@ -540,7 +540,7 @@ export function DirectorPage() {
             </span>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 sm:gap-3">
             <button
               className="px-6 py-2 rounded-md text-sm font-medium transition-colors shadow-shadow-glow flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               style={{
@@ -573,17 +573,17 @@ export function DirectorPage() {
   // Step: Preview (assemble success, show prompt + warnings)
   if (step === "preview" && assembleSuccess) {
     return (
-      <div className="flex flex-col h-full">
-        <div className="flex-1 p-6 overflow-y-auto flex flex-col gap-5">
+      <div className="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+        <div className="flex-1 min-h-0 min-w-0 p-4 sm:p-6 overflow-y-auto flex flex-col gap-5">
           {/* Header */}
-          <div className="flex items-center justify-between">
-            <div>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
               <h2 className="text-lg font-semibold font-display text-text-primary">提示词组装结果</h2>
               <p className="text-text-tertiary text-xs mt-1">
                 请求 ID: {assembleSuccess.requestId}
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
               <button
                 className="text-xs text-accent hover:text-accent-hover transition-colors flex items-center gap-1"
                 onClick={() => handleCopyPrompt(assembleSuccess.prompt)}
@@ -683,7 +683,7 @@ export function DirectorPage() {
         </div>
 
         {/* Bottom Action Bar */}
-        <div className="h-[52px] bg-bg-sunken border-t border-border-subtle shrink-0 px-6 flex items-center justify-between sticky bottom-0">
+        <div className="min-h-[52px] h-auto max-h-[104px] overflow-y-auto bg-bg-sunken border-t border-border-subtle shrink-0 px-4 py-2 sm:px-6 flex flex-wrap items-center justify-between gap-2">
           <button
             className="text-sm text-text-secondary hover:text-text-primary transition-colors"
             onClick={handleBackToEdit}
@@ -691,7 +691,7 @@ export function DirectorPage() {
             返回编辑
           </button>
 
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 sm:gap-3">
             <span className="text-xs text-text-tertiary">
               预估 {costEstimate?.estimatedCost ?? "$0.0000"}
             </span>
@@ -725,7 +725,7 @@ export function DirectorPage() {
         {/* No API Key warning overlay */}
         {!hasApiKey && (
           <div className="absolute inset-0 bg-bg-base/60 backdrop-blur-sm flex items-center justify-center z-10">
-            <div className="bg-bg-elevated border border-border rounded-lg p-6 max-w-[28rem] flex flex-col gap-4 text-center shadow-shadow-lg">
+            <div className="mx-4 bg-bg-elevated border border-border rounded-lg p-6 max-w-[28rem] flex flex-col gap-4 text-center shadow-shadow-lg">
               <div className="w-12 h-12 rounded-full bg-error-muted flex items-center justify-center mx-auto">
                 <AlertCircle size={24} className="text-error" />
               </div>
@@ -749,8 +749,8 @@ export function DirectorPage() {
   // Step: Confirm (generation result)
   if (step === "confirm") {
     return (
-      <div className="flex flex-col h-full">
-        <div className="flex-1 p-6 overflow-y-auto flex flex-col gap-5">
+      <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+        <div className="flex-1 min-h-0 min-w-0 p-4 sm:p-6 overflow-y-auto flex flex-col gap-5">
           {/* Generation result display */}
           {generatePhase === "loading" && (
             <div className="flex flex-col items-center justify-center flex-1 gap-4">
@@ -816,7 +816,7 @@ export function DirectorPage() {
         </div>
 
         {/* Bottom Action Bar */}
-        <div className="h-[52px] bg-bg-sunken border-t border-border-subtle shrink-0 px-6 flex items-center justify-between sticky bottom-0">
+        <div className="min-h-[52px] h-auto max-h-[104px] overflow-y-auto bg-bg-sunken border-t border-border-subtle shrink-0 px-4 py-2 sm:px-6 flex flex-wrap items-center justify-between gap-2">
           <button
             className="text-sm text-text-secondary hover:text-text-primary transition-colors"
             onClick={handleReset}
@@ -824,7 +824,7 @@ export function DirectorPage() {
             重新编辑
           </button>
 
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 sm:gap-3">
             {generatePhase === "error" && (
               <button
                 className="px-4 py-2 rounded-md text-sm font-medium bg-bg-surface hover:bg-bg-hover transition-colors border border-border flex items-center gap-1"
@@ -853,8 +853,8 @@ export function DirectorPage() {
   // Assemble error state
   if (assemblePhase === "error" && assembleError) {
     return (
-      <div className="flex flex-col h-full">
-        <div className="flex-1 p-6 overflow-y-auto flex flex-col items-center justify-center gap-4">
+      <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+        <div className="flex-1 min-h-0 min-w-0 p-4 sm:p-6 overflow-y-auto flex flex-col items-center justify-center gap-4">
           <div className="w-16 h-16 rounded-full bg-error-muted flex items-center justify-center">
             <AlertCircle size={32} className="text-error" />
           </div>
