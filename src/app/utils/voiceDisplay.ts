@@ -23,7 +23,7 @@ export const GEMINI_VOICE_DISPLAY: Record<string, VoiceDisplayMeta> = {
   Puck: { displayName: "顽童", toneDescription: "欢快、机敏", perceivedGender: "male" },
   Charon: { displayName: "卡戎", toneDescription: "低沉、信息量强", perceivedGender: "male" },
   Kore: { displayName: "珂瑞", toneDescription: "坚定、果断", perceivedGender: "female" },
-  Fenrir: { displayName: "芬里尔", toneDescription: "兴奋、有冲击力", perceivedGender: "male" },
+  Fenrir: { displayName: "芬里尔", toneDescription: "兴奋、有冲击力", perceivedGender: "female" },
   Leda: { displayName: "勒达", toneDescription: "青春、轻盈", perceivedGender: "female" },
   Orus: { displayName: "奥鲁斯", toneDescription: "稳重、正式", perceivedGender: "female" },
   Aoede: { displayName: "艾俄德", toneDescription: "轻松、流畅", perceivedGender: "female" },

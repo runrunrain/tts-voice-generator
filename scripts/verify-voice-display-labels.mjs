@@ -93,12 +93,12 @@ assert.equal(
 
 assert.deepEqual(
   Object.entries(voiceDisplay).filter(([, meta]) => meta.perceivedGender === "female").map(([name]) => name),
-  ["Zephyr", "Kore", "Leda", "Orus", "Aoede", "Callirrhoe", "Autonoe", "Despina", "Erinome", "Laomedeia", "Achernar", "Gacrux", "Pulcherrima", "Sulafat"],
+  ["Zephyr", "Kore", "Fenrir", "Leda", "Orus", "Aoede", "Callirrhoe", "Autonoe", "Despina", "Erinome", "Laomedeia", "Achernar", "Gacrux", "Pulcherrima", "Sulafat"],
   "Female voice mapping must match Google/Provider no-neutral catalog",
 );
 assert.deepEqual(
   Object.entries(voiceDisplay).filter(([, meta]) => meta.perceivedGender === "male").map(([name]) => name),
-  ["Puck", "Charon", "Fenrir", "Enceladus", "Iapetus", "Umbriel", "Algieba", "Algenib", "Rasalgethi", "Alnilam", "Schedar", "Achird", "Zubenelgenubi", "Vindemiatrix", "Sadachbia", "Sadaltager"],
+  ["Puck", "Charon", "Enceladus", "Iapetus", "Umbriel", "Algieba", "Algenib", "Rasalgethi", "Alnilam", "Schedar", "Achird", "Zubenelgenubi", "Vindemiatrix", "Sadachbia", "Sadaltager"],
   "Male voice mapping must match Google/Provider no-neutral catalog",
 );
 

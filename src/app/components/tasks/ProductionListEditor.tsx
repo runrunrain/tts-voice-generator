@@ -306,13 +306,13 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
                 <Th className="w-16 min-w-16"><label className="flex items-center gap-2"><input type="checkbox" className="accent-accent" checked={allSelected} onChange={toggleAll} disabled={saving || generating} /> #</label></Th>
                 <Th className="w-[11rem] min-w-[11rem]">状态</Th>
                 <Th className="w-24 min-w-24">操作</Th>
-                <Th className="w-28 min-w-28">模块</Th>
-                <Th className="w-36 min-[1440px]:w-40">标题</Th>
                 <Th className="w-28 min-w-28">角色</Th>
                 <Th className="min-w-[300px]">语音文本</Th>
                 <Th className="w-48 min-w-48">行级风格</Th>
                 <Th className="w-36 min-w-36">音色</Th>
                 <Th className="w-40 min-w-40">导演</Th>
+                <Th className="w-28 min-w-28">模块</Th>
+                <Th className="w-36 min-[1440px]:w-40">标题</Th>
               </tr>
             </thead>
             <tbody>
@@ -421,13 +421,13 @@ function ProductionRow({ taskId, line, index, voices, directorProfiles, profileB
         <Td className="w-16 min-w-16 text-text-tertiary font-mono"><label className="flex items-center gap-2"><input type="checkbox" className="accent-accent" checked={selected} onChange={onToggleSelected} disabled={disabled} aria-label={`选择第 ${index + 1} 行`} />{rowLocked && <LockIcon />} {String(index + 1).padStart(2, "0")}</label></Td>
         <Td className="w-[11rem] min-w-[11rem]"><StatusStack taskId={taskId} status={generationStatus} issues={issues} result={result} line={line} rowIndex={index + 1} /></Td>
         <Td className="w-24 min-w-24"><div className="flex items-center gap-1"><button className="p-1.5 rounded border border-border hover:bg-bg-hover" onClick={onToggleExpanded} title={expanded ? "收起详情" : "展开详情"}><PanelBottomOpen size={13} /></button><button className="p-1.5 rounded border border-border text-error hover:bg-error-muted disabled:opacity-50" onClick={onDelete} disabled={disabled || rowLocked} title="删除行"><Trash2 size={13} /></button></div></Td>
-        <Td className="w-28 min-w-28"><ShortInput value={line.moduleName ?? ""} fieldLabel="模块" onChange={(value) => onChange({ moduleName: value })} disabled={disabled || rowLocked} placeholder="未分组" /></Td>
-        <Td className="w-36 min-[1440px]:w-40"><ShortInput value={line.title ?? ""} fieldLabel="标题" onChange={(value) => onChange({ title: value })} disabled={disabled || rowLocked} placeholder={line.transcript.slice(0, 18) || "标题"} /></Td>
         <Td className="w-28 min-w-28"><ShortInput value={line.speakerLabel ?? ""} fieldLabel="角色" onChange={(value) => onChange({ speakerLabel: value })} disabled={disabled || rowLocked} placeholder="旁白" /></Td>
         <Td className="min-w-[300px]"><div className="truncate text-text-secondary max-w-[280px] min-[1200px]:max-w-[360px] min-[1440px]:max-w-[420px]" title={line.transcript}>{line.transcript || <span className="text-text-tertiary">待填写台词</span>}</div><div className={`mt-1 text-[10px] ${charCount > MAX_TRANSCRIPT_CHARS ? "text-warning" : "text-text-tertiary"}`}>{charCount}/{MAX_TRANSCRIPT_CHARS} 字符</div></Td>
         <Td className="w-48 min-w-48"><LineStyleSummary value={line.style} /></Td>
         <Td className="w-36 min-w-36"><select className="w-full h-8 bg-bg-base border border-border rounded px-2 text-xs outline-none focus:border-border-focus" value={line.voice} onChange={(event) => onChange({ voice: event.target.value })} disabled={disabled || rowLocked} title={formatVoiceOptionLabel(line.voice)} aria-label={`第 ${index + 1} 行音色`}>{voices.map((voice) => <option key={voice} value={voice}>{formatVoiceOptionLabel(voice)}</option>)}</select></Td>
         <Td className="w-40 min-w-40"><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${currentProfileId ? "bg-success" : "bg-error"}`} /><span className="truncate" title={currentProfile?.name ?? "未绑定"}>{currentProfile?.name ?? "未绑定"}</span></div></Td>
+        <Td className="w-28 min-w-28"><ShortInput value={line.moduleName ?? ""} fieldLabel="模块" onChange={(value) => onChange({ moduleName: value })} disabled={disabled || rowLocked} placeholder="未分组" /></Td>
+        <Td className="w-36 min-[1440px]:w-40"><ShortInput value={line.title ?? ""} fieldLabel="标题" onChange={(value) => onChange({ title: value })} disabled={disabled || rowLocked} placeholder={line.transcript.slice(0, 18) || "标题"} /></Td>
       </tr>
       {expanded && (
         <tr className="border-b border-border-subtle bg-bg-base">

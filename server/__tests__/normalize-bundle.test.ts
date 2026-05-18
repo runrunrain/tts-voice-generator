@@ -434,7 +434,7 @@ describe("generateProductionListSchemaSnapshot", () => {
     expect(serialized).toContain("Google/Provider voice tables classify every prebuilt Gemini TTS voice as either Female or Male");
     expect(serialized).toContain("there is no neutral voice category");
     expect(serialized).toContain("Google/Provider表性别=女");
-    expect(serialized).toContain("female voice: Zephyr, Kore, Leda, Orus, Aoede, Callirrhoe, Autonoe, Despina, Erinome, Laomedeia, Achernar, Gacrux, Pulcherrima, Sulafat");
+    expect(serialized).toContain("female voice: Zephyr, Kore, Fenrir, Leda, Orus, Aoede, Callirrhoe, Autonoe, Despina, Erinome, Laomedeia, Achernar, Gacrux, Pulcherrima, Sulafat");
     expect(serialized).not.toContain("project-curated perceived gender");
 
     const voiceLineFields = snapshot.nestedSchemas.VoiceLine.map((field) => field.name);
@@ -525,7 +525,7 @@ describe("writeInstructionMarkdown", () => {
     expect(content).toContain("Google/Provider voice tables classify every prebuilt Gemini TTS voice as either Female or Male");
     expect(content).toContain("Do not use or mention a neutral category");
     expect(content).toContain("Google/Provider表性别=男");
-    expect(content).toContain("male voice: Puck, Charon, Fenrir, Enceladus, Iapetus, Umbriel, Algieba, Algenib, Rasalgethi, Alnilam, Schedar, Achird, Zubenelgenubi, Vindemiatrix, Sadachbia, Sadaltager");
+    expect(content).toContain("male voice: Puck, Charon, Enceladus, Iapetus, Umbriel, Algieba, Algenib, Rasalgethi, Alnilam, Schedar, Achird, Zubenelgenubi, Vindemiatrix, Sadachbia, Sadaltager");
     expect(content).not.toContain("project-curated perceived gender");
   });
 });
@@ -1023,7 +1023,7 @@ describe("runBundleOpenCodeNormalize", () => {
     expect(capturedPrompt).toContain("所有导演配置字段必须使用简体中文");
     expect(capturedPrompt).toContain("Google/Provider voice tables classify every prebuilt Gemini TTS voice as either Female or Male");
     expect(capturedPrompt).toContain("there is no neutral voice category");
-    expect(capturedPrompt).toContain("female voice: Zephyr, Kore, Leda, Orus, Aoede, Callirrhoe, Autonoe, Despina, Erinome, Laomedeia, Achernar, Gacrux, Pulcherrima, Sulafat");
+    expect(capturedPrompt).toContain("female voice: Zephyr, Kore, Fenrir, Leda, Orus, Aoede, Callirrhoe, Autonoe, Despina, Erinome, Laomedeia, Achernar, Gacrux, Pulcherrima, Sulafat");
     expect(capturedPrompt).not.toContain("project-curated perceived gender");
     // Prompt should reference paths, not content
     expect(capturedPrompt).toContain(paths.requestPath);
@@ -3045,7 +3045,7 @@ describe("FQ-M1: legacy runner spawn receives sanitized env", () => {
 
     expect(capturedPrompt).toContain("Google/Provider voice tables classify every prebuilt Gemini TTS voice as either Female or Male");
     expect(capturedPrompt).toContain("Do not use or mention a neutral category");
-    expect(capturedPrompt).toContain("male voice: Puck, Charon, Fenrir, Enceladus, Iapetus, Umbriel, Algieba, Algenib, Rasalgethi, Alnilam, Schedar, Achird, Zubenelgenubi, Vindemiatrix, Sadachbia, Sadaltager");
+    expect(capturedPrompt).toContain("male voice: Puck, Charon, Enceladus, Iapetus, Umbriel, Algieba, Algenib, Rasalgethi, Alnilam, Schedar, Achird, Zubenelgenubi, Vindemiatrix, Sadachbia, Sadaltager");
     expect(capturedPrompt).not.toContain("project-curated perceived gender");
   });
 });

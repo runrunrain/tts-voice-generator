@@ -32,7 +32,7 @@ export const GEMINI_VOICE_CATALOG: readonly GeminiVoiceCatalogEntry[] = [
   { name: "Puck", displayNameZh: "顽童", toneZh: "欢快、机敏", selectionHints: ["少年", "年轻角色", "俏皮调侃", "轻快台词"], perceivedGender: "male" },
   { name: "Charon", displayNameZh: "卡戎", toneZh: "低沉、信息量强", selectionHints: ["长者", "权威", "讲解", "低沉稳重", "训诫"], perceivedGender: "male" },
   { name: "Kore", displayNameZh: "珂瑞", toneZh: "坚定、果断", selectionHints: ["坚定女性", "女将", "果断宣告", "强势角色"], perceivedGender: "female" },
-  { name: "Fenrir", displayNameZh: "芬里尔", toneZh: "兴奋、有冲击力", selectionHints: ["战斗", "冲锋", "激动", "愤怒", "高能喊话"], perceivedGender: "male" },
+  { name: "Fenrir", displayNameZh: "芬里尔", toneZh: "兴奋、有冲击力", selectionHints: ["战斗", "冲锋", "激动", "愤怒", "高能喊话"], perceivedGender: "female" },
   { name: "Leda", displayNameZh: "勒达", toneZh: "青春、轻盈", selectionHints: ["少女", "年轻女性", "清新", "活泼温和"], perceivedGender: "female" },
   { name: "Orus", displayNameZh: "奥鲁斯", toneZh: "稳重、正式", selectionHints: ["军政汇报", "正式陈述", "沉着指令", "稳重女性"], perceivedGender: "female" },
   { name: "Aoede", displayNameZh: "艾俄德", toneZh: "轻松、流畅", selectionHints: ["轻松说明", "朋友交流", "日常对白"], perceivedGender: "female" },

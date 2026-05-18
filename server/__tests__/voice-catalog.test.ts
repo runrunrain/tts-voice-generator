@@ -19,6 +19,7 @@ describe("Gemini voice catalog perceived gender metadata", () => {
     expect(getVoicesByPerceivedGender("female")).toEqual([
       "Zephyr",
       "Kore",
+      "Fenrir",
       "Leda",
       "Orus",
       "Aoede",
@@ -35,7 +36,6 @@ describe("Gemini voice catalog perceived gender metadata", () => {
     expect(getVoicesByPerceivedGender("male")).toEqual([
       "Puck",
       "Charon",
-      "Fenrir",
       "Enceladus",
       "Iapetus",
       "Umbriel",
@@ -50,8 +50,8 @@ describe("Gemini voice catalog perceived gender metadata", () => {
       "Sadachbia",
       "Sadaltager",
     ]);
-    expect(getVoicesByPerceivedGender("female")).toHaveLength(14);
-    expect(getVoicesByPerceivedGender("male")).toHaveLength(16);
+    expect(getVoicesByPerceivedGender("female")).toHaveLength(15);
+    expect(getVoicesByPerceivedGender("male")).toHaveLength(15);
   });
 
   it("formats guide and rules with Google/Provider no-neutral wording", () => {
@@ -68,8 +68,8 @@ describe("Gemini voice catalog perceived gender metadata", () => {
     const rules = formatVoiceGenderSelectionRulesForPrompt();
     expect(rules).toContain("Google/Provider voice tables classify every prebuilt Gemini TTS voice as either Female or Male");
     expect(rules).toContain("there is no neutral voice category");
-    expect(rules).toContain("female voice: Zephyr, Kore, Leda, Orus, Aoede, Callirrhoe, Autonoe, Despina, Erinome, Laomedeia, Achernar, Gacrux, Pulcherrima, Sulafat");
-    expect(rules).toContain("male voice: Puck, Charon, Fenrir, Enceladus, Iapetus, Umbriel, Algieba, Algenib, Rasalgethi, Alnilam, Schedar, Achird, Zubenelgenubi, Vindemiatrix, Sadachbia, Sadaltager");
+    expect(rules).toContain("female voice: Zephyr, Kore, Fenrir, Leda, Orus, Aoede, Callirrhoe, Autonoe, Despina, Erinome, Laomedeia, Achernar, Gacrux, Pulcherrima, Sulafat");
+    expect(rules).toContain("male voice: Puck, Charon, Enceladus, Iapetus, Umbriel, Algieba, Algenib, Rasalgethi, Alnilam, Schedar, Achird, Zubenelgenubi, Vindemiatrix, Sadachbia, Sadaltager");
     expect(rules).toContain("When gender is unknown, infer the intended speaker identity");
     expect(rules).toContain("Do not use or mention a neutral category");
     expect(rules).not.toContain("project-curated perceived gender");
