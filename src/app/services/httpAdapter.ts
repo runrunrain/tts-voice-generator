@@ -17,6 +17,7 @@ import type {
   GenerateResult,
   GeneratePhase,
   HistoryFilter,
+  HistoryPreviewSource,
   HistoryRecord,
   HistoryStatus,
   HistorySource,
@@ -57,6 +58,8 @@ import type {
   VoiceLine,
   GenerateFromListRequest,
   GenerateFromListResponse,
+  LineAudioHistoryEntry,
+  LineAudioHistoryResponse,
   ProductionListDiff,
   ProductionListExportFormat,
   ProductionListExportResult,
@@ -327,6 +330,18 @@ function resolveHistoryFormat(assetFormat: string | null | undefined, jobFormat:
     return jobFormat;
   }
   return "wav";
+}
+
+function normalizeHistoryPreviewSource(value: string | null | undefined): HistoryPreviewSource {
+  switch (value) {
+    case "voice_line":
+    case "director_snapshot":
+    case "job_input":
+    case "empty":
+      return value;
+    default:
+      return "job_input";
+  }
 }
 
 // ─── Adapter Implementation ──────────────────────────────────────────────────
@@ -649,6 +664,27 @@ export const httpAdapter: TtsServiceAdapter = {
         channels?: number | null;
         agentConversationId?: string | null;
         agentActionLogId?: number | null;
+        taskId?: string | null;
+        taskTitle?: string | null;
+        taskName?: string | null;
+        taskCreatedAt?: string | null;
+        taskUpdatedAt?: string | null;
+        taskGroupId?: string | null;
+        taskGroupKind?: string | null;
+        taskDisplayTitle?: string | null;
+        voiceLineId?: string | null;
+        voiceLineOrder?: number | null;
+        lineSpeaker?: string | null;
+        lineText?: string | null;
+        lineVoice?: string | null;
+        speakerLabel?: string | null;
+        speakerName?: string | null;
+        speakerRole?: string | null;
+        speakerVoice?: string | null;
+        transcript?: string | null;
+        previewSpeaker?: string | null;
+        previewText?: string | null;
+        previewSource?: string | null;
       }>;
       totalPages: number;
       currentPage: number;
@@ -656,30 +692,56 @@ export const httpAdapter: TtsServiceAdapter = {
     }>(`/api/history?${params.toString()}`);
 
     return {
-      records: result.records.map((r) => ({
-        id: r.id,
-        text: r.textPreview,
-        voice: r.voice,
-        format: resolveHistoryFormat(r.assetFormat, r.format) as AudioFormat,
-        date: r.createdAt ? new Date(r.createdAt).toLocaleString("zh-CN") : "",
-        source: mapHistorySource(r.source),
-        duration: r.durationMs != null ? `${(r.durationMs / 1000).toFixed(1)}s` : "0.0s",
-        status: mapHistoryStatus(r.status),
-        cost: r.cost || undefined,
-        charCount: r.charCount,
-        error: r.error,
-        assetId: r.assetId,
-        audioUrl: r.audioUrl,
-        downloadUrl: r.downloadUrl,
-        durationMs: r.durationMs,
-        assetFormat: r.assetFormat,
-        sizeBytes: r.sizeBytes,
-        sampleRate: r.sampleRate,
-        bitDepth: r.bitDepth,
-        channels: r.channels,
-        agentConversationId: r.agentConversationId ?? null,
-        agentActionLogId: r.agentActionLogId ?? null,
-      })),
+      records: result.records.map((r) => {
+        const previewSpeaker = r.previewSpeaker || r.lineSpeaker || r.speakerName || r.speakerLabel || r.voice || "旁白";
+        const previewText = r.previewText || r.lineText || r.transcript || r.textPreview || "（无台词）";
+        return {
+          id: r.id,
+          text: previewText,
+          voice: r.voice,
+          format: resolveHistoryFormat(r.assetFormat, r.format) as AudioFormat,
+          createdAt: r.createdAt,
+          date: r.createdAt ? new Date(r.createdAt).toLocaleString("zh-CN") : "",
+          source: mapHistorySource(r.source),
+          duration: r.durationMs != null ? `${(r.durationMs / 1000).toFixed(1)}s` : "0.0s",
+          status: mapHistoryStatus(r.status),
+          cost: r.cost || undefined,
+          charCount: r.charCount,
+          error: r.error,
+          assetId: r.assetId,
+          audioUrl: r.audioUrl,
+          downloadUrl: r.downloadUrl,
+          durationMs: r.durationMs,
+          assetFormat: r.assetFormat,
+          sizeBytes: r.sizeBytes,
+          sampleRate: r.sampleRate,
+          bitDepth: r.bitDepth,
+          channels: r.channels,
+          agentConversationId: r.agentConversationId ?? null,
+          agentActionLogId: r.agentActionLogId ?? null,
+          taskId: r.taskId ?? null,
+          taskTitle: r.taskTitle ?? null,
+          taskName: r.taskName ?? null,
+          taskCreatedAt: r.taskCreatedAt ?? null,
+          taskUpdatedAt: r.taskUpdatedAt ?? null,
+          taskGroupId: r.taskGroupId ?? (r.taskId ? `task:${r.taskId}` : "orphan"),
+          taskGroupKind: r.taskGroupKind ?? (r.taskId ? "task" : "orphan"),
+          taskDisplayTitle: r.taskDisplayTitle ?? r.taskTitle ?? r.taskName ?? null,
+          voiceLineId: r.voiceLineId ?? null,
+          voiceLineOrder: typeof r.voiceLineOrder === "number" ? r.voiceLineOrder : null,
+          lineSpeaker: r.lineSpeaker ?? null,
+          lineText: r.lineText ?? null,
+          lineVoice: r.lineVoice ?? null,
+          speakerLabel: r.speakerLabel ?? null,
+          speakerName: r.speakerName ?? null,
+          speakerRole: r.speakerRole ?? null,
+          speakerVoice: r.speakerVoice ?? null,
+          transcript: r.transcript ?? null,
+          previewSpeaker,
+          previewText,
+          previewSource: normalizeHistoryPreviewSource(r.previewSource),
+        };
+      }),
       totalPages: result.totalPages,
       totalRecords: result.totalRecords,
     };
@@ -779,6 +841,7 @@ function mapHistoryStatus(status: string): HistoryStatus {
   switch (status) {
     case "succeeded": return "success";
     case "failed": return "error";
+    case "cancelled": return "error";
     case "pending":
     case "running": return "pending";
     default: return "pending";
@@ -1374,6 +1437,45 @@ function mapProductionListQualityReport(raw: unknown): ProductionListQualityRepo
         lineId: asNullableString(issue.lineId) ?? undefined,
       };
     }),
+  };
+}
+
+function safeAudioApiUrl(value: unknown, assetId: number | null, download: boolean): string | null {
+  const explicit = asNullableString(value);
+  if (explicit?.startsWith("/api/audio/")) return explicit;
+  if (typeof assetId === "number") return `/api/audio/${encodeURIComponent(String(assetId))}${download ? "?download=1" : ""}`;
+  return null;
+}
+
+function mapLineAudioHistoryEntry(raw: unknown): LineAudioHistoryEntry {
+  const item = isRecord(raw) ? raw : {};
+  const relatedAssetId = typeof item.relatedAssetId === "number"
+    ? item.relatedAssetId
+    : typeof item.assetId === "number"
+      ? item.assetId
+      : null;
+  return {
+    version: asNumber(item.version, 0),
+    versionId: asString(item.versionId ?? item.id),
+    lineId: asString(item.lineId),
+    sortOrder: typeof item.sortOrder === "number" ? item.sortOrder : typeof item.order === "number" ? item.order : null,
+    generationStatus: asString(item.generationStatus, "draft"),
+    voice: asNullableString(item.voice),
+    relatedJobId: asNullableString(item.relatedJobId ?? item.jobId),
+    relatedAssetId,
+    audioUrl: safeAudioApiUrl(item.audioUrl, relatedAssetId, false),
+    downloadUrl: safeAudioApiUrl(item.downloadUrl, relatedAssetId, true),
+    createdAt: asString(item.createdAt, new Date().toISOString()),
+    isCurrent: asBoolean(item.isCurrent, false),
+  };
+}
+
+function mapLineAudioHistoryResponse(raw: unknown, taskId: string, lineId: string): LineAudioHistoryResponse {
+  const record = isRecord(raw) ? raw : {};
+  return {
+    taskId: asString(record.taskId, taskId),
+    lineId: asString(record.lineId, lineId),
+    history: asArray(record.history).map(mapLineAudioHistoryEntry),
   };
 }
 
@@ -2045,6 +2147,12 @@ export const taskApi = {
   async getProductionListQualityReport(taskId: string) {
     const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/production-list/quality-report`);
     return mapProductionListQualityReport(data);
+  },
+
+  async getLineAudioHistory(taskId: string, lineId: string, limit = 50) {
+    const params = new URLSearchParams({ limit: String(limit) });
+    const data = await apiFetch<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/production-list/lines/${encodeURIComponent(lineId)}/audio-history?${params.toString()}`);
+    return mapLineAudioHistoryResponse(data, taskId, lineId);
   },
 
   async listDirectorProfiles(taskId?: string) {

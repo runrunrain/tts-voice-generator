@@ -8,10 +8,17 @@
 import { Hono } from "hono";
 import { getDb } from "../db/index.js";
 import { generationJob, audioAsset } from "../db/schema.js";
-import { eq, desc, and, sql, like, gte, lte } from "drizzle-orm";
+import { voiceLine, voiceTask } from "../db/schema-extended.js";
+import { eq, desc, and, sql, like, gte, lte, inArray } from "drizzle-orm";
 import { readAudioFile } from "../utils/audio-fs.js";
 
 const app = new Hono();
+
+const HISTORY_STATUS_FILTER_ALIASES: Record<string, readonly string[]> = {
+  success: ["succeeded"],
+  error: ["failed", "cancelled"],
+  pending: ["pending", "running"],
+};
 
 // ─── GET /api/history ────────────────────────────────────────────────────────
 
@@ -30,7 +37,14 @@ app.get("/api/history", (c) => {
   // Build conditions
   const conditions = [];
   if (voice) conditions.push(eq(generationJob.voice, voice));
-  if (status) conditions.push(eq(generationJob.status, status));
+  if (status) {
+    const statusValues = resolveHistoryStatusFilterValues(status);
+    if (statusValues.length === 1) {
+      conditions.push(eq(generationJob.status, statusValues[0]));
+    } else if (statusValues.length > 1) {
+      conditions.push(inArray(generationJob.status, statusValues));
+    }
+  }
   if (source) conditions.push(eq(generationJob.source, source));
   if (dateFrom) {
     const fromDate = new Date(dateFrom);
@@ -60,7 +74,6 @@ app.get("/api/history", (c) => {
     .select({
       job: generationJob,
       assetId: audioAsset.id,
-      assetFilePath: audioAsset.filePath,
       assetMimeType: audioAsset.mimeType,
       assetSizeBytes: audioAsset.sizeBytes,
       assetDuration: audioAsset.duration,
@@ -68,6 +81,15 @@ app.get("/api/history", (c) => {
       assetBitDepth: audioAsset.bitDepth,
       assetChannels: audioAsset.channels,
       assetCreatedAt: audioAsset.createdAt,
+      voiceLineId: voiceLine.id,
+      voiceLineOrder: voiceLine.order,
+      lineSpeaker: voiceLine.speaker,
+      lineText: voiceLine.text,
+      lineVoice: voiceLine.voice,
+      taskId: voiceTask.id,
+      taskTitle: voiceTask.title,
+      taskCreatedAt: voiceTask.createdAt,
+      taskUpdatedAt: voiceTask.updatedAt,
     })
     .from(generationJob)
     .leftJoin(
@@ -88,6 +110,19 @@ app.get("/api/history", (c) => {
         ),
       ),
     )
+    .leftJoin(
+      voiceLine,
+      eq(
+        voiceLine.id,
+        sql<string>`(
+          SELECT vl2.id FROM voice_line vl2
+          WHERE vl2.related_job_id = generation_job.id
+          ORDER BY vl2.updated_at DESC, vl2.created_at DESC, vl2.id DESC
+          LIMIT 1
+        )`,
+      ),
+    )
+    .leftJoin(voiceTask, eq(voiceTask.id, voiceLine.taskId))
     .where(whereClause)
     .orderBy(desc(generationJob.createdAt))
     .limit(pageSize)
@@ -101,6 +136,20 @@ app.get("/api/history", (c) => {
   const formattedRecords = rows.map((row) => {
     const job = row.job;
     const hasAsset = row.assetId != null;
+    const directorPreview = parseDirectorPreview(job.directorSnapshot);
+    const lineSpeaker = cleanString(row.lineSpeaker);
+    const lineText = cleanString(row.lineText);
+    const lineVoice = cleanString(row.lineVoice);
+    const preview = buildPreview({
+      lineSpeaker,
+      lineText,
+      directorPreview,
+      jobVoice: job.voice,
+      jobInput: job.input,
+    });
+    const taskId = cleanString(row.taskId);
+    const taskTitle = cleanString(row.taskTitle);
+
     return {
       id: job.id,
       textPreview: job.input.length > 100 ? job.input.slice(0, 100) + "..." : job.input,
@@ -125,6 +174,30 @@ app.get("/api/history", (c) => {
       // Agent context fields (present when source is "agent")
       agentConversationId: job.agentConversationId ?? null,
       agentActionLogId: job.agentActionLogId ?? null,
+      // Task grouping fields. Records without a linked task are kept as orphan
+      // records so callers can place them under a synthetic "no task" group.
+      taskId,
+      taskTitle,
+      taskName: taskTitle,
+      taskCreatedAt: row.taskCreatedAt ? new Date(row.taskCreatedAt).toISOString() : null,
+      taskUpdatedAt: row.taskUpdatedAt ? new Date(row.taskUpdatedAt).toISOString() : null,
+      taskGroupId: taskId ? `task:${taskId}` : "orphan",
+      taskGroupKind: taskId ? "task" : "orphan",
+      taskDisplayTitle: taskTitle ?? "独立生成",
+      // Voice line and director preview fields for role + transcript display.
+      voiceLineId: cleanString(row.voiceLineId),
+      voiceLineOrder: row.voiceLineOrder ?? null,
+      lineSpeaker,
+      lineText,
+      lineVoice,
+      speakerLabel: directorPreview.speakerLabel,
+      speakerName: directorPreview.speakerName,
+      speakerRole: directorPreview.speakerName ?? directorPreview.speakerLabel ?? lineSpeaker,
+      speakerVoice: directorPreview.speakerVoice ?? lineVoice ?? job.voice,
+      transcript: directorPreview.transcript,
+      previewSpeaker: preview.speaker,
+      previewText: preview.text,
+      previewSource: preview.source,
     };
   });
 
@@ -257,6 +330,85 @@ app.get("/api/audio/:assetId", (c) => {
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+type HistoryPreviewSource = "voice_line" | "director_snapshot" | "job_input" | "empty";
+
+type ParsedDirectorSnapshot = {
+  transcript: string | null;
+  speakerLabel: string | null;
+  speakerName: string | null;
+  speakerVoice: string | null;
+};
+
+function cleanString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function resolveHistoryStatusFilterValues(status: string): string[] {
+  const normalized = status.trim();
+  if (!normalized) return [];
+  return [...(HISTORY_STATUS_FILTER_ALIASES[normalized] ?? [normalized])];
+}
+
+function parseDirectorPreview(raw: string | null): ParsedDirectorSnapshot {
+  const empty = {
+    transcript: null,
+    speakerLabel: null,
+    speakerName: null,
+    speakerVoice: null,
+  } satisfies ParsedDirectorSnapshot;
+
+  if (!raw) return empty;
+
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!value || typeof value !== "object") return empty;
+
+    const record = value as Record<string, unknown>;
+    const firstSpeaker = Array.isArray(record.speakers) ? record.speakers[0] : null;
+    const speakerRecord = firstSpeaker && typeof firstSpeaker === "object"
+      ? firstSpeaker as Record<string, unknown>
+      : null;
+
+    return {
+      transcript: cleanString(record.transcript),
+      speakerLabel: speakerRecord ? cleanString(speakerRecord.label) : null,
+      speakerName: speakerRecord ? cleanString(speakerRecord.name) : null,
+      speakerVoice: speakerRecord ? cleanString(speakerRecord.voice) : null,
+    };
+  } catch {
+    return empty;
+  }
+}
+
+function buildPreview(input: {
+  lineSpeaker: string | null;
+  lineText: string | null;
+  directorPreview: ParsedDirectorSnapshot;
+  jobVoice: string;
+  jobInput: string;
+}): { speaker: string; text: string; source: HistoryPreviewSource } {
+  const speaker = input.lineSpeaker
+    ?? input.directorPreview.speakerName
+    ?? input.directorPreview.speakerLabel
+    ?? cleanString(input.jobVoice)
+    ?? "旁白";
+
+  if (input.lineText) {
+    return { speaker, text: input.lineText, source: "voice_line" };
+  }
+
+  if (input.directorPreview.transcript) {
+    return { speaker, text: input.directorPreview.transcript, source: "director_snapshot" };
+  }
+
+  const jobInput = cleanString(input.jobInput);
+  if (jobInput) {
+    return { speaker, text: jobInput, source: "job_input" };
+  }
+
+  return { speaker, text: "（无台词）", source: "empty" };
+}
 
 /**
  * Parse a duration string like "3.2s" into milliseconds.

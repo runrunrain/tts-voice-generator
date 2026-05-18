@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, Circle, Copy, Download, FileWarning, Loader2, Lock, PanelBottomOpen, Play, Plus, RefreshCw, Save, Scissors, Square, Trash2, Wand2, XCircle } from "lucide-react";
+import { AlertCircle, CheckCircle2, Circle, Copy, Download, FileWarning, History, Loader2, Lock, PanelBottomOpen, Play, Plus, RefreshCw, Save, Scissors, Square, Trash2, Wand2, XCircle } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAppState } from "../../state/AppContext";
 import { useProductionList } from "../../hooks/useProductionList";
@@ -17,7 +17,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "../ui/alert-dialog";
-import type { DirectorProfile, LineGenerationResult, LineGenerationStatus, ProductionListValidationReport, ResponseFormat, ValidationIssue, VoiceLine } from "../../types";
+import type { DirectorProfile, LineAudioHistoryEntry, LineGenerationResult, LineGenerationStatus, ProductionListValidationReport, ResponseFormat, ValidationIssue, VoiceLine } from "../../types";
 import { formatVoiceOptionLabel } from "../../utils/voiceDisplay";
 
 const FORMAT_OPTIONS: ResponseFormat[] = ["wav", "pcm", "mp3"];
@@ -26,6 +26,7 @@ const CONTROL_CLASS = "w-full bg-bg-base border border-border rounded px-2 py-1.
 const AUDIO_ENDPOINT_PREFIX = "/api/audio/";
 
 type ProductionListController = ReturnType<typeof useProductionList>;
+type NoticeTone = "success" | "warning" | "error";
 
 type ProfileBindingInfo = {
   count: number;
@@ -81,6 +82,7 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
   const [lineCloneMessage, setLineCloneMessage] = useState<string | null>(null);
   const [lineCloneError, setLineCloneError] = useState<string | null>(null);
   const [bulkGenerateConfirmOpen, setBulkGenerateConfirmOpen] = useState(false);
+  const [bulkActionNotice, setBulkActionNotice] = useState<{ tone: NoticeTone; text: string } | null>(null);
 
   const selectedIds = selectedLineIds ?? internalSelected;
   const setSelectedIds = onSelectedLineIdsChange ?? setInternalSelected;
@@ -148,13 +150,30 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
   };
 
   const bindProfileToSelected = () => {
-    if (!bulkProfileId || selectedIds.length === 0) return;
+    if (selectedIds.length === 0) {
+      setBulkActionNotice({ tone: "warning", text: "请先选择需要绑定导演配置的生产行。" });
+      return;
+    }
+    if (!bulkProfileId) {
+      setBulkActionNotice({ tone: "warning", text: "请先选择导演配置。" });
+      return;
+    }
     updateLines(selectedIds, { directorProfileId: bulkProfileId, promptProfileId: bulkProfileId });
+    const profileName = directorProfiles.find((profile) => profile.id === bulkProfileId)?.name ?? bulkProfileId;
+    setBulkActionNotice({ tone: "success", text: `已将 ${selectedIds.length} 行绑定到导演配置“${profileName}”，保存后写入服务端。` });
   };
 
   const bindVoiceToSelected = () => {
-    if (!bulkVoice || selectedIds.length === 0) return;
+    if (selectedIds.length === 0) {
+      setBulkActionNotice({ tone: "warning", text: "请先选择需要修改音色的生产行。" });
+      return;
+    }
+    if (!bulkVoice) {
+      setBulkActionNotice({ tone: "warning", text: "请先选择目标音色。" });
+      return;
+    }
     updateLines(selectedIds, { voice: bulkVoice });
+    setBulkActionNotice({ tone: "success", text: `已将 ${selectedIds.length} 行音色改为“${formatVoiceOptionLabel(bulkVoice)}”，保存后写入服务端。` });
   };
 
   const deleteSelected = () => {
@@ -197,6 +216,20 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
       setLineCloneError(err instanceof Error ? err.message : "复制独立配置失败");
     }
   };
+
+  const notice = error
+    ? { tone: "error" as NoticeTone, text: error }
+    : lineCloneError
+      ? { tone: "error" as NoticeTone, text: lineCloneError }
+      : generationMessage
+        ? { tone: generationTone === "error" ? "error" as NoticeTone : generationTone === "warning" ? "warning" as NoticeTone : "success" as NoticeTone, text: generationMessage }
+        : lineCloneMessage
+          ? { tone: "success" as NoticeTone, text: lineCloneMessage }
+          : saveMessage
+            ? { tone: "success" as NoticeTone, text: saveMessage }
+            : bulkActionNotice
+              ? bulkActionNotice
+              : null;
 
   if (loading && draftLines.length === 0) {
     return <ProductionListSkeleton />;
@@ -243,12 +276,7 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
         </div>
       </header>
 
-      {(error || saveMessage || generationMessage || lineCloneMessage || lineCloneError) && (
-        <Notice
-          tone={error || lineCloneError || generationTone === "error" ? "error" : generationTone === "warning" ? "warning" : "success"}
-          text={error || lineCloneError || generationMessage || lineCloneMessage || saveMessage || ""}
-        />
-      )}
+      {notice && <Notice tone={notice.tone} text={notice.text} />}
 
       <div className="shrink-0 px-4 py-2 [@media(max-height:760px)]:py-1.5 border-b border-border-subtle bg-bg-base flex flex-wrap items-center justify-between gap-3 text-[10px]">
         <div className="flex flex-wrap items-center gap-3">
@@ -288,6 +316,7 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
                 return (
                   <ProductionRow
                     key={line.id}
+                    taskId={taskId}
                     line={line}
                     index={index}
                     voices={voiceOptions}
@@ -318,7 +347,7 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
         voices={voiceOptions}
         bulkProfileId={bulkProfileId}
         bulkVoice={bulkVoice}
-        disabled={saving || generating || selectedIds.length === 0}
+        disabled={saving || generating}
         generating={generating}
         onProfileChange={setBulkProfileId}
         onVoiceChange={setBulkVoice}
@@ -353,7 +382,8 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
   );
 }
 
-function ProductionRow({ line, index, voices, directorProfiles, profileBindingMap, issues, selected, result, disabled, expanded, onToggleSelected, onToggleExpanded, onChange, onDelete, onExecute, onDuplicateProfile }: {
+function ProductionRow({ taskId, line, index, voices, directorProfiles, profileBindingMap, issues, selected, result, disabled, expanded, onToggleSelected, onToggleExpanded, onChange, onDelete, onExecute, onDuplicateProfile }: {
+  taskId: string;
   line: VoiceLine;
   index: number;
   voices: string[];
@@ -384,21 +414,23 @@ function ProductionRow({ line, index, voices, directorProfiles, profileBindingMa
     <>
       <tr aria-selected={selected} className={`border-b border-border-subtle hover:bg-bg-hover/60 ${selected ? "bg-accent-muted/30" : ""} ${toneClass}`}>
         <Td className="text-text-tertiary font-mono"><label className="flex items-center gap-2"><input type="checkbox" className="accent-accent" checked={selected} onChange={onToggleSelected} disabled={disabled} aria-label={`选择第 ${index + 1} 行`} />{rowLocked && <LockIcon />} {String(index + 1).padStart(2, "0")}</label></Td>
-        <Td><ShortInput value={line.moduleName ?? ""} onChange={(value) => onChange({ moduleName: value })} disabled={disabled || rowLocked} placeholder="未分组" /></Td>
-        <Td><ShortInput value={line.title ?? ""} onChange={(value) => onChange({ title: value })} disabled={disabled || rowLocked} placeholder={line.transcript.slice(0, 18) || "标题"} /></Td>
-        <Td><ShortInput value={line.speakerLabel ?? ""} onChange={(value) => onChange({ speakerLabel: value })} disabled={disabled || rowLocked} placeholder="旁白" /></Td>
+        <Td><ShortInput value={line.moduleName ?? ""} fieldLabel="模块" onChange={(value) => onChange({ moduleName: value })} disabled={disabled || rowLocked} placeholder="未分组" /></Td>
+        <Td><ShortInput value={line.title ?? ""} fieldLabel="标题" onChange={(value) => onChange({ title: value })} disabled={disabled || rowLocked} placeholder={line.transcript.slice(0, 18) || "标题"} /></Td>
+        <Td><ShortInput value={line.speakerLabel ?? ""} fieldLabel="角色" onChange={(value) => onChange({ speakerLabel: value })} disabled={disabled || rowLocked} placeholder="旁白" /></Td>
         <Td><div className="truncate text-text-secondary max-w-[280px] min-[1200px]:max-w-[360px] min-[1440px]:max-w-[420px]" title={line.transcript}>{line.transcript || <span className="text-text-tertiary">待填写台词</span>}</div><div className={`mt-1 text-[10px] ${charCount > MAX_TRANSCRIPT_CHARS ? "text-warning" : "text-text-tertiary"}`}>{charCount}/{MAX_TRANSCRIPT_CHARS} 字符</div></Td>
         <Td><LineStyleSummary value={line.style} /></Td>
-        <Td><select className="w-full h-8 bg-bg-base border border-border rounded px-2 text-xs outline-none focus:border-border-focus" value={line.voice} onChange={(event) => onChange({ voice: event.target.value })} disabled={disabled || rowLocked}>{voices.map((voice) => <option key={voice} value={voice}>{formatVoiceOptionLabel(voice)}</option>)}</select></Td>
+        <Td><select className="w-full h-8 bg-bg-base border border-border rounded px-2 text-xs outline-none focus:border-border-focus" value={line.voice} onChange={(event) => onChange({ voice: event.target.value })} disabled={disabled || rowLocked} title={formatVoiceOptionLabel(line.voice)} aria-label={`第 ${index + 1} 行音色`}>{voices.map((voice) => <option key={voice} value={voice}>{formatVoiceOptionLabel(voice)}</option>)}</select></Td>
         <Td><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${currentProfileId ? "bg-success" : "bg-error"}`} /><span className="truncate" title={currentProfile?.name ?? "未绑定"}>{currentProfile?.name ?? "未绑定"}</span></div></Td>
-        <Td><StatusStack status={generationStatus} issues={issues} result={result} line={line} /></Td>
+        <Td><StatusStack taskId={taskId} status={generationStatus} issues={issues} result={result} line={line} rowIndex={index + 1} /></Td>
         <Td><div className="flex items-center gap-1"><button className="p-1.5 rounded border border-border hover:bg-bg-hover" onClick={onToggleExpanded} title={expanded ? "收起详情" : "展开详情"}><PanelBottomOpen size={13} /></button><button className="p-1.5 rounded border border-border text-error hover:bg-error-muted disabled:opacity-50" onClick={onDelete} disabled={disabled || rowLocked} title="删除行"><Trash2 size={13} /></button></div></Td>
       </tr>
       {expanded && (
         <tr className="border-b border-border-subtle bg-bg-base">
           <td colSpan={10} className="p-0">
             <LineDetailPanel
+              taskId={taskId}
               line={line}
+              rowIndex={index + 1}
               voices={voices}
               directorProfiles={directorProfiles}
               profileBindingMap={profileBindingMap}
@@ -418,8 +450,10 @@ function ProductionRow({ line, index, voices, directorProfiles, profileBindingMa
   );
 }
 
-function LineDetailPanel({ line, voices, directorProfiles, profileBindingMap, issues, result, rowLocked, disabled, onChange, onExecute, onDuplicateProfile, onClose }: {
+function LineDetailPanel({ taskId, line, rowIndex, voices, directorProfiles, profileBindingMap, issues, result, rowLocked, disabled, onChange, onExecute, onDuplicateProfile, onClose }: {
+  taskId: string;
   line: VoiceLine;
+  rowIndex: number;
   voices: string[];
   directorProfiles: DirectorProfile[];
   profileBindingMap: Map<string, ProfileBindingInfo>;
@@ -444,7 +478,7 @@ function LineDetailPanel({ line, voices, directorProfiles, profileBindingMap, is
           <Field label="模块"><input className={CONTROL_CLASS} value={line.moduleName ?? ""} onChange={(event) => onChange({ moduleName: event.target.value })} disabled={editDisabled} /></Field>
           <Field label="标题"><input className={CONTROL_CLASS} value={line.title ?? ""} onChange={(event) => onChange({ title: event.target.value })} disabled={editDisabled} /></Field>
           <Field label="角色"><input className={CONTROL_CLASS} value={line.speakerLabel ?? ""} onChange={(event) => onChange({ speakerLabel: event.target.value })} disabled={editDisabled} /></Field>
-          <Field label="音色"><select className={CONTROL_CLASS} value={line.voice} onChange={(event) => onChange({ voice: event.target.value })} disabled={editDisabled}>{voices.map((voice) => <option key={voice} value={voice}>{formatVoiceOptionLabel(voice)}</option>)}</select></Field>
+          <Field label="音色"><select className={CONTROL_CLASS} value={line.voice} onChange={(event) => onChange({ voice: event.target.value })} disabled={editDisabled} title={formatVoiceOptionLabel(line.voice)}>{voices.map((voice) => <option key={voice} value={voice}>{formatVoiceOptionLabel(voice)}</option>)}</select></Field>
           <Field label="模型"><input className={`${CONTROL_CLASS} font-mono`} value={line.model} onChange={(event) => onChange({ model: event.target.value })} disabled={editDisabled} /></Field>
           <Field label="格式"><select className={`${CONTROL_CLASS} font-mono`} value={line.responseFormat} onChange={(event) => onChange({ responseFormat: event.target.value as ResponseFormat })} disabled={editDisabled}>{FORMAT_OPTIONS.map((format) => <option key={format} value={format}>{format}</option>)}</select></Field>
           <Field label="行级风格" className="col-span-2">
@@ -463,7 +497,7 @@ function LineDetailPanel({ line, voices, directorProfiles, profileBindingMap, is
 
         <section className="flex flex-col gap-3">
           <InfoCard title="导演绑定">
-            <select className={CONTROL_CLASS} value={currentProfileId} onChange={(event) => onChange({ directorProfileId: event.target.value || null, promptProfileId: event.target.value || null })} disabled={editDisabled}>
+            <select className={CONTROL_CLASS} value={currentProfileId} onChange={(event) => onChange(buildDirectorBindingPatch(event.target.value))} disabled={editDisabled} title={currentProfile?.name ?? "未绑定导演配置"}>
               <option value="">未绑定导演配置</option>
               {directorProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
             </select>
@@ -476,7 +510,7 @@ function LineDetailPanel({ line, voices, directorProfiles, profileBindingMap, is
             {issues.length === 0 ? <p className="text-[10px] text-success">当前行没有本地或远端校验问题。</p> : <div className="space-y-1">{issues.map((issue, index) => <div key={`${issue.field}-${index}`} className={`px-2 py-1 border text-[10px] ${issue.severity === "error" ? "border-error/20 bg-error-muted/30 text-error" : "border-warning/20 bg-warning-muted/30 text-warning"}`}>{issue.severity} · {issue.field ?? "line"}: {issue.message}</div>)}</div>}
           </InfoCard>
           <InfoCard title="生成状态">
-            <StatusStack status={getLineGenerationStatus(line)} issues={[]} result={result} line={line} />
+            <StatusStack taskId={taskId} status={getLineGenerationStatus(line)} issues={[]} result={result} line={line} rowIndex={rowIndex} />
           </InfoCard>
           <InfoCard title="行级 Agent 按钮">
             <div className="grid grid-cols-3 gap-2">
@@ -511,12 +545,12 @@ function BulkActionBar({ selectedCount, directorProfiles, voices, bulkProfileId,
   return (
     <footer className="shrink-0 max-h-24 min-h-12 overflow-y-auto px-4 py-2 border-t border-border-subtle bg-bg-sunken flex flex-wrap items-center gap-2 text-xs">
       <span className="mr-2 text-text-secondary">已选 {selectedCount} 条</span>
-      <select className="h-8 min-w-0 max-w-[220px] bg-bg-base border border-border rounded px-2 text-xs" value={bulkProfileId} onChange={(event) => onProfileChange(event.target.value)} disabled={disabled || directorProfiles.length === 0}><option value="">选择导演配置</option>{directorProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select>
-      <button className="px-3 h-8 rounded border border-border hover:bg-bg-hover disabled:opacity-50" onClick={onBindProfile} disabled={disabled || !bulkProfileId}>批量绑定导演</button>
-      <select className="h-8 min-w-0 max-w-[180px] bg-bg-base border border-border rounded px-2 text-xs" value={bulkVoice} onChange={(event) => onVoiceChange(event.target.value)} disabled={disabled}>{voices.map((voice) => <option key={voice} value={voice}>{formatVoiceOptionLabel(voice)}</option>)}</select>
-      <button className="px-3 h-8 rounded border border-border hover:bg-bg-hover disabled:opacity-50" onClick={onBindVoice} disabled={disabled || !bulkVoice}>批量修改音色</button>
-      <button className="px-3 h-8 rounded border border-accent/40 text-accent hover:bg-accent-muted disabled:opacity-50 flex items-center gap-1" onClick={onGenerate} disabled={disabled || generating}>{generating ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />} 生成选中音频</button>
-      <button className="px-3 h-8 rounded border border-error/30 text-error hover:bg-error-muted disabled:opacity-50" onClick={onDelete} disabled={disabled}>批量删除</button>
+      <select className="h-8 min-w-0 max-w-[220px] bg-bg-base border border-border rounded px-2 text-xs" value={bulkProfileId} onChange={(event) => onProfileChange(event.target.value)} disabled={disabled || directorProfiles.length === 0} title={bulkProfileId ? directorProfiles.find((profile) => profile.id === bulkProfileId)?.name : "选择导演配置"}><option value="">选择导演配置</option>{directorProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select>
+      <button className="px-3 h-8 rounded border border-border hover:bg-bg-hover disabled:opacity-50" onClick={onBindProfile} disabled={disabled}>批量绑定导演</button>
+      <select className="h-8 min-w-0 max-w-[180px] bg-bg-base border border-border rounded px-2 text-xs" value={bulkVoice} onChange={(event) => onVoiceChange(event.target.value)} disabled={disabled} title={formatVoiceOptionLabel(bulkVoice)}>{voices.map((voice) => <option key={voice} value={voice}>{formatVoiceOptionLabel(voice)}</option>)}</select>
+      <button className="px-3 h-8 rounded border border-border hover:bg-bg-hover disabled:opacity-50" onClick={onBindVoice} disabled={disabled}>批量修改音色</button>
+      <button className="px-3 h-8 rounded border border-accent/40 text-accent hover:bg-accent-muted disabled:opacity-50 flex items-center gap-1" onClick={onGenerate} disabled={disabled || generating || selectedCount === 0}>{generating ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />} 生成选中音频</button>
+      <button className="px-3 h-8 rounded border border-error/30 text-error hover:bg-error-muted disabled:opacity-50" onClick={onDelete} disabled={disabled || selectedCount === 0}>批量删除</button>
       <button className="px-3 h-8 rounded border border-border hover:bg-bg-hover disabled:opacity-50" onClick={onClear} disabled={selectedCount === 0}>清除选择</button>
       <span className="ml-auto min-w-[220px] text-[10px] text-text-tertiary">生成音频会调用真实 TTS；成功行被选中时会强制重新生成，旧音频仍留在历史记录。</span>
     </footer>
@@ -531,10 +565,10 @@ function LineStyleSummary({ value }: { value?: string }) {
   return <span className="block max-w-[180px] truncate rounded border border-accent/20 bg-accent-muted/25 px-2 py-1 text-[10px] text-accent" title={trimmed}>{trimmed}</span>;
 }
 
-function StatusStack({ status, issues, result, line }: { status: LineGenerationStatus; issues: ValidationIssue[]; result?: LineGenerationResult; line: VoiceLine }) {
+function StatusStack({ taskId, status, issues, result, line, rowIndex }: { taskId: string; status: LineGenerationStatus; issues: ValidationIssue[]; result?: LineGenerationResult; line: VoiceLine; rowIndex?: number }) {
   const errorCount = issues.filter((issue) => issue.severity === "error").length;
   const warningCount = issues.filter((issue) => issue.severity === "warning").length;
-  return <div className="flex flex-col gap-1"><ValidationBadge errorCount={errorCount} warningCount={warningCount} /><GenerationStatusBadge status={status} jobId={line.relatedJobId} assetId={line.relatedAssetId} result={result} line={line} /></div>;
+  return <div className="flex flex-col gap-1"><ValidationBadge errorCount={errorCount} warningCount={warningCount} /><GenerationStatusBadge status={status} jobId={line.relatedJobId} assetId={line.relatedAssetId} result={result} line={line} /><LineAudioHistoryButton taskId={taskId} line={line} rowIndex={rowIndex} /></div>;
 }
 
 function ValidationBadge({ errorCount, warningCount }: { errorCount: number; warningCount: number }) {
@@ -563,6 +597,131 @@ function GenerationStatusBadge({ status, jobId, assetId, result, line }: { statu
           </span>
         )
       )}
+    </div>
+  );
+}
+
+function buildLineAudioHistoryAccessibleLabel(line: VoiceLine, rowIndex?: number) {
+  const rowLabel = typeof rowIndex === "number" ? `第 ${rowIndex} 行` : "当前行";
+  const context = [
+    safeAccessibleContext(line.speakerLabel),
+    safeAccessibleContext(line.title),
+    safeAccessibleContext(line.moduleName),
+  ].filter((value): value is string => Boolean(value));
+  const lineId = safeAccessibleContext(line.id);
+  const contextLabel = [...context, lineId ? `line ${lineId}` : null]
+    .filter((value): value is string => Boolean(value))
+    .join(" / ");
+
+  return contextLabel ? `查看${rowLabel}旧版本音频历史：${contextLabel}` : `查看${rowLabel}旧版本音频历史`;
+}
+
+function safeAccessibleContext(value?: string | null) {
+  const normalized = value?.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+
+  const redacted = normalized
+    .replace(/(?:file:\/\/\S+|[A-Za-z]:[\\/]\S+|\/(?:Users|home|var|tmp|private|Volumes|Applications|opt|etc|mnt|srv)\/\S+)/gi, "[本地路径已隐藏]")
+    .replace(/\b(?:token|secret|api[_-]?key|password|passwd|bearer)\s*[:=]\s*\S+/gi, "[敏感字段已隐藏]")
+    .replace(/\bsk-[A-Za-z0-9_-]{10,}\b/g, "[敏感字段已隐藏]");
+
+  return redacted.length > 56 ? `${redacted.slice(0, 56)}…` : redacted;
+}
+
+function LineAudioHistoryButton({ taskId, line, rowIndex }: { taskId: string; line: VoiceLine; rowIndex?: number }) {
+  const [open, setOpen] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [history, setHistory] = useState<LineAudioHistoryEntry[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const accessibleLabel = buildLineAudioHistoryAccessibleLabel(line, rowIndex);
+
+  useEffect(() => {
+    setOpen(false);
+    setPhase("idle");
+    setHistory([]);
+    setError(null);
+  }, [taskId, line.id]);
+
+  const loadHistory = async () => {
+    if (!taskId || !line.id) return;
+    setPhase("loading");
+    setError(null);
+    try {
+      const response = await taskApi.getLineAudioHistory(taskId, line.id);
+      setHistory(response.history);
+      setPhase("success");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "音频历史加载失败");
+      setPhase("error");
+    }
+  };
+
+  const toggle = () => {
+    const nextOpen = !open;
+    setOpen(nextOpen);
+    if (nextOpen && phase === "idle") void loadHistory();
+  };
+
+  return (
+    <div className="relative w-fit">
+      <button
+        type="button"
+        className="inline-flex h-6 w-fit items-center gap-1 rounded border border-border bg-bg-base px-2 text-[10px] text-text-secondary hover:bg-bg-hover"
+        onClick={toggle}
+        title={accessibleLabel}
+        aria-label={accessibleLabel}
+        aria-expanded={open}
+      >
+        <History size={11} />
+        历史
+      </button>
+      {open && (
+        <div className="absolute right-0 top-7 z-30 w-[min(420px,calc(100vw-2rem))] rounded-md border border-border bg-bg-elevated p-3 text-text-primary shadow-shadow-lg" role="dialog" aria-label={`${accessibleLabel}弹层`}>
+          <div className="mb-2 flex items-start justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold">旧版本音频历史</div>
+              <div className="mt-0.5 max-w-[320px] truncate font-mono text-[9px] text-text-tertiary" title={line.id}>line {line.id}</div>
+            </div>
+            <button type="button" className="rounded border border-border px-1.5 py-0.5 text-[10px] text-text-secondary hover:bg-bg-hover" onClick={() => setOpen(false)}>关闭</button>
+          </div>
+          {phase === "loading" && <div className="flex items-center gap-2 rounded border border-border-subtle bg-bg-sunken px-2 py-3 text-[10px] text-text-secondary"><Loader2 size={12} className="animate-spin" /> 正在加载音频历史...</div>}
+          {phase === "error" && (
+            <div className="rounded border border-error/20 bg-error-muted/25 px-2 py-2 text-[10px] text-error">
+              <div className="flex items-start gap-1"><AlertCircle size={12} className="mt-0.5 shrink-0" />{error ?? "音频历史加载失败"}</div>
+              <button type="button" className="mt-2 rounded border border-error/30 px-2 py-1 hover:bg-error-muted" onClick={() => void loadHistory()}>重试</button>
+            </div>
+          )}
+          {phase === "success" && history.length === 0 && <div className="rounded border border-border-subtle bg-bg-sunken px-2 py-3 text-[10px] text-text-tertiary">暂无历史音频。当前行尚未在任何生产列表版本中生成可用音频。</div>}
+          {phase === "success" && history.length > 0 && (
+            <div className="max-h-80 space-y-2 overflow-auto pr-1">
+              {history.map((entry) => <LineAudioHistoryItem key={`${entry.version}-${entry.relatedAssetId ?? entry.relatedJobId ?? entry.createdAt}`} entry={entry} />)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LineAudioHistoryItem({ entry }: { entry: LineAudioHistoryEntry }) {
+  const audioAccess: ResolvedAudioAccess = {
+    hasPlayableAsset: Boolean(entry.audioUrl),
+    audioUrl: entry.audioUrl,
+    downloadUrl: entry.downloadUrl,
+    jobId: entry.relatedJobId,
+    assetId: entry.relatedAssetId,
+    tooltip: [`v${entry.version}`, entry.voice ? formatVoiceOptionLabel(entry.voice) : null, entry.relatedAssetId != null ? `asset ${entry.relatedAssetId}` : null, entry.relatedJobId ? `job ${entry.relatedJobId}` : null].filter(Boolean).join(" · "),
+  };
+  return (
+    <div className="rounded border border-border-subtle bg-bg-base p-2">
+      <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[10px]">
+        <span className="rounded border border-accent/25 bg-accent-muted/20 px-1.5 py-0.5 font-mono text-accent">v{entry.version}</span>
+        {entry.isCurrent && <span className="rounded border border-success/25 bg-success-muted/20 px-1.5 py-0.5 text-success">当前</span>}
+        <span className="rounded border border-border px-1.5 py-0.5 font-mono text-text-secondary">{entry.generationStatus}</span>
+        <span className="ml-auto text-text-tertiary">{formatHistoryDate(entry.createdAt)}</span>
+      </div>
+      <div className="mb-2 truncate text-[10px] text-text-secondary" title={entry.voice ? formatVoiceOptionLabel(entry.voice) : "未记录音色"}>音色：{entry.voice ? formatVoiceOptionLabel(entry.voice) : "未记录"}</div>
+      {audioAccess.audioUrl ? <AudioAssetControls audioAccess={audioAccess} /> : <div className="rounded border border-warning/20 bg-warning-muted/20 px-2 py-1 text-[10px] text-warning">音频文件不可用或资产记录缺失，无法试听/下载。</div>}
     </div>
   );
 }
@@ -737,6 +896,20 @@ function buildProfileBindingMap(lines: VoiceLine[]) {
   return map;
 }
 
+function buildDirectorBindingPatch(profileId: string): Partial<VoiceLine> {
+  const normalizedProfileId = profileId || null;
+  return {
+    directorProfileId: normalizedProfileId,
+    promptProfileId: normalizedProfileId,
+  };
+}
+
+function formatHistoryDate(value: string) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return value;
+  return new Date(timestamp).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
 function ProductionListSkeleton() {
   return <section className="h-full min-h-0 min-w-0 overflow-hidden border border-border-subtle bg-bg-surface p-4"><div className="h-9 w-56 bg-bg-sunken animate-pulse border border-border-subtle" /><div className="mt-4 space-y-2 overflow-hidden">{Array.from({ length: 10 }).map((_, index) => <div key={index} className="h-12 bg-bg-sunken/80 border border-border-subtle animate-pulse" />)}</div></section>;
 }
@@ -750,7 +923,7 @@ function Metric({ label, value, tone }: { label: string; value: number; tone?: "
 }
 
 function LockIcon() { return <Lock size={12} className="text-accent" aria-label="Agent 正在修改此行" />; }
-function ShortInput({ value, onChange, disabled, placeholder }: { value: string; onChange: (value: string) => void; disabled?: boolean; placeholder?: string }) { return <input className="w-full h-8 bg-bg-base border border-border rounded px-2 text-xs outline-none focus:border-border-focus" value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled} placeholder={placeholder} />; }
+function ShortInput({ value, fieldLabel, onChange, disabled, placeholder }: { value: string; fieldLabel: string; onChange: (value: string) => void; disabled?: boolean; placeholder?: string }) { const title = value.trim() || placeholder || fieldLabel; return <input className="w-full h-8 bg-bg-base border border-border rounded px-2 text-xs outline-none focus:border-border-focus" value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled} placeholder={placeholder} title={title} aria-label={fieldLabel} />; }
 function Th({ children, className = "" }: { children: React.ReactNode; className?: string }) { return <th className={`px-3 py-2 text-left font-semibold border-r border-border-subtle last:border-r-0 ${className}`}>{children}</th>; }
 function Td({ children, className = "" }: { children: React.ReactNode; className?: string }) { return <td className={`px-3 py-2 align-top border-r border-border-subtle last:border-r-0 ${className}`}>{children}</td>; }
 function Field({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) { return <label className={`flex flex-col gap-1.5 text-xs text-text-tertiary ${className}`}><span>{label}</span>{children}</label>; }

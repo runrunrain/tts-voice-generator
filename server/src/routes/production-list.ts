@@ -27,6 +27,7 @@ import {
   voiceLine,
   operationAuditLog,
 } from "../db/schema-extended.js";
+import { audioAsset } from "../db/schema.js";
 import {
   ProductionListPutSchema,
   ProductionListPatchSchema,
@@ -58,9 +59,11 @@ import {
 import { applyPatch } from "./production-list-modules/patch.js";
 import { buildQualityReportMetrics } from "./production-list-modules/quality-report.js";
 import {
+  buildArtifactLineIndexes,
   getCurrentVersion,
   loadProductionList,
   loadVersionLines,
+  resolveArtifactLineForDbLine,
 } from "./production-list-modules/repository.js";
 
 const app = new Hono();
@@ -136,6 +139,35 @@ function buildGenerationSnapshot(input: {
     assembledPromptHash: sha256Hex(assembledPrompt.prompt),
     directorSnapshot: assembledPrompt.normalized,
   };
+}
+
+function parseHistoryLimit(rawLimit: string | undefined): number {
+  const parsed = rawLimit ? parseInt(rawLimit, 10) : 50;
+  if (!Number.isFinite(parsed) || parsed <= 0) return 50;
+  return Math.min(parsed, 100);
+}
+
+function normalizeNullableString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function normalizeNullableNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
+}
+
+function findAudioAsset(assetId: number | null, jobId: string | null) {
+  const db = getDb();
+  if (assetId !== null) {
+    return db.select().from(audioAsset).where(eq(audioAsset.id, assetId)).get() ?? null;
+  }
+  if (jobId !== null) {
+    return db.select().from(audioAsset)
+      .where(eq(audioAsset.jobId, jobId))
+      .orderBy(desc(audioAsset.createdAt), desc(audioAsset.id))
+      .limit(1)
+      .get() ?? null;
+  }
+  return null;
 }
 
 function prepareGenerationForLine(input: {
@@ -391,32 +423,30 @@ app.patch("/api/tasks/:taskId/production-list", async (c) => {
     .all();
 
   const currentArtifact = readArtifact<{ lines?: Array<Record<string, unknown>>; speakers?: unknown[] }>(taskId, productionListArtifactName());
-  const artifactLinesById = new Map<string, Record<string, unknown>>();
-  if (Array.isArray(currentArtifact?.lines)) {
-    for (const line of currentArtifact.lines) {
-      if (line && typeof line.id === "string") artifactLinesById.set(line.id, line);
-    }
-  }
-  const mergedCurrentLines = currentLines.map((line) => ({
-    ...artifactLinesById.get(logicalLineId(line)),
-    id: logicalLineId(line),
-    order: line.order,
-    speaker: line.speaker,
-    text: line.text,
-    voice: line.voice,
-    style: line.style,
-    notes: line.notes,
-    status: line.status,
-    directorProfileId: line.directorProfileId ?? (artifactLinesById.get(logicalLineId(line))?.directorProfileId ?? null),
-    directorOverrideJson: line.directorOverrideJson ?? (artifactLinesById.get(logicalLineId(line))?.directorOverrideJson ?? null),
-    generationStatus: line.generationStatus ?? (artifactLinesById.get(logicalLineId(line))?.generationStatus ?? "draft"),
-    relatedJobId: line.relatedJobId ?? (artifactLinesById.get(logicalLineId(line))?.relatedJobId ?? null),
-    relatedAssetId: line.relatedAssetId ?? (artifactLinesById.get(logicalLineId(line))?.relatedAssetId ?? null),
-    lastGenerationSignature: line.lastGenerationSignature ?? (artifactLinesById.get(logicalLineId(line))?.lastGenerationSignature ?? null),
-    lastGenerationSnapshotJson: line.lastGenerationSnapshotJson ?? (artifactLinesById.get(logicalLineId(line))?.lastGenerationSnapshotJson ?? null),
-    generationErrorCode: line.generationErrorCode ?? (artifactLinesById.get(logicalLineId(line))?.generationErrorCode ?? null),
-    generationErrorMessage: line.generationErrorMessage ?? (artifactLinesById.get(logicalLineId(line))?.generationErrorMessage ?? null),
-  }));
+  const artifactLineIndexes = buildArtifactLineIndexes(currentArtifact?.lines);
+  const mergedCurrentLines = currentLines.map((line) => {
+    const artifactLine = resolveArtifactLineForDbLine(line, artifactLineIndexes, currentLines.length) ?? {};
+    return {
+      ...artifactLine,
+      id: logicalLineId(line),
+      order: line.order,
+      speaker: line.speaker,
+      text: line.text,
+      voice: line.voice,
+      style: line.style,
+      notes: line.notes,
+      status: line.status,
+      directorProfileId: line.directorProfileId ?? (artifactLine.directorProfileId ?? null),
+      directorOverrideJson: line.directorOverrideJson ?? (artifactLine.directorOverrideJson ?? null),
+      generationStatus: line.generationStatus ?? (artifactLine.generationStatus ?? "draft"),
+      relatedJobId: line.relatedJobId ?? (artifactLine.relatedJobId ?? null),
+      relatedAssetId: line.relatedAssetId ?? (artifactLine.relatedAssetId ?? null),
+      lastGenerationSignature: line.lastGenerationSignature ?? (artifactLine.lastGenerationSignature ?? null),
+      lastGenerationSnapshotJson: line.lastGenerationSnapshotJson ?? (artifactLine.lastGenerationSnapshotJson ?? null),
+      generationErrorCode: line.generationErrorCode ?? (artifactLine.generationErrorCode ?? null),
+      generationErrorMessage: line.generationErrorMessage ?? (artifactLine.generationErrorMessage ?? null),
+    };
+  });
 
   // Apply domain-level patch
   let newLines: any[];
@@ -991,6 +1021,70 @@ app.post("/api/tasks/:taskId/production-list/generate", async (c) => {
       skippedCount: results.filter((r) => r.status === "skipped").length,
       results,
     } satisfies GenerateFromListResponse,
+  });
+});
+
+// ─── GET /api/tasks/:taskId/production-list/lines/:lineId/audio-history ──────
+
+app.get("/api/tasks/:taskId/production-list/lines/:lineId/audio-history", (c) => {
+  const requestId = uuidv4();
+  const taskId = c.req.param("taskId");
+  const lineId = c.req.param("lineId");
+  const limit = parseHistoryLimit(c.req.query("limit"));
+  const db = getDb();
+
+  if (!lineId || lineId.trim().length === 0) {
+    return apiError(c, requestId, 400, "VALIDATION_ERROR", "Line id is required.", "validation");
+  }
+
+  const task = db.select().from(voiceTask).where(eq(voiceTask.id, taskId)).get();
+  if (!task) {
+    return apiError(c, requestId, 404, "TASK_NOT_FOUND", `Task "${taskId}" not found.`, "validation");
+  }
+
+  const currentVersion = getCurrentVersion(taskId);
+  const versions = db.select().from(productionListVersion)
+    .where(eq(productionListVersion.taskId, taskId))
+    .orderBy(desc(productionListVersion.version))
+    .limit(limit)
+    .all();
+
+  const history = [];
+  for (const version of versions) {
+    const versionLines = loadVersionLines(taskId, version);
+    const line = versionLines.find((candidate) => candidate.id === lineId);
+    if (!line) continue;
+
+    const relatedJobId = normalizeNullableString(line.relatedJobId);
+    const rawAssetId = normalizeNullableNumber(line.relatedAssetId);
+    if (relatedJobId === null && rawAssetId === null) continue;
+
+    const asset = findAudioAsset(rawAssetId, relatedJobId);
+    const relatedAssetId = rawAssetId ?? asset?.id ?? null;
+    const hasAvailableAsset = asset !== null && relatedAssetId !== null;
+
+    history.push({
+      version: version.version,
+      versionId: version.id,
+      lineId,
+      sortOrder: typeof line.order === "number" ? line.order : null,
+      generationStatus: typeof line.generationStatus === "string" ? line.generationStatus : "draft",
+      voice: normalizeNullableString(line.voice),
+      relatedJobId,
+      relatedAssetId,
+      audioUrl: hasAvailableAsset ? `/api/audio/${relatedAssetId}` : null,
+      downloadUrl: hasAvailableAsset ? `/api/audio/${relatedAssetId}?download=1` : null,
+      createdAt: version.createdAt.toISOString(),
+      isCurrent: version.version === currentVersion,
+    });
+  }
+
+  return c.json({
+    ok: true,
+    requestId,
+    taskId,
+    lineId,
+    history,
   });
 });
 

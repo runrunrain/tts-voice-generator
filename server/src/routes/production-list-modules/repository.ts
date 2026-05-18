@@ -13,6 +13,56 @@ function logicalLineId(line: { id: string; lineId?: string | null }): string {
   return line.lineId ?? line.id;
 }
 
+type ArtifactLineIndexes = {
+  byId: Map<string, Record<string, unknown>>;
+  byOrder: Map<number, Array<Record<string, unknown>>>;
+  lineCount: number;
+};
+
+function artifactLineText(line: Record<string, unknown>): string | null {
+  if (typeof line.text === "string") return line.text;
+  if (typeof line.transcript === "string") return line.transcript;
+  return null;
+}
+
+export function buildArtifactLineIndexes(lines: unknown): ArtifactLineIndexes {
+  const byId = new Map<string, Record<string, unknown>>();
+  const byOrder = new Map<number, Array<Record<string, unknown>>>();
+  if (!Array.isArray(lines)) return { byId, byOrder, lineCount: 0 };
+
+  for (const line of lines) {
+    if (!line || typeof line !== "object" || Array.isArray(line)) continue;
+    const record = line as Record<string, unknown>;
+    if (typeof record.id === "string") byId.set(record.id, record);
+    if (typeof record.order === "number") {
+      const bucket = byOrder.get(record.order) ?? [];
+      bucket.push(record);
+      byOrder.set(record.order, bucket);
+    }
+  }
+  return { byId, byOrder, lineCount: lines.length };
+}
+
+export function resolveArtifactLineForDbLine(
+  dbLine: { id: string; lineId?: string | null; order: number; text?: string | null },
+  indexes: ArtifactLineIndexes,
+  dbLineCount: number,
+): Record<string, unknown> | undefined {
+  const byId = indexes.byId.get(logicalLineId(dbLine));
+  if (byId) return byId;
+
+  const candidates = indexes.byOrder.get(dbLine.order) ?? [];
+  if (candidates.length === 0) return undefined;
+
+  if (typeof dbLine.text === "string") {
+    const byOrderAndText = candidates.find((candidate) => artifactLineText(candidate) === dbLine.text);
+    if (byOrderAndText) return byOrderAndText;
+  }
+
+  if (indexes.lineCount === dbLineCount && candidates.length === 1) return candidates[0];
+  return undefined;
+}
+
 export function getCurrentVersion(taskId: string): number {
   const db = getDb();
   const latest = db.select().from(productionListVersion)
@@ -43,15 +93,10 @@ export function loadProductionList(taskId: string, versionId: string) {
     directorProfiles?: Array<Record<string, unknown>>;
   }>(taskId, productionListArtifactName());
 
-  const artifactLinesById = new Map<string, Record<string, unknown>>();
-  if (Array.isArray(artifact?.lines)) {
-    for (const line of artifact.lines) {
-      if (line && typeof line.id === "string") artifactLinesById.set(line.id, line);
-    }
-  }
+  const artifactLineIndexes = buildArtifactLineIndexes(artifact?.lines);
 
   const promptProfiles = resolvePromptProfiles(lines, artifact);
-  const promptStatus = computePromptStructureStatus(lines, artifactLinesById, promptProfiles);
+  const promptStatus = computePromptStructureStatus(lines, artifactLineIndexes, promptProfiles);
 
   return {
     schemaVersion: artifact?.schemaVersion ?? (promptProfiles.length > 0 ? "tts.production-list.v2" : "1.0"),
@@ -60,7 +105,7 @@ export function loadProductionList(taskId: string, versionId: string) {
     versionId: version.id,
     lines: lines.map((l) => {
       const lineId = logicalLineId(l);
-      const artifactLine = artifactLinesById.get(lineId) ?? {};
+      const artifactLine = resolveArtifactLineForDbLine(l, artifactLineIndexes, lines.length) ?? {};
       return {
         id: lineId,
         order: l.order,
@@ -138,8 +183,8 @@ function resolvePromptProfiles(
 }
 
 function computePromptStructureStatus(
-  lines: Array<{ id: string; directorProfileId: string | null }>,
-  artifactLinesById: Map<string, Record<string, unknown>>,
+  lines: Array<{ id: string; lineId?: string | null; order: number; text: string; directorProfileId: string | null }>,
+  artifactLineIndexes: ArtifactLineIndexes,
   profiles: Array<Record<string, unknown>>,
 ): "complete" | "missing" | "incomplete" {
   if (lines.length === 0) return "missing";
@@ -147,7 +192,7 @@ function computePromptStructureStatus(
   let missing = 0;
   let incomplete = 0;
   for (const line of lines) {
-    const artifactLine = artifactLinesById.get(logicalLineId(line)) ?? {};
+    const artifactLine = resolveArtifactLineForDbLine(line, artifactLineIndexes, lines.length) ?? {};
     const profileId = typeof artifactLine.promptProfileId === "string" ? artifactLine.promptProfileId : line.directorProfileId;
     if (!profileId) {
       missing++;
@@ -180,14 +225,9 @@ export function loadVersionLines(taskId: string, versionRecord: { id: string; ve
 
     if (dbLines.length > 0) {
       const artifact = readArtifact<{ lines?: Array<Record<string, unknown>> }>(taskId, productionListArtifactName());
-      const artifactLinesById = new Map<string, Record<string, unknown>>();
-      if (Array.isArray(artifact?.lines)) {
-        for (const line of artifact.lines) {
-          if (line && typeof line.id === "string") artifactLinesById.set(line.id, line);
-        }
-      }
+      const artifactLineIndexes = buildArtifactLineIndexes(artifact?.lines);
       return dbLines.map((l) => ({
-        ...(artifactLinesById.get(logicalLineId(l)) ?? {}),
+        ...(resolveArtifactLineForDbLine(l, artifactLineIndexes, dbLines.length) ?? {}),
         id: logicalLineId(l),
         order: l.order,
         speaker: l.speaker,

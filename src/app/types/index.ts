@@ -145,12 +145,20 @@ export interface DirectorStyleFields {
 
 export type HistoryStatus = "success" | "error" | "pending";
 export type HistorySource = "user" | "agent" | "cli";
+export type HistoryPreviewSource = "voice_line" | "director_snapshot" | "job_input" | "empty";
+
+export interface TaskHistoryStatusSummary {
+  success: number;
+  error: number;
+  pending: number;
+}
 
 export interface HistoryRecord {
   id: string;
   text: string;
   voice: string;
   format: AudioFormat;
+  createdAt?: string | null;
   date: string;
   source: HistorySource;
   duration: string;
@@ -172,6 +180,42 @@ export interface HistoryRecord {
   // Agent context fields (present when source === "agent")
   agentConversationId?: string | null;
   agentActionLogId?: number | null;
+  // Task grouping fields from enhanced history API
+  taskId?: string | null;
+  taskTitle?: string | null;
+  taskName?: string | null;
+  taskCreatedAt?: string | null;
+  taskUpdatedAt?: string | null;
+  taskGroupId?: string | null;
+  taskGroupKind?: "task" | "orphan" | string | null;
+  taskDisplayTitle?: string | null;
+  // Voice line / director preview fields
+  voiceLineId?: string | null;
+  voiceLineOrder?: number | null;
+  lineSpeaker?: string | null;
+  lineText?: string | null;
+  lineVoice?: string | null;
+  speakerLabel?: string | null;
+  speakerName?: string | null;
+  speakerRole?: string | null;
+  speakerVoice?: string | null;
+  transcript?: string | null;
+  previewSpeaker: string;
+  previewText: string;
+  previewSource: HistoryPreviewSource;
+}
+
+export interface TaskHistoryGroup {
+  groupId: string;
+  groupKind: "task" | "orphan";
+  taskId: string | null;
+  taskTitle: string;
+  taskCreatedAt: string | null;
+  taskUpdatedAt: string | null;
+  latestRecordAt: string | null;
+  audioCount: number;
+  statusSummary: TaskHistoryStatusSummary;
+  items: HistoryRecord[];
 }
 
 export interface HistoryFilter {
@@ -496,6 +540,27 @@ export interface ProductionListValidationReport {
 // ─── Generation Bridge ────────────────────────────────────────────────────────
 
 export type LineGenerationStatus = "draft" | "ready" | "pending" | "running" | "succeeded" | "failed" | "needs_revision";
+
+export interface LineAudioHistoryEntry {
+  version: number;
+  versionId: string;
+  lineId: string;
+  sortOrder: number | null;
+  generationStatus: LineGenerationStatus | string;
+  voice: string | null;
+  relatedJobId: string | null;
+  relatedAssetId: number | null;
+  audioUrl: string | null;
+  downloadUrl: string | null;
+  createdAt: string;
+  isCurrent: boolean;
+}
+
+export interface LineAudioHistoryResponse {
+  taskId: string;
+  lineId: string;
+  history: LineAudioHistoryEntry[];
+}
 
 export interface LineGenerationResult {
   lineId: string;
