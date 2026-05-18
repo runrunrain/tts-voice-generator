@@ -478,7 +478,7 @@ app.patch("/api/tasks/:taskId/production-list", async (c) => {
     .orderBy(voiceLine.order)
     .all();
 
-  const currentArtifact = readArtifact<{ lines?: Array<Record<string, unknown>>; speakers?: unknown[] }>(taskId, productionListArtifactName());
+  const currentArtifact = readArtifact<{ lines?: Array<Record<string, unknown>>; speakers?: unknown[]; promptProfiles?: Array<Record<string, unknown>>; directorProfiles?: Array<Record<string, unknown>> }>(taskId, productionListArtifactName());
   const artifactLineIndexes = buildArtifactLineIndexes(currentArtifact?.lines);
   const mergedCurrentLines = currentLines.map((line) => {
     const artifactLine = resolveArtifactLineForDbLine(line, artifactLineIndexes, currentLines.length) ?? {};
@@ -508,7 +508,10 @@ app.patch("/api/tasks/:taskId/production-list", async (c) => {
   let newLines: any[];
   let newSpeakers: unknown[] | undefined;
   try {
-    const patchResult = applyPatch(op, payload, mergedCurrentLines, currentArtifact?.speakers ?? []);
+    const currentProfiles = Array.isArray(currentArtifact?.promptProfiles)
+      ? currentArtifact.promptProfiles
+      : (Array.isArray(currentArtifact?.directorProfiles) ? currentArtifact.directorProfiles : []);
+    const patchResult = applyPatch(op, payload, mergedCurrentLines, currentArtifact?.speakers ?? [], currentProfiles);
     newLines = patchResult.lines;
     newSpeakers = patchResult.speakers;
   } catch (patchErr) {

@@ -159,9 +159,13 @@ export function ProductionListEditorView({ taskId, directorProfiles = [], select
       setBulkActionNotice({ tone: "warning", text: "请先选择导演配置。" });
       return;
     }
-    updateLines(selectedIds, { directorProfileId: bulkProfileId, promptProfileId: bulkProfileId });
-    const profileName = directorProfiles.find((profile) => profile.id === bulkProfileId)?.name ?? bulkProfileId;
-    setBulkActionNotice({ tone: "success", text: `已将 ${selectedIds.length} 行绑定到导演配置“${profileName}”，保存后写入服务端。` });
+    const profile = directorProfiles.find((item) => item.id === bulkProfileId);
+    const patch = buildDirectorBindingPatch(bulkProfileId, directorProfiles);
+    updateLines(selectedIds, patch);
+    const profileName = profile?.name ?? bulkProfileId;
+    const syncedVoice = readPrimarySpeakerVoice(profile);
+    const voiceHint = syncedVoice ? `，并同步音色为“${formatVoiceOptionLabel(syncedVoice)}”` : "";
+    setBulkActionNotice({ tone: "success", text: `已将 ${selectedIds.length} 行绑定到导演配置“${profileName}”${voiceHint}，保存后写入服务端。` });
   };
 
   const bindVoiceToSelected = () => {
@@ -498,7 +502,7 @@ function LineDetailPanel({ taskId, line, rowIndex, voices, directorProfiles, pro
 
         <section className="flex flex-col gap-3">
           <InfoCard title="导演绑定">
-            <select className={CONTROL_CLASS} value={currentProfileId} onChange={(event) => onChange(buildDirectorBindingPatch(event.target.value))} disabled={editDisabled} title={currentProfile?.name ?? "未绑定导演配置"}>
+            <select className={CONTROL_CLASS} value={currentProfileId} onChange={(event) => onChange(buildDirectorBindingPatch(event.target.value, directorProfiles))} disabled={editDisabled} title={currentProfile?.name ?? "未绑定导演配置"}>
               <option value="">未绑定导演配置</option>
               {directorProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
             </select>
@@ -1006,12 +1010,21 @@ function buildProfileBindingMap(lines: VoiceLine[]) {
   return map;
 }
 
-function buildDirectorBindingPatch(profileId: string): Partial<VoiceLine> {
+function readPrimarySpeakerVoice(profile?: DirectorProfile): string | undefined {
+  const voice = profile?.speakers?.[0]?.voice?.trim();
+  return voice || undefined;
+}
+
+function buildDirectorBindingPatch(profileId: string, directorProfiles: DirectorProfile[] = []): Partial<VoiceLine> {
   const normalizedProfileId = profileId || null;
-  return {
+  const patch: Partial<VoiceLine> = {
     directorProfileId: normalizedProfileId,
     promptProfileId: normalizedProfileId,
   };
+  if (!normalizedProfileId) return patch;
+  const voice = readPrimarySpeakerVoice(directorProfiles.find((profile) => profile.id === normalizedProfileId));
+  if (voice) patch.voice = voice;
+  return patch;
 }
 
 function formatHistoryDate(value: string) {

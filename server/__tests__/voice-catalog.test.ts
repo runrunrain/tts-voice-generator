@@ -20,6 +20,7 @@ describe("Gemini voice catalog perceived gender metadata", () => {
       "Zephyr",
       "Kore",
       "Leda",
+      "Orus",
       "Aoede",
       "Callirrhoe",
       "Autonoe",
@@ -29,14 +30,12 @@ describe("Gemini voice catalog perceived gender metadata", () => {
       "Achernar",
       "Gacrux",
       "Pulcherrima",
-      "Vindemiatrix",
       "Sulafat",
     ]);
     expect(getVoicesByPerceivedGender("male")).toEqual([
       "Puck",
       "Charon",
       "Fenrir",
-      "Orus",
       "Enceladus",
       "Iapetus",
       "Umbriel",
@@ -47,6 +46,7 @@ describe("Gemini voice catalog perceived gender metadata", () => {
       "Schedar",
       "Achird",
       "Zubenelgenubi",
+      "Vindemiatrix",
       "Sadachbia",
       "Sadaltager",
     ]);
@@ -58,6 +58,8 @@ describe("Gemini voice catalog perceived gender metadata", () => {
     const guide = formatVoiceSelectionGuideForPrompt();
     expect(guide).toContain("Kore（珂瑞）：Google/Provider表性别=女");
     expect(guide).toContain("Charon（卡戎）：Google/Provider表性别=男");
+    expect(guide).toContain("Orus（奥鲁斯）：Google/Provider表性别=女");
+    expect(guide).toContain("Vindemiatrix（太微左垣四）：Google/Provider表性别=男");
     expect(guide).toContain("Zephyr（和风）：Google/Provider表性别=女");
     expect(guide).toContain("Gacrux（十字架一）：Google/Provider表性别=女");
     expect(guide).not.toContain("项目感知性别");
@@ -66,8 +68,8 @@ describe("Gemini voice catalog perceived gender metadata", () => {
     const rules = formatVoiceGenderSelectionRulesForPrompt();
     expect(rules).toContain("Google/Provider voice tables classify every prebuilt Gemini TTS voice as either Female or Male");
     expect(rules).toContain("there is no neutral voice category");
-    expect(rules).toContain("female voice: Zephyr, Kore, Leda, Aoede, Callirrhoe, Autonoe, Despina, Erinome, Laomedeia, Achernar, Gacrux, Pulcherrima, Vindemiatrix, Sulafat");
-    expect(rules).toContain("male voice: Puck, Charon, Fenrir, Orus, Enceladus, Iapetus, Umbriel, Algieba, Algenib, Rasalgethi, Alnilam, Schedar, Achird, Zubenelgenubi, Sadachbia, Sadaltager");
+    expect(rules).toContain("female voice: Zephyr, Kore, Leda, Orus, Aoede, Callirrhoe, Autonoe, Despina, Erinome, Laomedeia, Achernar, Gacrux, Pulcherrima, Sulafat");
+    expect(rules).toContain("male voice: Puck, Charon, Fenrir, Enceladus, Iapetus, Umbriel, Algieba, Algenib, Rasalgethi, Alnilam, Schedar, Achird, Zubenelgenubi, Vindemiatrix, Sadachbia, Sadaltager");
     expect(rules).toContain("When gender is unknown, infer the intended speaker identity");
     expect(rules).toContain("Do not use or mention a neutral category");
     expect(rules).not.toContain("project-curated perceived gender");

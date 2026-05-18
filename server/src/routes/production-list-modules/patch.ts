@@ -1,4 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
+import { eq } from "drizzle-orm";
+import { getDb } from "../../db/index.js";
+import { directorProfile as dpTable } from "../../db/schema-extended.js";
 import { SpeakerSchema } from "../../domain/validators.js";
 
 export interface PatchResult {
@@ -6,11 +9,69 @@ export interface PatchResult {
   speakers?: unknown[];
 }
 
+function readNonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function parseJsonObject(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function readPrimarySpeakerVoice(value: unknown): string | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const primarySpeaker = value[0];
+  if (!primarySpeaker || typeof primarySpeaker !== "object" || Array.isArray(primarySpeaker)) return undefined;
+  return readNonEmptyString((primarySpeaker as Record<string, unknown>).voice);
+}
+
+function readProfileSpeakerVoice(profile: unknown): string | undefined {
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) return undefined;
+  const rawProfile = profile as Record<string, unknown>;
+
+  const directVoice = readPrimarySpeakerVoice(rawProfile.speakers);
+  if (directVoice) return directVoice;
+
+  const config = parseJsonObject(rawProfile.config);
+  return readPrimarySpeakerVoice(config?.speakers);
+}
+
+function resolveDirectorProfileSpeakerVoice(
+  directorProfileId: string | null | undefined,
+  currentProfiles: Array<Record<string, unknown>>,
+): string | undefined {
+  const profileId = readNonEmptyString(directorProfileId);
+  if (!profileId) return undefined;
+
+  const artifactProfile = currentProfiles.find((profile) => readNonEmptyString(profile.id) === profileId);
+  const artifactVoice = readProfileSpeakerVoice(artifactProfile);
+  if (artifactVoice) return artifactVoice;
+
+  try {
+    const db = getDb();
+    const profile = db.select().from(dpTable).where(eq(dpTable.id, profileId)).get();
+    return readProfileSpeakerVoice(profile);
+  } catch {
+    return undefined;
+  }
+}
+
 export function applyPatch(
   op: string,
   payload: Record<string, unknown>,
   currentLines: Array<Record<string, unknown>>,
   currentSpeakers: unknown[],
+  currentProfiles: Array<Record<string, unknown>> = [],
 ): PatchResult {
   const lines = [...currentLines];
   let speakers: unknown[] | undefined;
@@ -105,10 +166,14 @@ export function applyPatch(
       const targetIds = lineIds && lineIds.length > 0
         ? new Set(lineIds)
         : new Set(lines.map((l) => l.id));
+      const resolvedVoice = resolveDirectorProfileSpeakerVoice(directorProfileId, currentProfiles);
       for (const line of lines) {
         if (targetIds.has(line.id)) {
           line.directorProfileId = directorProfileId ?? null;
           line.promptProfileId = directorProfileId ?? null;
+          if (resolvedVoice) {
+            line.voice = resolvedVoice;
+          }
         }
       }
       return { lines };
