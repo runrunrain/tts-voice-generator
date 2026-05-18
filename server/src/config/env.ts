@@ -18,6 +18,9 @@ interface EnvConfig {
   dbPath: string;
   dataDir: string;
   nodeEnv: string;
+  enableLoudnessNormalization: boolean;
+  loudnessTargetLufs: number;
+  ffmpegPath: string | null;
 }
 
 function loadEnv(): EnvConfig {
@@ -29,7 +32,16 @@ function loadEnv(): EnvConfig {
     dbPath: process.env.DB_PATH || "./data/db/tts-generator.db",
     dataDir: process.env.DATA_DIR || "./data",
     nodeEnv: process.env.NODE_ENV || "development",
+    enableLoudnessNormalization: process.env.ENABLE_LOUDNESS_NORMALIZATION === "true",
+    loudnessTargetLufs: parseLoudnessTarget(process.env.LOUDNESS_TARGET_LUFS),
+    ffmpegPath: process.env.FFMPEG_PATH?.trim() || null,
   };
+}
+
+function parseLoudnessTarget(value: string | undefined): number {
+  if (!value) return -16;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= -30 && parsed <= -6 ? parsed : -16;
 }
 
 export const env = loadEnv();

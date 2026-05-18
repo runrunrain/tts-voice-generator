@@ -127,6 +127,14 @@ function validGenerateBody(overrides: Record<string, unknown> = {}) {
   });
 }
 
+function pcm16Bytes(sampleCount: number, amplitude = 1200): Uint8Array {
+  const buffer = Buffer.alloc(sampleCount * 2);
+  for (let index = 0; index < sampleCount; index++) {
+    buffer.writeInt16LE(index % 2 === 0 ? amplitude : -amplitude, index * 2);
+  }
+  return new Uint8Array(buffer);
+}
+
 // ─── Suite ───────────────────────────────────────────────────────────────────
 
 describe("TTS Generate API", () => {
@@ -288,7 +296,7 @@ describe("TTS Generate API", () => {
 
       // Mock OpenRouter to return PCM audio (Gemini TTS upstream format)
       // The route should wrap it to WAV
-      const fakePcm = new Uint8Array([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
+      const fakePcm = pcm16Bytes(2400);
       mockFetch.mockResolvedValueOnce(
         new Response(fakePcm, {
           status: 200,
@@ -315,6 +323,22 @@ describe("TTS Generate API", () => {
       expect(body.contentType).toBe("audio/wav");
       expect(body.outputFormat).toBe("wav");
       expect(body.upstreamFormat).toBe("pcm");
+      expect(body.duration).toBe("0.1s");
+      expect(body.audioAnalysis).toMatchObject({
+        ok: true,
+        sampleRate: 24000,
+        channels: 1,
+        bitsPerSample: 16,
+      });
+      expect(body.audioAnalysis.rms).toBeGreaterThan(0);
+      expect(body.audioAnalysis.peak).toBeGreaterThan(0);
+      expect(body.audioPostprocess).toEqual({
+        enabled: false,
+        applied: false,
+        reason: "disabled",
+        targetLufs: -16,
+        tool: "ffmpeg-loudnorm",
+      });
       expect(body.charCount).toBe("Hello, this is a test.".length);
 
       // Verify mock was called with the real key
@@ -327,9 +351,20 @@ describe("TTS Generate API", () => {
       const reqBody = JSON.parse((init as RequestInit).body as string);
       expect(reqBody.response_format).toBe("pcm");
       expect(reqBody.voice).toBe("Zephyr");
+      expect(reqBody.generationConfig?.temperature).toBe(0.2);
       expect(reqBody.generationConfig?.speechConfig?.voiceConfig?.prebuiltVoiceConfig?.voiceName).toBe("Zephyr");
       expect(reqBody.generationConfig?.responseModalities).toEqual(["AUDIO"]);
       expect(JSON.stringify(reqBody)).not.toContain("perceivedGender");
+
+      const db = getDb();
+      const [job] = db.select().from(generationJob).all();
+      const storedProviderOptions = JSON.parse(job.providerOptions ?? "{}");
+      expect(storedProviderOptions.generationConfig.temperature).toBe(0.2);
+      const [asset] = db.select().from(audioAsset).all();
+      expect(asset.duration).toBe("0.1s");
+      expect(asset.sampleRate).toBe(24000);
+      expect(asset.channels).toBe(1);
+      expect(asset.bitDepth).toBe(16);
     });
 
     it("passes selected Gemini voice through native speechConfig for male-associated voices", async () => {
@@ -375,6 +410,52 @@ describe("TTS Generate API", () => {
       expect(job.voice).toBe("Charon");
       const storedProviderOptions = JSON.parse(job.providerOptions ?? "{}");
       expect(storedProviderOptions.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName).toBe("Charon");
+    });
+
+    // Regression: temperature=0 is a falsy but legal explicit value.
+    // hasOwnProperty correctly distinguishes "key present with value 0" from
+    // "key absent" (which would fall back to DEFAULT_GEMINI_TTS_TEMPERATURE=0.2).
+    // This test prevents a future refactor from switching to a truthy check.
+    it("preserves explicit generationConfig.temperature = 0 (falsy) and does NOT replace it with default 0.2", async () => {
+      await seedKey(app);
+
+      const fakePcm = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
+      mockFetch.mockResolvedValueOnce(
+        new Response(fakePcm, {
+          status: 200,
+          headers: {
+            "content-type": "audio/pcm",
+            "x-generation-id": "gen-temp-zero-regression",
+          },
+        })
+      );
+
+      const res = await r(app, "/api/tts/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: validGenerateBody({
+          providerOptions: {
+            generationConfig: { temperature: 0 },
+          },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("succeeded");
+
+      // Assert upstream request body preserves temperature=0
+      const [, init] = mockFetch.mock.calls[0];
+      const reqBody = JSON.parse((init as RequestInit).body as string);
+      expect(reqBody.generationConfig.temperature).toBe(0);
+      // Explicitly guard against the regression: must NOT be replaced by 0.2
+      expect(reqBody.generationConfig.temperature).not.toBe(0.2);
+
+      // Assert persisted providerOptions in job record also preserves temperature=0
+      const db = getDb();
+      const [job] = db.select().from(generationJob).all();
+      const storedProviderOptions = JSON.parse(job.providerOptions ?? "{}");
+      expect(storedProviderOptions.generationConfig.temperature).toBe(0);
     });
 
     it("keeps OpenRouter routing options without allowing providerOptions to override core request fields", async () => {
@@ -424,6 +505,82 @@ describe("TTS Generate API", () => {
       expect(reqBody.provider).toEqual({ order: ["Google"], allow_fallbacks: false });
       expect(reqBody.generationConfig.temperature).toBe(0.1);
       expect(reqBody.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName).toBe("Orus");
+    });
+
+    it("keeps generation successful and falls back to estimated metadata when WAV analysis fails", async () => {
+      await seedKey(app);
+
+      const invalidWavBytes = new Uint8Array([0x01, 0x02, 0x03, 0x04]);
+      mockFetch.mockResolvedValueOnce(
+        new Response(invalidWavBytes, {
+          status: 200,
+          headers: {
+            "content-type": "audio/wav",
+            "x-generation-id": "gen-analysis-fallback",
+          },
+        })
+      );
+
+      const input = "Fallback metadata should use estimated duration.";
+      const res = await r(app, "/api/tts/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: validGenerateBody({
+          model: "vendor/non-gemini-model",
+          input,
+          responseFormat: "wav",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("succeeded");
+      expect(body.audioAnalysis).toEqual({ ok: false, code: "INVALID_WAV" });
+      expect(body.duration).toBe(`${Math.max(0.5, input.length * 0.007).toFixed(1)}s`);
+      expect(body.audioPostprocess.reason).toBe("disabled");
+
+      const db = getDb();
+      const [asset] = db.select().from(audioAsset).all();
+      expect(asset.duration).toBe(body.duration);
+      expect(asset.sampleRate).toBeNull();
+      expect(asset.channels).toBeNull();
+      expect(asset.bitDepth).toBeNull();
+    });
+
+    it("skips WAV analysis for raw PCM output and keeps PCM metadata fallback", async () => {
+      await seedKey(app);
+
+      const rawPcm = pcm16Bytes(2400);
+      mockFetch.mockResolvedValueOnce(
+        new Response(rawPcm, {
+          status: 200,
+          headers: {
+            "content-type": "audio/pcm",
+            "x-generation-id": "gen-raw-pcm-fallback",
+          },
+        })
+      );
+
+      const res = await r(app, "/api/tts/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: validGenerateBody({ responseFormat: "pcm" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("succeeded");
+      expect(body.outputFormat).toBe("pcm");
+      expect(body.audioAnalysis).toEqual({ ok: false, code: "UNSUPPORTED_CONTAINER" });
+      expect(body.audioPostprocess.reason).toBe("disabled");
+
+      const db = getDb();
+      const [asset] = db.select().from(audioAsset).all();
+      expect(asset.mimeType).toBe("audio/pcm");
+      expect(asset.sampleRate).toBe(24000);
+      expect(asset.channels).toBe(1);
+      expect(asset.bitDepth).toBe(16);
+      expect(asset.sizeBytes).toBe(rawPcm.length);
     });
   });
 
@@ -651,7 +808,7 @@ describe("TTS Generate API", () => {
     it("history list includes audio asset info for succeeded jobs", async () => {
       await seedKey(app);
 
-      const pcmBytes = new Uint8Array([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
+      const pcmBytes = pcm16Bytes(2400);
       mockFetch.mockResolvedValueOnce(
         new Response(pcmBytes, {
           status: 200,

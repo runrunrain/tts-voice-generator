@@ -877,16 +877,19 @@ describe("Phase 2: Generation Bridge", () => {
       expect(body.ok).toBe(true);
       expect(body.generation.succeededCount).toBe(1);
       expect(testState.lastGenerateRequest).toBeTruthy();
-      expect(testState.lastGenerateRequest.input).toContain("请为以下脚本生成语音：");
-      expect(testState.lastGenerateRequest.input).toContain("# 音频档案");
-      expect(testState.lastGenerateRequest.input).toContain("## 场景");
-      expect(testState.lastGenerateRequest.input).toContain("### 导演备注");
-      expect(testState.lastGenerateRequest.input).toContain("风格：");
-      expect(testState.lastGenerateRequest.input).toContain("节奏：");
-      expect(testState.lastGenerateRequest.input).toContain("### 示例上下文");
-      expect(testState.lastGenerateRequest.input).toContain("#### 台词");
+      expect(testState.lastGenerateRequest.input).toContain("Synthesize speech for the performance defined below.");
+      expect(testState.lastGenerateRequest.input).toContain("Do NOT speak them. Speak ONLY the lines under #### TRANSCRIPT.");
+      expect(testState.lastGenerateRequest.input).toContain("# AUDIO PROFILE");
+      expect(testState.lastGenerateRequest.input).toContain("## SCENE");
+      expect(testState.lastGenerateRequest.input).toContain("### PERFORMANCE");
+      expect(testState.lastGenerateRequest.input).toContain("Style:");
+      expect(testState.lastGenerateRequest.input).toContain("Pace:");
+      expect(testState.lastGenerateRequest.input).toContain("### CONTEXT");
+      expect(testState.lastGenerateRequest.input).toContain("#### TRANSCRIPT");
       expect(testState.lastGenerateRequest.directorSnapshot.transcript).toBeTruthy();
       expect(testState.lastGenerateRequest.input).toContain(testState.lastGenerateRequest.directorSnapshot.transcript);
+      const transcriptSection = testState.lastGenerateRequest.input.split("\n#### TRANSCRIPT\n")[1] ?? "";
+      expect(transcriptSection).toBe(testState.lastGenerateRequest.directorSnapshot.transcript);
     });
   });
 

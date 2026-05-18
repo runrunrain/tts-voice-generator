@@ -15,6 +15,13 @@
  */
 
 import { canonicalizeVoice, isLegacyAlias } from "../utils/voice.js";
+import {
+  buildForbiddenStyleWarningDetails,
+  findForbiddenStyleWordMatches,
+  FORBIDDEN_STYLE_WARNING_FIELD,
+  formatForbiddenStyleWarningMessage,
+  type ForbiddenStyleField,
+} from "../utils/forbidden-style-words.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -54,6 +61,10 @@ export interface PromptWarning {
   code: string;
   message: string;
   field?: string;
+  details?: {
+    matches?: Array<{ field: string; term: string }>;
+    severity?: "info" | "warning";
+  };
 }
 
 export interface PromptAssemblyResult {
@@ -79,6 +90,17 @@ export interface PromptAssemblyResult {
 
 /** Maximum number of speakers allowed in Director mode */
 export const MAX_SPEAKERS = 2;
+
+const PROMPT_DEFAULTS = {
+  audioProfile: "A professional narrator with a clear, warm mid-range voice. Confident and approachable.",
+  scene: "A quiet, well-treated recording studio. The narrator is focused and prepared.",
+  style: "Conversational clarity with warmth. Each word is articulated clearly without sounding stiff.",
+  pacing: "Natural conversational rhythm. Slight pause before key points.",
+  accent: "Standard Mandarin, clearly articulated, professional broadcast quality.",
+  sampleContext: "No additional example context.",
+  audioProfileTitle: "TTS Voice Profile",
+  voiceSummary: "Use the OpenRouter/Gemini voice selected in the request.",
+} as const;
 
 // ─── Assembly Logic ────────────────────────────────────────────────────────────
 
@@ -152,11 +174,31 @@ export function assemblePrompt(input: PromptAssemblyInput): PromptAssemblyResult
 
   const performanceNotes = mergePromptNotes(input.performanceNotes, input.directorNotes);
 
+  const forbiddenMatches = findForbiddenStyleWordMatches([
+    { field: "audioProfile", value: input.audioProfile },
+    { field: "style", value: input.style },
+    { field: "pacing", value: input.pacing },
+    { field: "performanceNotes", value: input.performanceNotes },
+    { field: "directorNotes", value: input.directorNotes },
+    { field: "lineStyle", value: input.lineStyle },
+    ...input.speakers.map((speaker, index) => ({
+      field: `speakers[${index}].style` as ForbiddenStyleField,
+      value: speaker.style,
+    })),
+  ]);
+  if (forbiddenMatches.length > 0) {
+    warnings.push({
+      code: "FORBIDDEN_STYLE_WORDS",
+      message: formatForbiddenStyleWarningMessage(forbiddenMatches),
+      field: FORBIDDEN_STYLE_WARNING_FIELD,
+      details: buildForbiddenStyleWarningDetails(forbiddenMatches),
+    });
+  }
+
   // 3. Build the assembled prompt
   const prompt = buildPromptText({
     audioProfile: input.audioProfile,
     scene: input.scene,
-    directorNotes: input.directorNotes,
     sampleContext: input.sampleContext,
     style: input.style ?? "",
     pacing: input.pacing ?? "",
@@ -201,7 +243,6 @@ export function assemblePrompt(input: PromptAssemblyInput): PromptAssemblyResult
 function buildPromptText(params: {
   audioProfile: string;
   scene: string;
-  directorNotes: string;
   sampleContext: string;
   style: string;
   pacing: string;
@@ -213,43 +254,55 @@ function buildPromptText(params: {
   speakers: NormalizedSpeaker[];
 }): string {
   const primarySpeaker = params.speakers[0];
-  const audioProfileTitle = primarySpeaker?.label || "TTS 声音配置";
+  const audioProfileTitle = primarySpeaker?.label || PROMPT_DEFAULTS.audioProfileTitle;
   const voiceSummary = params.speakers.length > 0
     ? params.speakers.map((speaker) => {
       const namePart = speaker.name ? ` (${speaker.name})` : "";
-      const stylePart = speaker.style ? `，风格：${speaker.style}` : "";
+      const stylePart = speaker.style ? `, style: ${speaker.style}` : "";
       return `${speaker.label}${namePart}: ${speaker.voice}${stylePart}`;
     }).join("; ")
-    : "使用请求中指定的 OpenRouter/Gemini 音色。";
+    : PROMPT_DEFAULTS.voiceSummary;
   const style = mergePromptNotes(
     params.style,
     ...params.speakers.map((speaker) => speaker.style ? `${speaker.label}: ${speaker.style}` : ""),
-    params.lineStyle ? `本行风格覆盖：${params.lineStyle}` : "",
-  ) || "自然、清晰，并贴合台词语义的表达。";
+    params.lineStyle ? `Line style override: ${params.lineStyle}` : "",
+  ) || PROMPT_DEFAULTS.style;
 
-  const performanceNotes = params.performanceNotes || "不要朗读任何导演元数据、字段名或标签，只输出台词正文。";
+  const resolvedAudioProfile = params.audioProfile.trim() || PROMPT_DEFAULTS.audioProfile;
+  const resolvedScene = params.scene.trim() || PROMPT_DEFAULTS.scene;
+  const resolvedPacing = params.pacing.trim() || PROMPT_DEFAULTS.pacing;
+  const resolvedAccent = params.accent.trim() || PROMPT_DEFAULTS.accent;
+  const emotion = params.emotion.trim();
+  const performanceNotes = params.performanceNotes.trim();
+  const resolvedSampleContext = params.sampleContext.trim() || PROMPT_DEFAULTS.sampleContext;
+
+  const performanceLines = [
+    `Style: ${style}`,
+    `Pace: ${resolvedPacing}`,
+    `Accent: ${resolvedAccent}`,
+  ];
+  if (emotion) performanceLines.push(`Emotion: ${emotion}`);
+  if (performanceNotes) performanceLines.push(`Notes: ${performanceNotes}`);
 
   return [
-    "请为以下脚本生成语音：",
+    "Synthesize speech for the performance defined below.",
+    "The audio profile, scene, performance notes, and context are direction only.",
+    "Do NOT speak them. Speak ONLY the lines under #### TRANSCRIPT.",
     "",
-    `# 音频档案：${audioProfileTitle}`,
-    `角色/身份：${params.audioProfile.trim() || "通用、自然、清晰的中文旁白。"}`,
-    `音色：${voiceSummary}`,
+    `# AUDIO PROFILE: ${audioProfileTitle}`,
+    resolvedAudioProfile,
+    `Voice: ${voiceSummary}`,
     "",
-    "## 场景",
-    params.scene.trim() || "未提供特定场景；按台词上下文自然处理。",
+    "## SCENE",
+    resolvedScene,
     "",
-    "### 导演备注",
-    `风格：${style}`,
-    `节奏：${params.pacing.trim() || "自然口语节奏，停顿清楚。"}`,
-    `口音/咬字：${params.accent.trim() || "无特定口音要求，优先清晰自然的中文咬字。"}`,
-    `情绪：${params.emotion.trim() || "根据台词上下文自然匹配情绪。"}`,
-    `表演备注：${performanceNotes}`,
+    "### PERFORMANCE",
+    ...performanceLines,
     "",
-    "### 示例上下文",
-    params.sampleContext.trim() || "无额外示例上下文。",
+    "### CONTEXT",
+    resolvedSampleContext,
     "",
-    "#### 台词",
+    "#### TRANSCRIPT",
     params.transcript.trim(),
   ].join("\n");
 }

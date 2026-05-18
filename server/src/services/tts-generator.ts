@@ -9,6 +9,9 @@ import { acquireSlot, releaseSlot } from "./concurrency.js";
 import { canonicalizeVoice } from "../utils/voice.js";
 import { computeSha256, writeAudioFile } from "../utils/audio-fs.js";
 import { isGeminiTtsModel, resolveTtsFormat, wrapPcm16LeToWav, type AudioFormat } from "../utils/audio-format.js";
+import { analyzeWavBuffer, type WavAnalysisResult, type WavAnalysisSuccess } from "../utils/audio-analysis.js";
+import { normalizeLoudnessIfEnabled, type AudioPostprocessStatus } from "../utils/audio-postprocess.js";
+import { env } from "../config/env.js";
 
 export const GenerateSpeechSchema = z.object({
   model: z.string().min(1),
@@ -39,6 +42,8 @@ export const GenerateSpeechSchema = z.object({
 });
 
 export type GenerateSpeechRequest = z.infer<typeof GenerateSpeechSchema>;
+
+const DEFAULT_GEMINI_TTS_TEMPERATURE = 0.2;
 
 export interface SourceContext {
   source: "user" | "agent" | "cli";
@@ -191,10 +196,37 @@ export async function generateSpeech(
       let audioBuffer = result.audioBuffer;
       if (formatPlan.wrapPcmToWav) audioBuffer = wrapPcm16LeToWav(audioBuffer, formatPlan.pcmParams);
 
+      const postprocess = formatPlan.outputFormat === "wav"
+        ? await normalizeLoudnessIfEnabled(audioBuffer, {
+          enabled: env.enableLoudnessNormalization === true,
+          targetLufs: Number.isFinite(env.loudnessTargetLufs) ? env.loudnessTargetLufs : -16,
+          ffmpegPath: env.ffmpegPath,
+        })
+        : {
+          buffer: audioBuffer,
+          status: buildAudioPostprocessStatus(
+            env.enableLoudnessNormalization === true,
+            env.enableLoudnessNormalization === true ? "unsupported_format" : "disabled",
+            Number.isFinite(env.loudnessTargetLufs) ? env.loudnessTargetLufs : -16,
+          ),
+        };
+      audioBuffer = postprocess.buffer;
+
+      const audioAnalysis: WavAnalysisResult = formatPlan.outputFormat === "wav"
+        ? analyzeWavBuffer(audioBuffer)
+        : {
+          ok: false,
+          code: "UNSUPPORTED_CONTAINER",
+          message: "Raw PCM output is not analyzed as WAV.",
+        };
+      const usableAudioAnalysis = getUsableAudioAnalysis(audioAnalysis);
+
       const now = new Date();
       const filePath = writeAudioFile(jobId, formatPlan.extension, audioBuffer, now);
       const sha256 = computeSha256(audioBuffer);
-      const duration = `${Math.max(0.5, req.input.length * 0.007).toFixed(1)}s`;
+      const duration = usableAudioAnalysis
+        ? `${usableAudioAnalysis.durationSeconds.toFixed(1)}s`
+        : `${Math.max(0.5, req.input.length * 0.007).toFixed(1)}s`;
 
       db.update(generationJob).set({
         status: "succeeded",
@@ -211,9 +243,9 @@ export async function generateSpeech(
         sizeBytes: audioBuffer.length,
         sha256,
         duration,
-        sampleRate: formatPlan.pcmParams?.sampleRate ?? null,
-        bitDepth: formatPlan.pcmParams?.bitDepth ?? null,
-        channels: formatPlan.pcmParams?.channels ?? null,
+        sampleRate: usableAudioAnalysis ? usableAudioAnalysis.sampleRate : formatPlan.pcmParams?.sampleRate ?? null,
+        bitDepth: usableAudioAnalysis ? usableAudioAnalysis.bitsPerSample : formatPlan.pcmParams?.bitDepth ?? null,
+        channels: usableAudioAnalysis ? usableAudioAnalysis.channels : formatPlan.pcmParams?.channels ?? null,
         createdAt: now,
       }).run();
 
@@ -238,6 +270,18 @@ export async function generateSpeech(
           requestedFormat: req.responseFormat,
           upstreamFormat: formatPlan.upstreamFormat,
           outputFormat: formatPlan.outputFormat,
+          audioAnalysis: usableAudioAnalysis
+            ? {
+              ok: true,
+              durationSeconds: usableAudioAnalysis.durationSeconds,
+              sampleRate: usableAudioAnalysis.sampleRate,
+              channels: usableAudioAnalysis.channels,
+              bitsPerSample: usableAudioAnalysis.bitsPerSample,
+              rms: usableAudioAnalysis.rms,
+              peak: usableAudioAnalysis.peak,
+            }
+            : { ok: false, code: audioAnalysis.ok ? "INVALID_WAV" : audioAnalysis.code },
+          audioPostprocess: postprocess.status,
         },
       };
     }
@@ -320,11 +364,19 @@ function buildEffectiveProviderOptions(
   const existingPrebuiltVoiceConfig = isPlainObject(existingVoiceConfig.prebuiltVoiceConfig)
     ? existingVoiceConfig.prebuiltVoiceConfig as Record<string, unknown>
     : {};
+  const hasExplicitTemperature = Object.prototype.hasOwnProperty.call(
+    existingGenerationConfig,
+    "temperature",
+  );
+  const resolvedTemperature = hasExplicitTemperature
+    ? existingGenerationConfig.temperature
+    : DEFAULT_GEMINI_TTS_TEMPERATURE;
 
   return {
     ...base,
     generationConfig: {
       ...existingGenerationConfig,
+      temperature: resolvedTemperature,
       responseModalities: ["AUDIO"],
       speechConfig: {
         ...existingSpeechConfig,
@@ -342,6 +394,38 @@ function buildEffectiveProviderOptions(
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function buildAudioPostprocessStatus(
+  enabled: boolean,
+  reason: AudioPostprocessStatus["reason"],
+  targetLufs: number,
+): AudioPostprocessStatus {
+  return {
+    enabled,
+    applied: false,
+    reason,
+    targetLufs: Number.isFinite(targetLufs) && targetLufs >= -30 && targetLufs <= -6 ? targetLufs : -16,
+    tool: "ffmpeg-loudnorm",
+  };
+}
+
+function getUsableAudioAnalysis(analysis: WavAnalysisResult): WavAnalysisSuccess | null {
+  if (!analysis.ok) return null;
+
+  if (!isFinitePositiveNumber(analysis.durationSeconds)) return null;
+  if (!isFinitePositiveNumber(analysis.sampleRate)) return null;
+  if (!isFinitePositiveNumber(analysis.channels)) return null;
+  if (!isFinitePositiveNumber(analysis.bitsPerSample)) return null;
+  if (!isFinitePositiveNumber(analysis.dataBytes)) return null;
+  if (!Number.isFinite(analysis.rms) || analysis.rms < 0) return null;
+  if (!Number.isFinite(analysis.peak) || analysis.peak < 0) return null;
+
+  return analysis;
+}
+
+function isFinitePositiveNumber(value: number): boolean {
+  return Number.isFinite(value) && value > 0;
 }
 
 export function estimateCost(charCount: number): string {

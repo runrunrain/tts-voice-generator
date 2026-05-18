@@ -1,10 +1,12 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { ChevronDown, ChevronUp, Plus, Trash2, Loader2, AlertTriangle, AlertCircle, CheckCircle2, Copy, FileText, Zap } from "lucide-react";
 import { useAppState } from "../state/AppContext";
 import type { AudioFormat, SpeakerConfig, AssemblePromptRequest, AssemblePromptSuccess } from "../types";
 import { formatVoiceOptionLabel } from "../utils/voiceDisplay";
 import { PromptTextBlock } from "../components/PromptTextBlock";
 import { useAudioObjectUrl } from "../hooks/useAudioObjectUrl";
+import { findForbiddenStyleWords, formatForbiddenStyleWarning, getForbiddenMatchesForField } from "../utils/forbiddenStyleWords";
+import type { ForbiddenStyleUiMatch } from "../utils/forbiddenStyleWords";
 
 const MAX_SPEAKERS = 2;
 
@@ -12,9 +14,48 @@ const EMOTION_TAGS = ["[happy]", "[sad]", "[excited]", "[calm]", "[angry]", "[ne
 const EXPRESS_TAGS = ["[slow]", "[fast]", "[pause]", "[whisper]", "[shout]", "[sigh]", "[laugh]"];
 const PARA_TAGS = { "情绪": EMOTION_TAGS, "表达": EXPRESS_TAGS, "副语言": ["[breath]", "[cough]", "[giggle]", "[gasp]", "[yawn]"] };
 
+const EMOTIONAL_SCENES = [
+  {
+    id: "EMPATHY_SUPPORT",
+    label: "共情安抚",
+    description: "适合安慰、道歉、解释坏消息。重点是贴近、温暖、可依赖。",
+    tags: ["[warm]", "[gentle]", "[soft-spoken]", "[pause]"],
+  },
+  {
+    id: "CLARIFY_EXPLAIN",
+    label: "澄清解释",
+    description: "适合教学、说明、复杂概念拆解。重点是清晰、分层、关键处停顿。",
+    tags: ["[clear]", "[measured]", "[pause]", "[emphasis]"],
+  },
+  {
+    id: "TRANSACTIONAL_GUIDE",
+    label: "事务引导",
+    description: "适合步骤提示、确认信息、流程引导。重点是简洁、可信、节奏稳定但不平。",
+    tags: ["[confident]", "[concise]", "[steady]", "[emphasis]"],
+  },
+  {
+    id: "WARM_FRIENDLY",
+    label: "温暖友好",
+    description: "适合欢迎、陪伴、轻松对话。重点是自然笑意和轻松亲近。",
+    tags: ["[friendly]", "[smile]", "[light laugh]", "[bright]"],
+  },
+] as const;
+
+type EmotionalSceneId = (typeof EMOTIONAL_SCENES)[number]["id"];
+
 function displaySpeakerLabel(label: string): string {
   const match = label.match(/^Speaker\s+([A-Z])$/i);
   return match ? `说话者 ${match[1].toUpperCase()}` : label;
+}
+
+function ForbiddenStyleWarningStrip({ matches }: { matches: ForbiddenStyleUiMatch[] }) {
+  if (matches.length === 0) return null;
+  return (
+    <div className="mt-2 flex items-start gap-2 rounded-md border border-warning/25 bg-warning-muted/35 px-3 py-2 text-xs text-warning">
+      <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+      <span>{formatForbiddenStyleWarning(matches)}</span>
+    </div>
+  );
 }
 
 function AuthenticatedAudioControls({ audioUrl }: { audioUrl: string }) {
@@ -90,9 +131,23 @@ export function DirectorPage() {
 
   // Tag insertion
   const [activeTagTab, setActiveTagTab] = useState<"情绪" | "表达" | "副语言">("情绪");
+  const [activeSceneId, setActiveSceneId] = useState<EmotionalSceneId>("EMPATHY_SUPPORT");
   const insertTag = (tag: string) => {
     setTranscript((prev) => prev + (prev.length > 0 && !prev.endsWith(" ") ? " " : "") + tag + " ");
   };
+
+  const activeScene = EMOTIONAL_SCENES.find((sceneOption) => sceneOption.id === activeSceneId) ?? EMOTIONAL_SCENES[0];
+
+  const forbiddenMatches = useMemo(() => findForbiddenStyleWords([
+    { field: "audioProfile", value: audioProfile },
+    { field: "directorNotes", value: directorNotes },
+    ...speakers.map((speaker, index) => ({ field: `speakers[${index}].style`, value: speaker.style })),
+  ]), [audioProfile, directorNotes, speakers]);
+
+  const getLocalForbiddenMatches = useCallback(
+    (field: string) => getForbiddenMatchesForField(forbiddenMatches, field),
+    [forbiddenMatches],
+  );
 
   // Cost estimation
   useEffect(() => {
@@ -244,13 +299,19 @@ export function DirectorPage() {
           {/* Left Column: Editor */}
           <div className="flex-1 p-6 overflow-y-auto flex flex-col gap-4">
             <Section id="audioProfile" icon={<span className="text-text-tertiary text-xs">*</span>} title={DIRECTOR_FIELD_LABELS.audioProfile}>
-              <textarea
-                className="w-full min-h-[80px] bg-transparent outline-none resize-y text-sm text-text-primary placeholder:text-text-tertiary"
-                placeholder="例如：温暖、沉稳的中年男声，语气安心且有叙述感..."
-                value={audioProfile}
-                onChange={(e) => setAudioProfile(e.target.value)}
-                disabled={assemblePhase === "loading"}
-              />
+              <div className="flex flex-col gap-2">
+                <div className="rounded-md border border-border-subtle bg-bg-surface/70 px-3 py-2 text-xs leading-relaxed text-text-secondary">
+                  建议写成具体角色画像：角色身份 + 年龄感 + 声线质地 + 说话距离 + 情绪底色。示例：Warm late-30s documentary narrator, close-mic, grounded confidence, gentle smile in the voice. 避免只写 quiet / flat / 安静 / 平淡 这类低信息词。
+                </div>
+                <textarea
+                  className="w-full min-h-[80px] bg-transparent outline-none resize-y text-sm text-text-primary placeholder:text-text-tertiary"
+                  placeholder="例如：Warm late-30s documentary narrator, close-mic, grounded confidence, gentle smile in the voice..."
+                  value={audioProfile}
+                  onChange={(e) => setAudioProfile(e.target.value)}
+                  disabled={assemblePhase === "loading"}
+                />
+                <ForbiddenStyleWarningStrip matches={getLocalForbiddenMatches("audioProfile")} />
+              </div>
             </Section>
 
             <Section id="scene" icon={<span className="text-text-tertiary text-xs">*</span>} title={DIRECTOR_FIELD_LABELS.scene}>
@@ -271,6 +332,7 @@ export function DirectorPage() {
                 onChange={(e) => setDirectorNotes(e.target.value)}
                 disabled={assemblePhase === "loading"}
               />
+              <ForbiddenStyleWarningStrip matches={getLocalForbiddenMatches("directorNotes")} />
             </Section>
 
             <Section id="sampleContext" icon={<span className="text-text-tertiary text-xs">*</span>} title={DIRECTOR_FIELD_LABELS.sampleContext}>
@@ -324,7 +386,7 @@ export function DirectorPage() {
 
               {isSpeakerLimitReached && <SpeakerLimitBanner />}
 
-              {speakers.map((speaker) => (
+              {speakers.map((speaker, index) => (
                 <div key={speaker.id} className="border border-border rounded-md p-3 bg-bg-surface flex flex-col gap-3">
                   <div className="flex justify-between items-center text-xs font-medium text-text-secondary">
                     <span>{displaySpeakerLabel(speaker.label)}</span>
@@ -363,8 +425,50 @@ export function DirectorPage() {
                       onChange={(e) => updateSpeaker(speaker.id, "style", e.target.value)}
                     />
                   </div>
+                  <ForbiddenStyleWarningStrip matches={getLocalForbiddenMatches(`speakers[${index}].style`)} />
                 </div>
               ))}
+            </div>
+
+            {/* Emotional Scenes */}
+            <div className="flex flex-col gap-4">
+              <div>
+                <h3 className="text-sm font-semibold text-text-primary">情感场景</h3>
+                <p className="mt-1 text-xs text-text-tertiary">先选场景，再按需插入安全标签；选择不会自动改写输入内容。</p>
+              </div>
+              <div className="border border-border rounded-md bg-bg-surface overflow-hidden">
+                <div className="grid grid-cols-2 border-b border-border-subtle bg-bg-sunken text-xs">
+                  {EMOTIONAL_SCENES.map((sceneOption) => (
+                    <button
+                      key={sceneOption.id}
+                      className={`px-3 py-2 text-left font-medium transition-colors ${
+                        activeSceneId === sceneOption.id
+                          ? "bg-bg-active text-accent"
+                          : "text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+                      }`}
+                      onClick={() => setActiveSceneId(sceneOption.id)}
+                      type="button"
+                    >
+                      {sceneOption.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="p-3 flex flex-col gap-3">
+                  <p className="text-xs leading-relaxed text-text-secondary">{activeScene.description}</p>
+                  <div className="flex flex-wrap gap-2">
+                    {activeScene.tags.map((tag) => (
+                      <button
+                        key={tag}
+                        className="px-2 py-1 rounded bg-bg-base border border-border-subtle text-xs text-text-secondary hover:text-text-primary hover:border-border transition-colors"
+                        onClick={() => insertTag(tag)}
+                        type="button"
+                      >
+                        {tag}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Quick Tags */}
@@ -496,7 +600,7 @@ export function DirectorPage() {
                 <div
                   key={i}
                   className={`flex items-start gap-2 px-3 py-2 rounded-md text-xs border ${
-                    w.code === "LEGACY_VOICE_ALIAS"
+                    w.code === "LEGACY_VOICE_ALIAS" || w.code === "FORBIDDEN_STYLE_WORDS"
                       ? "bg-warning-muted border-warning/20 text-warning"
                       : "bg-accent-muted border-accent/20 text-accent"
                   }`}
@@ -505,6 +609,11 @@ export function DirectorPage() {
                   <div className="flex flex-col gap-0.5">
                     <span className="font-medium">{w.code}</span>
                     <span>{w.message}</span>
+                    {w.code === "FORBIDDEN_STYLE_WORDS" && w.details?.matches && w.details.matches.length > 0 && (
+                      <span className="text-[11px] opacity-90">
+                        命中字段：{w.details.matches.map((match) => `${match.field}:${match.term}`).join("；")}
+                      </span>
+                    )}
                   </div>
                 </div>
               ))}

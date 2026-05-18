@@ -937,6 +937,10 @@ export interface PromptWarning {
   code: string;
   message: string;
   field?: string;
+  details?: {
+    severity?: "info" | "warning";
+    matches?: Array<{ field: string; term: string }>;
+  };
 }
 
 export interface NormalizedSpeaker {
