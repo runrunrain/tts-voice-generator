@@ -52,6 +52,8 @@ export function initSchema() {
     CREATE TABLE IF NOT EXISTS settings (
       id INTEGER PRIMARY KEY,
       open_router_api_key TEXT,
+      elevenlabs_api_key TEXT,
+      fish_audio_api_key TEXT,
       default_model TEXT NOT NULL DEFAULT 'google/gemini-3.1-flash-tts-preview',
       default_voice TEXT NOT NULL DEFAULT 'Zephyr',
       default_format TEXT NOT NULL DEFAULT 'wav',
@@ -98,6 +100,14 @@ export function initSchema() {
       error_code TEXT,
       error_message TEXT,
       error_metadata TEXT,
+      generation_route TEXT NOT NULL DEFAULT 'gemini_only',
+      provider_chain_json TEXT,
+      voice_asset_id TEXT,
+      license_record_id TEXT,
+      intermediate_audio_asset_id INTEGER,
+      route_decision_json TEXT,
+      cost_metadata_json TEXT,
+      compliance_json TEXT,
       source TEXT NOT NULL DEFAULT 'user',
       agent_conversation_id TEXT,
       agent_action_log_id INTEGER,
@@ -117,6 +127,12 @@ export function initSchema() {
       sample_rate INTEGER,
       bit_depth INTEGER,
       channels INTEGER,
+      parent_asset_id INTEGER,
+      pipeline_stage TEXT,
+      provider TEXT,
+      model TEXT,
+      voice_asset_id TEXT,
+      ai_disclosure_json TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
 
@@ -158,6 +174,8 @@ export function initSchema() {
   `);
 
   addColumnIfMissing(rawDb, "settings", "local_plugin_token", "TEXT");
+  addColumnIfMissing(rawDb, "settings", "elevenlabs_api_key", "TEXT");
+  addColumnIfMissing(rawDb, "settings", "fish_audio_api_key", "TEXT");
   addColumnIfMissing(rawDb, "settings", "agent_auth_mode", "TEXT NOT NULL DEFAULT 'confirm_each'");
   addColumnIfMissing(rawDb, "settings", "agent_max_requests", "INTEGER NOT NULL DEFAULT 10");
   addColumnIfMissing(rawDb, "settings", "agent_max_chars", "INTEGER NOT NULL DEFAULT 10000");
@@ -166,6 +184,14 @@ export function initSchema() {
   addColumnIfMissing(rawDb, "generation_job", "source", "TEXT NOT NULL DEFAULT 'user'");
   addColumnIfMissing(rawDb, "generation_job", "agent_conversation_id", "TEXT");
   addColumnIfMissing(rawDb, "generation_job", "agent_action_log_id", "INTEGER");
+  addColumnIfMissing(rawDb, "generation_job", "generation_route", "TEXT NOT NULL DEFAULT 'gemini_only'");
+  addColumnIfMissing(rawDb, "generation_job", "provider_chain_json", "TEXT");
+  addColumnIfMissing(rawDb, "generation_job", "voice_asset_id", "TEXT");
+  addColumnIfMissing(rawDb, "generation_job", "license_record_id", "TEXT");
+  addColumnIfMissing(rawDb, "generation_job", "intermediate_audio_asset_id", "INTEGER");
+  addColumnIfMissing(rawDb, "generation_job", "route_decision_json", "TEXT");
+  addColumnIfMissing(rawDb, "generation_job", "cost_metadata_json", "TEXT");
+  addColumnIfMissing(rawDb, "generation_job", "compliance_json", "TEXT");
   addColumnIfMissing(rawDb, "agent_action_log", "session_id", "TEXT");
   addColumnIfMissing(rawDb, "agent_action_log", "input_payload", "TEXT");
   addColumnIfMissing(rawDb, "agent_action_log", "approved_at", "INTEGER");
@@ -175,6 +201,115 @@ export function initSchema() {
   addColumnIfMissing(rawDb, "audio_asset", "sample_rate", "INTEGER");
   addColumnIfMissing(rawDb, "audio_asset", "bit_depth", "INTEGER");
   addColumnIfMissing(rawDb, "audio_asset", "channels", "INTEGER");
+  addColumnIfMissing(rawDb, "audio_asset", "parent_asset_id", "INTEGER");
+  addColumnIfMissing(rawDb, "audio_asset", "pipeline_stage", "TEXT");
+  addColumnIfMissing(rawDb, "audio_asset", "provider", "TEXT");
+  addColumnIfMissing(rawDb, "audio_asset", "model", "TEXT");
+  addColumnIfMissing(rawDb, "audio_asset", "voice_asset_id", "TEXT");
+  addColumnIfMissing(rawDb, "audio_asset", "ai_disclosure_json", "TEXT");
+
+  rawDb.exec(`
+    CREATE TABLE IF NOT EXISTS source_terms_snapshot (
+      id TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL,
+      source_tool TEXT,
+      terms_version TEXT,
+      terms_text_hash TEXT,
+      contract_uri TEXT,
+      captured_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      metadata_json TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE TABLE IF NOT EXISTS voice_asset (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      provider TEXT,
+      provider_voice_id TEXT,
+      fish_reference_id TEXT,
+      license_record_id TEXT,
+      source_terms_snapshot_id TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS voice_license_record (
+      id TEXT PRIMARY KEY,
+      asset_id TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      scope_json TEXT NOT NULL DEFAULT '{}',
+      valid_from INTEGER,
+      valid_until INTEGER,
+      revoked_at INTEGER,
+      evidence_uri TEXT,
+      cross_platform_clone_allowed INTEGER NOT NULL DEFAULT 0,
+      notes TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS voice_reference_asset (
+      id TEXT PRIMARY KEY,
+      voice_asset_id TEXT NOT NULL,
+      audio_asset_id INTEGER,
+      provider TEXT NOT NULL,
+      reference_id TEXT,
+      quality_status TEXT NOT NULL DEFAULT 'pending',
+      transcript_status TEXT NOT NULL DEFAULT 'pending',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS fish_voice_model (
+      id TEXT PRIMARY KEY,
+      voice_asset_id TEXT NOT NULL,
+      fish_model_id TEXT,
+      reference_id TEXT,
+      train_mode TEXT NOT NULL DEFAULT 'fast',
+      visibility TEXT NOT NULL DEFAULT 'private',
+      status TEXT NOT NULL DEFAULT 'pending',
+      error_json TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS audio_to_voice_build (
+      id TEXT PRIMARY KEY,
+      source_audio_asset_id INTEGER NOT NULL,
+      voice_asset_id TEXT,
+      state TEXT NOT NULL DEFAULT 'draft',
+      quality_json TEXT NOT NULL DEFAULT '{}',
+      transcript_text TEXT,
+      transcript_mode TEXT,
+      license_record_id TEXT,
+      error_json TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS character_voice_mapping (
+      id TEXT PRIMARY KEY,
+      character_id TEXT,
+      character_name TEXT NOT NULL,
+      default_generation_route TEXT NOT NULL DEFAULT 'gemini_only',
+      voice_asset_id TEXT,
+      provider_voice_id TEXT,
+      fish_reference_id TEXT,
+      route_options_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE INDEX IF NOT EXISTS voice_asset_status_idx ON voice_asset(status);
+    CREATE INDEX IF NOT EXISTS voice_asset_provider_idx ON voice_asset(provider);
+    CREATE INDEX IF NOT EXISTS voice_license_asset_idx ON voice_license_record(asset_id);
+    CREATE INDEX IF NOT EXISTS voice_reference_asset_voice_idx ON voice_reference_asset(voice_asset_id);
+    CREATE INDEX IF NOT EXISTS fish_voice_model_asset_idx ON fish_voice_model(voice_asset_id);
+    CREATE INDEX IF NOT EXISTS audio_to_voice_build_asset_idx ON audio_to_voice_build(voice_asset_id);
+    CREATE INDEX IF NOT EXISTS generation_job_route_idx ON generation_job(generation_route);
+  `);
 
   // ─── P0 Voice Production Extended Tables ──────────────────────────────────
 

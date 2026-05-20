@@ -67,6 +67,23 @@ import type {
   ProductionListQualityReport,
   ProductionListRollbackResult,
   ProductionListVersionEntry,
+  CreateLicenseRecordRequest,
+  CreateSourceTermsRequest,
+  CreateVoiceAssetRequest,
+  GenerationRoute,
+  LicenseGateResult,
+  ProviderChainEntry,
+  ProviderId,
+  SourceTermsSnapshot,
+  UpdateVoiceAssetRequest,
+  VoiceAssetCapabilities,
+  VoiceAssetDetail,
+  VoiceAssetListResult,
+  VoiceLicenseRecord,
+  VoiceAssetStatus,
+  VoiceAssetType,
+  VoiceRoutePreviewRequest,
+  VoiceRoutePreviewResult,
 } from "../types";
 import { getVoiceDisplayMeta } from "../utils/voiceDisplay";
 
@@ -344,6 +361,51 @@ function normalizeHistoryPreviewSource(value: string | null | undefined): Histor
   }
 }
 
+function extractStructuredError(body: unknown, fallbackCode: string, fallbackMessage: string): GenerateResult["error"] {
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const record = body as Record<string, unknown>;
+    const nested = record.error;
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      const err = nested as Record<string, unknown>;
+      return {
+        code: typeof err.code === "string" ? err.code : fallbackCode,
+        message: typeof err.message === "string" ? err.message : fallbackMessage,
+        category: typeof err.category === "string" ? err.category : undefined,
+        retryable: typeof err.retryable === "boolean" ? err.retryable : undefined,
+        metadata: err.metadata,
+      };
+    }
+    return {
+      code: typeof record.code === "string" ? record.code : fallbackCode,
+      message: typeof record.message === "string" ? record.message : fallbackMessage,
+      metadata: record.details,
+    };
+  }
+  return { code: fallbackCode, message: fallbackMessage };
+}
+
+function extractGenerateRouteMeta(body: unknown): Pick<GenerateResult, "generationRoute" | "providerChain" | "voiceAssetId" | "licenseRecordId" | "compliance"> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return {};
+  const record = body as Record<string, unknown>;
+  return {
+    generationRoute: typeof record.generationRoute === "string" ? record.generationRoute as GenerationRoute : undefined,
+    providerChain: Array.isArray(record.providerChain) ? record.providerChain as ProviderChainEntry[] : undefined,
+    voiceAssetId: typeof record.voiceAssetId === "string" || record.voiceAssetId === null ? record.voiceAssetId : undefined,
+    licenseRecordId: typeof record.licenseRecordId === "string" || record.licenseRecordId === null ? record.licenseRecordId : undefined,
+    compliance: record.compliance && typeof record.compliance === "object" && !Array.isArray(record.compliance) ? record.compliance as GenerateResult["compliance"] : undefined,
+  };
+}
+
+function buildVoiceAssetQuery(filters?: { type?: VoiceAssetType | "all"; status?: VoiceAssetStatus | "all"; provider?: ProviderId | "all"; q?: string }) {
+  const params = new URLSearchParams();
+  if (filters?.type && filters.type !== "all") params.set("type", filters.type);
+  if (filters?.status && filters.status !== "all") params.set("status", filters.status);
+  if (filters?.provider && filters.provider !== "all") params.set("provider", filters.provider);
+  if (filters?.q?.trim()) params.set("q", filters.q.trim());
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
 // ─── Adapter Implementation ──────────────────────────────────────────────────
 
 export const httpAdapter: TtsServiceAdapter = {
@@ -373,6 +435,18 @@ export const httpAdapter: TtsServiceAdapter = {
         voice: req.voice,
         responseFormat: req.format,
       };
+
+      if (req.generationRoute) body.generationRoute = req.generationRoute;
+      if (req.voiceAssetId) body.voiceAssetId = req.voiceAssetId;
+      if (req.characterVoiceMappingId) body.characterVoiceMappingId = req.characterVoiceMappingId;
+      if (req.providerOptions) body.providerOptions = req.providerOptions;
+      if (req.promptAssembly) {
+        body.promptAssembly = {
+          geminiAudioTags: req.promptAssembly.geminiAudioTags?.filter((tag) => tag.trim().length > 0),
+          styleGuidance: req.promptAssembly.styleGuidance?.trim() || undefined,
+          source: req.promptAssembly.source ?? "frontend-style-metadata",
+        };
+      }
 
       const hasDirectorFields = req.audioProfile?.trim() || req.scene?.trim() || req.directorNotes?.trim() || req.style?.trim() || req.pacing?.trim() || req.accent?.trim() || req.emotion?.trim() || req.performanceNotes?.trim() || req.sampleContext?.trim() || req.transcript?.trim() || (req.speakers && req.speakers.length > 0);
       if (hasDirectorFields) {
@@ -419,6 +493,11 @@ export const httpAdapter: TtsServiceAdapter = {
         requestedFormat?: AudioFormat;
         /** The format sent to the upstream provider */
         upstreamFormat?: "pcm" | "mp3";
+        generationRoute?: GenerationRoute;
+        providerChain?: ProviderChainEntry[];
+        voiceAssetId?: string | null;
+        licenseRecordId?: string | null;
+        compliance?: GenerateResult["compliance"];
       }>("/api/tts/generate", {
         method: "POST",
         body: JSON.stringify(body),
@@ -442,6 +521,11 @@ export const httpAdapter: TtsServiceAdapter = {
           duration: result.duration || "0.0s",
           estimatedCost: result.estimatedCost || "$0.00",
           audioUrl: result.audioUrl,
+          generationRoute: result.generationRoute,
+          providerChain: result.providerChain,
+          voiceAssetId: result.voiceAssetId,
+          licenseRecordId: result.licenseRecordId,
+          compliance: result.compliance,
           timestamp: result.createdAt || new Date().toISOString(),
           isDemo: false,
         };
@@ -458,11 +542,34 @@ export const httpAdapter: TtsServiceAdapter = {
             code: "UNKNOWN",
             message: "Generation failed with unknown error",
           },
+          generationRoute: result.generationRoute,
+          providerChain: result.providerChain,
+          voiceAssetId: result.voiceAssetId,
+          licenseRecordId: result.licenseRecordId,
+          compliance: result.compliance,
           timestamp: result.createdAt || new Date().toISOString(),
           isDemo: false,
         };
       }
     } catch (err) {
+      if (err instanceof ApiError) {
+        const routeMeta = extractGenerateRouteMeta(err.body);
+        const structuredError = extractStructuredError(err.body, `HTTP_${err.status}`, err.message);
+        const body = err.body && typeof err.body === "object" && !Array.isArray(err.body) ? err.body as Record<string, unknown> : {};
+        return {
+          jobId: typeof body.jobId === "string" ? body.jobId : `err-api-${Date.now().toString(36)}`,
+          phase: "error" as GeneratePhase,
+          voice: req.voice,
+          format: req.format,
+          charCount: typeof body.charCount === "number" ? body.charCount : req.text.length,
+          duration: "0.0s",
+          estimatedCost: "$0.00",
+          error: structuredError,
+          ...routeMeta,
+          timestamp: typeof body.createdAt === "string" ? body.createdAt : new Date().toISOString(),
+          isDemo: false,
+        };
+      }
       return {
         jobId: `err-net-${Date.now().toString(36)}`,
         phase: "error" as GeneratePhase,
@@ -592,6 +699,67 @@ export const httpAdapter: TtsServiceAdapter = {
     } catch {
       return { status: "error", latency: "N/A", error: "NETWORK_ERROR" };
     }
+  },
+
+  async getVoiceAssetCapabilities(): Promise<VoiceAssetCapabilities> {
+    return apiFetch<VoiceAssetCapabilities>("/api/voice-assets/capabilities");
+  },
+
+  async listVoiceAssets(filters): Promise<VoiceAssetListResult> {
+    return apiFetch<VoiceAssetListResult>(`/api/voice-assets${buildVoiceAssetQuery(filters)}`);
+  },
+
+  async getVoiceAsset(id: string): Promise<VoiceAssetDetail> {
+    return apiFetch<VoiceAssetDetail>(`/api/voice-assets/${encodeURIComponent(id)}`);
+  },
+
+  async createVoiceAsset(payload: CreateVoiceAssetRequest) {
+    return apiFetch<{ voiceAsset: VoiceAssetDetail["voiceAsset"]; compliance?: unknown }>("/api/voice-assets", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async updateVoiceAsset(id: string, payload: UpdateVoiceAssetRequest) {
+    return apiFetch<{ voiceAsset: VoiceAssetDetail["voiceAsset"] }>(`/api/voice-assets/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async activateVoiceAsset(id: string) {
+    return apiFetch<{ voiceAsset: VoiceAssetDetail["voiceAsset"]; compliance?: LicenseGateResult }>(`/api/voice-assets/${encodeURIComponent(id)}/activate`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  },
+
+  async revokeVoiceAsset(id: string, reason: string) {
+    return apiFetch<{ voiceAsset: VoiceAssetDetail["voiceAsset"] }>(`/api/voice-assets/${encodeURIComponent(id)}/revoke`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    });
+  },
+
+  async createLicenseRecord(payload: CreateLicenseRecordRequest) {
+    return apiFetch<{ licenseRecord: VoiceLicenseRecord }>("/api/licenses", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async createSourceTerms(payload: CreateSourceTermsRequest) {
+    return apiFetch<{ sourceTermsSnapshot: SourceTermsSnapshot }>("/api/source-terms", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async previewVoiceRoute(payload: VoiceRoutePreviewRequest): Promise<VoiceRoutePreviewResult> {
+    return apiFetch<VoiceRoutePreviewResult>("/api/voice-routes/preview", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
   },
 
   async testConnection(): Promise<ConnectionStatus> {

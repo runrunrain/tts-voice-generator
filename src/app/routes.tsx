@@ -2,6 +2,7 @@ import { createBrowserRouter } from "react-router";
 import { Shell } from "./components/Shell";
 import { DirectorPage } from "./pages/DirectorPage";
 import { VoicesPage } from "./pages/VoicesPage";
+import { VoiceAssetsPage } from "./pages/VoiceAssetsPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { HistoryDetailPage } from "./pages/HistoryDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -18,6 +19,7 @@ export const router = createBrowserRouter([
       { path: "generate", Component: DirectorPage },
       { path: "generate/director", Component: DirectorPage },
       { path: "voices", Component: VoicesPage },
+      { path: "voice-assets", Component: VoiceAssetsPage },
       { path: "history", Component: HistoryPage },
       { path: "history/:jobId", Component: HistoryDetailPage },
       { path: "tasks", Component: TasksPage },

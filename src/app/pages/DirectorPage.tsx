@@ -1,7 +1,7 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
-import { ChevronDown, ChevronUp, Plus, Trash2, Loader2, AlertTriangle, AlertCircle, CheckCircle2, Copy, FileText, Zap } from "lucide-react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { ChevronDown, ChevronUp, Plus, Trash2, Loader2, AlertTriangle, AlertCircle, CheckCircle2, Copy, FileText, Zap, Route, ShieldAlert, ShieldCheck } from "lucide-react";
 import { useAppState } from "../state/AppContext";
-import type { AudioFormat, SpeakerConfig, AssemblePromptRequest, AssemblePromptSuccess } from "../types";
+import type { AudioFormat, SpeakerConfig, AssemblePromptRequest, AssemblePromptSuccess, GenerationRoute, VoiceAsset, VoiceAssetCapabilities, VoiceRoutePreviewResult } from "../types";
 import { formatVoiceOptionLabel } from "../utils/voiceDisplay";
 import { PromptTextBlock } from "../components/PromptTextBlock";
 import { useAudioObjectUrl } from "../hooks/useAudioObjectUrl";
@@ -43,6 +43,18 @@ const EMOTIONAL_SCENES = [
 
 type EmotionalSceneId = (typeof EMOTIONAL_SCENES)[number]["id"];
 
+const ROUTE_OPTIONS: Array<{ value: GenerationRoute; label: string; description: string }> = [
+  { value: "gemini_only", label: "Gemini-only", description: "默认安全路线，使用 OpenRouter Gemini TTS。" },
+  { value: "gemini_elevenlabs_sts", label: "Gemini + ElevenLabs STS", description: "路线 A：先生成 Gemini base audio，再走 ElevenLabs speech-to-speech；缺授权或 key 必须阻断。" },
+  { value: "fish_audio_tts", label: "Fish direct TTS + reference voice", description: "路线 B：Fish 直接文本转语音 + active reference voice，不是 Fish 音色转换。" },
+];
+
+const GEMINI_STYLE_TAGS = ["[warm]", "[gentle]", "[clear]", "[measured]", "[pause]", "[emphasis]", "[whisper]", "[laugh]"];
+
+function routeLabel(route: GenerationRoute | undefined) {
+  return ROUTE_OPTIONS.find((item) => item.value === route)?.label ?? route ?? "未选择";
+}
+
 function displaySpeakerLabel(label: string): string {
   const match = label.match(/^Speaker\s+([A-Z])$/i);
   return match ? `说话者 ${match[1].toUpperCase()}` : label;
@@ -54,6 +66,18 @@ function ForbiddenStyleWarningStrip({ matches }: { matches: ForbiddenStyleUiMatc
     <div className="mt-2 flex items-start gap-2 rounded-md border border-warning/25 bg-warning-muted/35 px-3 py-2 text-xs text-warning">
       <AlertTriangle size={14} className="mt-0.5 shrink-0" />
       <span>{formatForbiddenStyleWarning(matches)}</span>
+    </div>
+  );
+}
+
+function CapabilityLine({ label, configured }: { label: string; configured: boolean | undefined }) {
+  const known = configured !== undefined;
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span>{label}</span>
+      <span className={`rounded px-1.5 py-0.5 text-[10px] ${!known ? "bg-bg-base text-text-tertiary" : configured ? "bg-success-muted text-success" : "bg-warning-muted text-warning"}`}>
+        {!known ? "unknown" : configured ? "configured" : "missing"}
+      </span>
     </div>
   );
 }
@@ -93,7 +117,7 @@ export function DirectorPage() {
     generate, generatePhase, generateResult, resetGeneration,
     estimateCost, costEstimate,
     assemblePhase, assembleResult, assemblePrompt: assembleAction, resetAssemble,
-    settings, voices,
+    settings, voices, adapter,
   } = useAppState();
 
   // Director fields
@@ -106,6 +130,18 @@ export function DirectorPage() {
   // Config
   const [voice, setVoice] = useState(settings.defaultVoice);
   const [format, setFormat] = useState<AudioFormat>(settings.defaultFormat);
+  const [generationRoute, setGenerationRoute] = useState<GenerationRoute>("gemini_only");
+  const [selectedVoiceAssetId, setSelectedVoiceAssetId] = useState("");
+  const [voiceAssets, setVoiceAssets] = useState<VoiceAsset[]>([]);
+  const [capabilities, setCapabilities] = useState<VoiceAssetCapabilities | null>(null);
+  const [routePreviewPhase, setRoutePreviewPhase] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [routePreview, setRoutePreview] = useState<VoiceRoutePreviewResult | null>(null);
+  const [routePreviewError, setRoutePreviewError] = useState<string | null>(null);
+  const [routePreviewNeedsRefresh, setRoutePreviewNeedsRefresh] = useState(false);
+  const [geminiAudioTags, setGeminiAudioTags] = useState<string[]>([]);
+  const [styleGuidance, setStyleGuidance] = useState("");
+  const currentRoutePreviewSignatureRef = useRef("");
+  const lastRoutePreviewSignatureRef = useRef<string | null>(null);
 
   // Step tracking
   const [step, setStep] = useState<DirectorStep>("edit");
@@ -132,8 +168,8 @@ export function DirectorPage() {
   // Tag insertion
   const [activeTagTab, setActiveTagTab] = useState<"情绪" | "表达" | "副语言">("情绪");
   const [activeSceneId, setActiveSceneId] = useState<EmotionalSceneId>("EMPATHY_SUPPORT");
-  const insertTag = (tag: string) => {
-    setTranscript((prev) => prev + (prev.length > 0 && !prev.endsWith(" ") ? " " : "") + tag + " ");
+  const toggleGeminiTag = (tag: string) => {
+    setGeminiAudioTags((prev) => prev.includes(tag) ? prev.filter((item) => item !== tag) : [...prev, tag]);
   };
 
   const activeScene = EMOTIONAL_SCENES.find((sceneOption) => sceneOption.id === activeSceneId) ?? EMOTIONAL_SCENES[0];
@@ -153,6 +189,102 @@ export function DirectorPage() {
   useEffect(() => {
     estimateCost(transcript.length, format);
   }, [transcript.length, format, estimateCost]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadRouteInputs() {
+      try {
+        const [capabilityResult, assetResult] = await Promise.all([
+          adapter.getVoiceAssetCapabilities?.(),
+          adapter.listVoiceAssets?.({ status: "active" }),
+        ]);
+        if (cancelled) return;
+        if (capabilityResult) setCapabilities(capabilityResult);
+        if (assetResult) setVoiceAssets(assetResult.items);
+      } catch {
+        if (!cancelled) {
+          setCapabilities(null);
+          setVoiceAssets([]);
+        }
+      }
+    }
+    void loadRouteInputs();
+    return () => { cancelled = true; };
+  }, [adapter]);
+
+  const routePreviewInputSignature = useMemo(() => JSON.stringify({
+    generationRoute,
+    selectedVoiceAssetId: selectedVoiceAssetId || null,
+    transcript: transcript.trim(),
+    audioProfile: audioProfile.trim(),
+    scene: scene.trim(),
+    directorNotes: directorNotes.trim(),
+    geminiAudioTags: [...geminiAudioTags].sort(),
+    styleGuidance: styleGuidance.trim(),
+  }), [audioProfile, directorNotes, geminiAudioTags, generationRoute, scene, selectedVoiceAssetId, styleGuidance, transcript]);
+
+  useEffect(() => {
+    currentRoutePreviewSignatureRef.current = routePreviewInputSignature;
+    if (lastRoutePreviewSignatureRef.current && lastRoutePreviewSignatureRef.current !== routePreviewInputSignature) {
+      setRoutePreview(null);
+      setRoutePreviewPhase("idle");
+      setRoutePreviewError(null);
+      setRoutePreviewNeedsRefresh(true);
+    }
+  }, [routePreviewInputSignature]);
+
+  const handleRoutePreview = useCallback(async () => {
+    if (!adapter.previewVoiceRoute) return;
+    if (!transcript.trim()) {
+      setRoutePreviewPhase("error");
+      setRoutePreviewError("请先输入台词文本；Route Preview 只读取原文，不会改写 transcript。");
+      setRoutePreview(null);
+      setRoutePreviewNeedsRefresh(false);
+      return;
+    }
+    setRoutePreviewPhase("loading");
+    setRoutePreviewError(null);
+    setRoutePreviewNeedsRefresh(false);
+    const requestSignature = routePreviewInputSignature;
+    try {
+      const result = await adapter.previewVoiceRoute({
+        generationRoute,
+        voiceAssetId: selectedVoiceAssetId || undefined,
+        transcript: transcript.trim(),
+        directorSnapshot: {
+          audioProfile: audioProfile.trim() || undefined,
+          scene: scene.trim() || undefined,
+          directorNotes: directorNotes.trim() || undefined,
+          transcript: transcript.trim(),
+          promptAssembly: {
+            geminiAudioTags,
+            styleGuidance: styleGuidance.trim() || undefined,
+            source: "frontend-style-metadata",
+          },
+        },
+      });
+      if (currentRoutePreviewSignatureRef.current !== requestSignature) {
+        setRoutePreview(null);
+        setRoutePreviewPhase("idle");
+        setRoutePreviewError(null);
+        setRoutePreviewNeedsRefresh(true);
+        return;
+      }
+      lastRoutePreviewSignatureRef.current = requestSignature;
+      setRoutePreview(result);
+      setRoutePreviewPhase("success");
+    } catch (err) {
+      if (currentRoutePreviewSignatureRef.current !== requestSignature) {
+        setRoutePreview(null);
+        setRoutePreviewPhase("idle");
+        setRoutePreviewError(null);
+        setRoutePreviewNeedsRefresh(true);
+        return;
+      }
+      setRoutePreviewPhase("error");
+      setRoutePreviewError(err instanceof Error ? err.message : "Route Preview 请求失败");
+    }
+  }, [adapter, audioProfile, directorNotes, geminiAudioTags, generationRoute, routePreviewInputSignature, scene, selectedVoiceAssetId, styleGuidance, transcript]);
 
   // Speaker management
   const addSpeaker = useCallback(() => {
@@ -205,11 +337,6 @@ export function DirectorPage() {
   const handleGenerate = useCallback(async () => {
     if (!lastAssembledPrompt || generatePhase === "loading") return;
 
-    // Check if API Key is configured
-    if (!settings.openRouterApiKey) {
-      return;
-    }
-
     await generate({
       text: lastAssembledPrompt,
       voice,
@@ -220,10 +347,17 @@ export function DirectorPage() {
       directorNotes: directorNotes.trim(),
       sampleContext: sampleContext.trim(),
       transcript: transcript.trim(),
+      generationRoute,
+      voiceAssetId: selectedVoiceAssetId || undefined,
+      promptAssembly: {
+        geminiAudioTags,
+        styleGuidance: styleGuidance.trim() || undefined,
+        source: "frontend-style-metadata",
+      },
     });
 
     setStep("confirm");
-  }, [lastAssembledPrompt, voice, format, speakers, audioProfile, scene, directorNotes, sampleContext, transcript, generatePhase, generate, settings.openRouterApiKey]);
+  }, [lastAssembledPrompt, voice, format, speakers, audioProfile, scene, directorNotes, sampleContext, transcript, generationRoute, selectedVoiceAssetId, geminiAudioTags, styleGuidance, generatePhase, generate]);
 
   const handleReset = useCallback(() => {
     resetGeneration();
@@ -256,8 +390,11 @@ export function DirectorPage() {
     ? assembleResult.error
     : null;
 
-  // Check if API key is configured
-  const hasApiKey = !!settings.openRouterApiKey;
+  const hasKnownMissingRouteProvider = generationRoute === "gemini_only"
+    ? capabilities?.providers.openrouterGemini.configured === false
+    : generationRoute === "gemini_elevenlabs_sts"
+      ? capabilities?.providers.openrouterGemini.configured === false || capabilities?.providers.elevenlabs.configured === false
+      : capabilities?.providers.fishAudio.configured === false;
 
   // ─── Section component ──────────────────────────────────────────────────────
 
@@ -434,7 +571,7 @@ export function DirectorPage() {
             <div className="flex flex-col gap-4">
               <div>
                 <h3 className="text-sm font-semibold text-text-primary">情感场景</h3>
-                <p className="mt-1 text-xs text-text-tertiary">先选场景，再按需插入安全标签；选择不会自动改写输入内容。</p>
+                <p className="mt-1 text-xs text-text-tertiary">先选场景，再按需加入 Gemini style metadata；不会修改 transcript 原文。</p>
               </div>
               <div className="border border-border rounded-md bg-bg-surface overflow-hidden">
                 <div className="grid grid-cols-2 border-b border-border-subtle bg-bg-sunken text-xs">
@@ -459,8 +596,8 @@ export function DirectorPage() {
                     {activeScene.tags.map((tag) => (
                       <button
                         key={tag}
-                        className="px-2 py-1 rounded bg-bg-base border border-border-subtle text-xs text-text-secondary hover:text-text-primary hover:border-border transition-colors"
-                        onClick={() => insertTag(tag)}
+                        className={`px-2 py-1 rounded border text-xs transition-colors ${geminiAudioTags.includes(tag) ? "bg-accent-muted border-accent/30 text-accent" : "bg-bg-base border-border-subtle text-text-secondary hover:text-text-primary hover:border-border"}`}
+                        onClick={() => toggleGeminiTag(tag)}
                         type="button"
                       >
                         {tag}
@@ -494,14 +631,74 @@ export function DirectorPage() {
                   {PARA_TAGS[activeTagTab].map((tag) => (
                     <button
                       key={tag}
-                      className="px-2 py-1 rounded bg-bg-base border border-border-subtle text-xs text-text-secondary hover:text-text-primary hover:border-border transition-colors"
-                      onClick={() => insertTag(tag)}
+                      className={`px-2 py-1 rounded border text-xs transition-colors ${geminiAudioTags.includes(tag) ? "bg-accent-muted border-accent/30 text-accent" : "bg-bg-base border-border-subtle text-text-secondary hover:text-text-primary hover:border-border"}`}
+                      onClick={() => toggleGeminiTag(tag)}
                     >
                       {tag}
                     </button>
                   ))}
                 </div>
               </div>
+            </div>
+
+            {/* Route and style metadata */}
+            <div className="flex flex-col gap-4 rounded-lg border border-border bg-bg-surface p-3">
+              <div>
+                <h3 className="flex items-center gap-2 text-sm font-semibold text-text-primary"><Route size={15} /> 路线与音色资产</h3>
+                <p className="mt-1 text-xs leading-relaxed text-text-tertiary">Gemini audio tags / style guidance 作为 metadata 发送，不会改写 transcript 原文。路线 A/B 缺授权、key 或资产绑定时按后端结果阻断。</p>
+              </div>
+
+              <div className="space-y-2">
+                {ROUTE_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={`w-full rounded-md border px-3 py-2 text-left transition-colors ${generationRoute === option.value ? "border-accent/40 bg-accent-subtle text-text-primary" : "border-border-subtle bg-bg-sunken text-text-secondary hover:bg-bg-hover"}`}
+                    onClick={() => setGenerationRoute(option.value)}
+                  >
+                    <div className="text-xs font-semibold">{option.label}</div>
+                    <div className="mt-0.5 text-[11px] leading-snug text-text-tertiary">{option.description}</div>
+                  </button>
+                ))}
+              </div>
+
+              {generationRoute !== "gemini_only" && (
+                <select className="w-full rounded border border-border bg-bg-sunken px-2 py-1.5 text-xs text-text-primary" value={selectedVoiceAssetId} onChange={(e) => setSelectedVoiceAssetId(e.target.value)}>
+                  <option value="">选择 active voice asset</option>
+                  {voiceAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · {asset.provider ?? "provider?"}</option>)}
+                </select>
+              )}
+
+              <div className="rounded-md border border-border-subtle bg-bg-sunken p-2 text-[11px] text-text-secondary">
+                <div className="mb-1 font-medium text-text-primary">Provider capabilities</div>
+                <div className="grid gap-1">
+                  <CapabilityLine label="Gemini" configured={capabilities?.providers.openrouterGemini.configured} />
+                  <CapabilityLine label="ElevenLabs STS" configured={capabilities?.providers.elevenlabs.configured} />
+                  <CapabilityLine label="Fish Audio TTS" configured={capabilities?.providers.fishAudio.configured} />
+                </div>
+              </div>
+
+              <textarea className="min-h-[70px] w-full rounded border border-border bg-bg-sunken px-2 py-1.5 text-xs text-text-primary placeholder:text-text-tertiary" placeholder="Style guidance metadata，例如：closer mic, gentle smile, measured pauses。不会拼入 transcript。" value={styleGuidance} onChange={(e) => setStyleGuidance(e.target.value)} />
+              <div className="flex flex-wrap gap-1.5 text-[10px]">
+                {GEMINI_STYLE_TAGS.map((tag) => <button key={tag} type="button" className={`rounded border px-2 py-1 ${geminiAudioTags.includes(tag) ? "border-accent/30 bg-accent-muted text-accent" : "border-border-subtle bg-bg-sunken text-text-secondary hover:bg-bg-hover"}`} onClick={() => toggleGeminiTag(tag)}>{tag}</button>)}
+              </div>
+
+              <button type="button" className="flex items-center justify-center gap-2 rounded-md border border-border bg-bg-sunken px-3 py-1.5 text-xs font-medium text-text-primary hover:bg-bg-hover disabled:opacity-50" onClick={handleRoutePreview} disabled={routePreviewPhase === "loading"}>
+                {routePreviewPhase === "loading" ? <Loader2 size={13} className="animate-spin" /> : <ShieldCheck size={13} />} Route Preview
+              </button>
+              {routePreviewNeedsRefresh && routePreviewPhase === "idle" && (
+                <div className="rounded-md border border-warning/20 bg-warning-muted/20 p-2 text-[11px] text-warning">
+                  路线、音色资产或上下文已变化；旧 Route Preview 已清空，请重新预览后再依据后端 Gate 判断。
+                </div>
+              )}
+              {routePreviewPhase === "success" && routePreview && (
+                <div className={`rounded-md border p-2 text-[11px] ${routePreview.decision.blocked ? "border-warning/25 bg-warning-muted/25 text-warning" : "border-success/20 bg-success-muted/20 text-success"}`}>
+                  <div className="flex items-center gap-1 font-semibold">{routePreview.decision.blocked ? <ShieldAlert size={12} /> : <ShieldCheck size={12} />} {routeLabel(routePreview.decision.route)} · {routePreview.decision.blocked ? "Blocked" : "Allowed"}</div>
+                  {routePreview.decision.complianceBlocks.length > 0 && <div className="mt-1 font-mono">{routePreview.decision.complianceBlocks.join(" | ")}</div>}
+                  {routePreview.decision.providerChain.length > 0 && <div className="mt-1 text-text-secondary">chain: {routePreview.decision.providerChain.map((item) => `${item.stage}:${item.provider}`).join(" -> ")}</div>}
+                </div>
+              )}
+              {routePreviewPhase === "error" && routePreviewError && <div className="rounded-md border border-error/20 bg-error-muted/25 p-2 text-[11px] text-error">{routePreviewError}</div>}
             </div>
           </aside>
         </div>
@@ -669,6 +866,13 @@ export function DirectorPage() {
             </div>
           </div>
 
+          <div className="rounded-md border border-accent/15 bg-accent-muted/10 p-3 text-xs text-text-secondary">
+            <div className="mb-1 font-semibold text-text-primary">Style metadata（不修改 transcript 原文）</div>
+            <div>生成路线：<span className="text-accent">{routeLabel(generationRoute)}</span>{selectedVoiceAssetId ? <span className="ml-2 font-mono text-text-tertiary">asset {selectedVoiceAssetId}</span> : null}</div>
+            <div className="mt-1">Gemini audio tags：{geminiAudioTags.length ? geminiAudioTags.join(" ") : "未选择"}</div>
+            <div className="mt-1">Style guidance：{styleGuidance.trim() || "未填写"}</div>
+          </div>
+
           {/* Assembled prompt preview */}
           <div className="flex flex-col gap-2">
             <h3 className="text-sm font-semibold text-text-primary">组装后的提示词</h3>
@@ -699,13 +903,13 @@ export function DirectorPage() {
             <button
               className="px-6 py-2 rounded-md text-sm font-medium transition-colors shadow-shadow-glow flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               style={{
-                backgroundColor: generatePhase === "loading" || !hasApiKey
+                backgroundColor: generatePhase === "loading"
                   ? "var(--color-bg-active)"
                   : "var(--color-accent)",
                 color: "var(--color-bg-base)",
               }}
               onClick={handleGenerate}
-              disabled={generatePhase === "loading" || !hasApiKey}
+              disabled={generatePhase === "loading"}
             >
               {generatePhase === "loading" ? (
                 <>
@@ -719,29 +923,13 @@ export function DirectorPage() {
                 </>
               )}
             </button>
+            {hasKnownMissingRouteProvider && (
+              <div className="basis-full text-right text-[11px] text-warning">
+                当前路线存在未配置 Provider；仍会提交到后端，由结构化 Route / License Gate 返回最终阻断原因。
+              </div>
+            )}
           </div>
         </div>
-
-        {/* No API Key warning overlay */}
-        {!hasApiKey && (
-          <div className="absolute inset-0 bg-bg-base/60 backdrop-blur-sm flex items-center justify-center z-10">
-            <div className="mx-4 bg-bg-elevated border border-border rounded-lg p-6 max-w-[28rem] flex flex-col gap-4 text-center shadow-shadow-lg">
-              <div className="w-12 h-12 rounded-full bg-error-muted flex items-center justify-center mx-auto">
-                <AlertCircle size={24} className="text-error" />
-              </div>
-              <h3 className="text-sm font-semibold text-text-primary">未配置 API 密钥</h3>
-              <p className="text-xs text-text-secondary">
-                生成语音需要调用 OpenRouter API，请先在设置页面配置 API 密钥。组装提示词不消耗额度，但实际生成需要有效的 API 密钥。
-              </p>
-              <button
-                className="text-sm text-accent hover:text-accent-hover transition-colors"
-                onClick={handleBackToEdit}
-              >
-                返回编辑
-              </button>
-            </div>
-          </div>
-        )}
       </div>
     );
   }
@@ -791,6 +979,16 @@ export function DirectorPage() {
                   <span className="text-text-tertiary">预估成本</span>
                   <span className="text-text-primary text-accent">{generateResult.estimatedCost}</span>
                 </div>
+                <div className="flex justify-between gap-4">
+                  <span className="text-text-tertiary">生成路线</span>
+                  <span className="text-text-primary">{routeLabel(generateResult.generationRoute)}</span>
+                </div>
+                {generateResult.providerChain && generateResult.providerChain.length > 0 && (
+                  <div className="flex justify-between gap-4">
+                    <span className="text-text-tertiary">Provider Chain</span>
+                    <span className="text-right text-xs text-text-secondary">{generateResult.providerChain.map((item) => `${item.stage}:${item.provider}`).join(" -> ")}</span>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -810,6 +1008,13 @@ export function DirectorPage() {
                   {generateResult.error?.code ?? "UNKNOWN"}
                 </div>
                 <p className="text-xs text-text-secondary">{generateResult.error?.message ?? "生成过程中发生错误"}</p>
+                {(generateResult.compliance?.blocks?.length || generateResult.providerChain?.length || generateResult.generationRoute) && (
+                  <div className="mt-2 rounded border border-error/15 bg-bg-base/50 p-2 text-[11px] text-text-secondary">
+                    <div>路线：{routeLabel(generateResult.generationRoute)}</div>
+                    {generateResult.compliance?.blocks?.length ? <div className="mt-1 font-mono text-error">Blocks: {generateResult.compliance.blocks.join(" | ")}</div> : null}
+                    {generateResult.providerChain?.length ? <div className="mt-1">Chain: {generateResult.providerChain.map((item) => `${item.stage}:${item.provider}`).join(" -> ")}</div> : null}
+                  </div>
+                )}
               </div>
             </div>
           )}

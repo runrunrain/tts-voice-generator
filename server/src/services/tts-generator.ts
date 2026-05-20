@@ -3,8 +3,11 @@ import { v4 as uuidv4 } from "uuid";
 import { eq } from "drizzle-orm";
 import { getDb } from "../db/index.js";
 import { audioAsset, generationJob, settings } from "../db/schema.js";
-import { isOpenRouterConfigured, requireApiKey } from "./key-resolver.js";
+import { isOpenRouterConfigured, requireApiKey, requireProviderApiKey } from "./key-resolver.js";
 import { OpenRouterProvider, sanitizeText } from "./openrouter-provider.js";
+import { FishAudioProvider } from "./fish-audio-provider.js";
+import { selectGenerationRoute } from "./route-selector.js";
+import type { GenerationRoute, ProviderChainEntry } from "./provider-adapter.js";
 import { acquireSlot, releaseSlot } from "./concurrency.js";
 import { canonicalizeVoice } from "../utils/voice.js";
 import { computeSha256, writeAudioFile } from "../utils/audio-fs.js";
@@ -19,6 +22,14 @@ export const GenerateSpeechSchema = z.object({
   voice: z.string().min(1),
   responseFormat: z.enum(["wav", "pcm", "mp3"]).optional().default("wav"),
   providerOptions: z.record(z.unknown()).optional().nullable(),
+  generationRoute: z.enum(["gemini_only", "gemini_elevenlabs_sts", "fish_audio_tts"]).optional(),
+  characterVoiceMappingId: z.string().optional(),
+  voiceAssetId: z.string().optional(),
+  promptAssembly: z.object({
+    geminiAudioTags: z.array(z.string().min(1).max(80)).max(20).optional(),
+    styleGuidance: z.string().max(1000).optional(),
+    source: z.string().max(120).optional(),
+  }).optional().nullable(),
   directorSnapshot: z.object({
     audioProfile: z.string().optional(),
     scene: z.string().optional(),
@@ -64,6 +75,73 @@ export async function generateSpeech(
   const canonicalVoice = canonicalizeVoice(req.voice);
   const formatPlan = resolveTtsFormat(req.model, req.responseFormat as AudioFormat);
   const effectiveProviderOptions = buildEffectiveProviderOptions(req.model, canonicalVoice, req.providerOptions || undefined);
+  const routeDecision = selectGenerationRoute({
+    requestedRoute: req.generationRoute,
+    characterVoiceMappingId: req.characterVoiceMappingId,
+    voiceAssetId: req.voiceAssetId,
+    transcript: req.input,
+    directorSnapshot: req.directorSnapshot ?? undefined,
+    providerOptions: req.providerOptions ?? undefined,
+  });
+
+  if (routeDecision.blocked) {
+    const jobId = uuidv4();
+    const db = getDb();
+    db.insert(generationJob).values({
+      id: jobId,
+      model: req.model,
+      voice: canonicalVoice,
+      responseFormat: formatPlan.outputFormat,
+      input: req.input,
+      inputCharCount: req.input.length,
+      status: "failed",
+      errorCode: "ROUTE_BLOCKED",
+      errorMessage: "Generation route is blocked by provider configuration or license gate.",
+      errorMetadata: JSON.stringify({ complianceBlocks: routeDecision.complianceBlocks }),
+      generationRoute: routeDecision.route,
+      providerChainJson: JSON.stringify(routeDecision.providerChain),
+      voiceAssetId: routeDecision.voiceAssetId ?? null,
+      licenseRecordId: routeDecision.licenseRecordId ?? null,
+      routeDecisionJson: JSON.stringify(routeDecision),
+      complianceJson: JSON.stringify({ blocked: true, blocks: routeDecision.complianceBlocks, licenseGate: routeDecision.licenseGate }),
+      source: sourceContext.source,
+      agentConversationId: sourceContext.agentConversationId ?? null,
+      agentActionLogId: sourceContext.agentActionLogId ?? null,
+      createdAt: new Date(),
+      completedAt: new Date(),
+    }).run();
+    return {
+      status: 400,
+      body: {
+        ok: false,
+        requestId,
+        jobId,
+        status: "failed",
+        generationRoute: routeDecision.route,
+        providerChain: routeDecision.providerChain,
+        voiceAssetId: routeDecision.voiceAssetId,
+        licenseRecordId: routeDecision.licenseRecordId,
+        compliance: { blocked: true, blocks: routeDecision.complianceBlocks, warnings: routeDecision.licenseGate?.warnings ?? [] },
+        error: {
+          code: routeDecision.complianceBlocks.some((block) => block.startsWith("PROVIDER_KEY_MISSING")) ? "PROVIDER_KEY_MISSING" : "ROUTE_BLOCKED",
+          message: "Generation route is blocked by provider configuration or license gate.",
+          category: "validation" as const,
+          retryable: false,
+          metadata: { routeDecision },
+        },
+        charCount: req.input.length,
+        createdAt: new Date().toISOString(),
+      },
+    };
+  }
+
+  if (routeDecision.route === "fish_audio_tts") {
+    return generateFishSpeech(req, requestId, sourceContext, routeDecision, formatPlan.outputFormat);
+  }
+
+  if (routeDecision.route === "gemini_elevenlabs_sts") {
+    return buildRouteNotImplementedResult(req, requestId, sourceContext, routeDecision, canonicalVoice, formatPlan.outputFormat);
+  }
 
   if (!isOpenRouterConfigured()) {
     const jobId = uuidv4();
@@ -78,6 +156,10 @@ export async function generateSpeech(
       status: "failed",
       errorCode: "MISSING_API_KEY",
       errorMessage: "OpenRouter API Key is not configured. Please go to Settings and configure your API key.",
+      generationRoute: routeDecision.route,
+      providerChainJson: JSON.stringify(routeDecision.providerChain),
+      routeDecisionJson: JSON.stringify(routeDecision),
+      complianceJson: JSON.stringify({ blocked: false, warnings: routeDecision.licenseGate?.warnings ?? [] }),
       source: sourceContext.source,
       agentConversationId: sourceContext.agentConversationId ?? null,
       agentActionLogId: sourceContext.agentActionLogId ?? null,
@@ -91,6 +173,8 @@ export async function generateSpeech(
         requestId,
         jobId,
         status: "failed",
+        generationRoute: routeDecision.route,
+        providerChain: routeDecision.providerChain,
         error: {
           code: "MISSING_API_KEY",
           message: "OpenRouter API Key is not configured. Please go to Settings and configure your API key.",
@@ -120,6 +204,10 @@ export async function generateSpeech(
       status: "failed",
       errorCode: "TEXT_TOO_LONG",
       errorMessage: `Input text exceeds maximum length of ${maxChars} characters (got ${req.input.length}).`,
+      generationRoute: routeDecision.route,
+      providerChainJson: JSON.stringify(routeDecision.providerChain),
+      routeDecisionJson: JSON.stringify(routeDecision),
+      complianceJson: JSON.stringify({ blocked: false, warnings: routeDecision.licenseGate?.warnings ?? [] }),
       source: sourceContext.source,
       agentConversationId: sourceContext.agentConversationId ?? null,
       agentActionLogId: sourceContext.agentActionLogId ?? null,
@@ -133,6 +221,8 @@ export async function generateSpeech(
         requestId,
         jobId,
         status: "failed",
+        generationRoute: routeDecision.route,
+        providerChain: routeDecision.providerChain,
         error: {
           code: "TEXT_TOO_LONG",
           message: `Input text exceeds maximum length of ${maxChars} characters (got ${req.input.length}).`,
@@ -175,6 +265,13 @@ export async function generateSpeech(
     estimatedCost,
     providerOptions: effectiveProviderOptions ? JSON.stringify(effectiveProviderOptions) : null,
     directorSnapshot: req.directorSnapshot ? JSON.stringify(req.directorSnapshot) : null,
+    generationRoute: routeDecision.route,
+    providerChainJson: JSON.stringify(routeDecision.providerChain),
+    voiceAssetId: routeDecision.voiceAssetId ?? null,
+    licenseRecordId: routeDecision.licenseRecordId ?? null,
+    routeDecisionJson: JSON.stringify(routeDecision),
+    costMetadataJson: JSON.stringify({ estimatedUsd: estimateCostNumber(req.input.length), route: routeDecision.route }),
+    complianceJson: JSON.stringify({ blocked: false, warnings: routeDecision.licenseGate?.warnings ?? [] }),
     source: sourceContext.source,
     agentConversationId: sourceContext.agentConversationId ?? null,
     agentActionLogId: sourceContext.agentActionLogId ?? null,
@@ -246,6 +343,11 @@ export async function generateSpeech(
         sampleRate: usableAudioAnalysis ? usableAudioAnalysis.sampleRate : formatPlan.pcmParams?.sampleRate ?? null,
         bitDepth: usableAudioAnalysis ? usableAudioAnalysis.bitsPerSample : formatPlan.pcmParams?.bitDepth ?? null,
         channels: usableAudioAnalysis ? usableAudioAnalysis.channels : formatPlan.pcmParams?.channels ?? null,
+        pipelineStage: "final",
+        provider: "openrouter-gemini",
+        model: req.model,
+        voiceAssetId: routeDecision.voiceAssetId ?? null,
+        aiDisclosureJson: JSON.stringify({ aiGenerated: true, providerChain: routeDecision.providerChain, route: routeDecision.route }),
         createdAt: now,
       }).run();
 
@@ -258,6 +360,11 @@ export async function generateSpeech(
           requestId,
           jobId,
           status: "succeeded",
+          generationRoute: routeDecision.route,
+          providerChain: attachAssetToFinalStage(routeDecision.providerChain, assetId),
+          voiceAssetId: routeDecision.voiceAssetId,
+          licenseRecordId: routeDecision.licenseRecordId,
+          compliance: { blocked: false, warnings: routeDecision.licenseGate?.warnings ?? [] },
           generationId: result.generationId,
           assetId,
           audioUrl: `/api/audio/${assetId}`,
@@ -303,6 +410,8 @@ export async function generateSpeech(
         requestId,
         jobId,
         status: "failed",
+        generationRoute: routeDecision.route,
+        providerChain: routeDecision.providerChain,
         error: {
           code: result.errorCode,
           message: sanitizeText(result.errorMessage),
@@ -331,6 +440,8 @@ export async function generateSpeech(
         requestId,
         jobId,
         status: "failed",
+        generationRoute: routeDecision.route,
+        providerChain: routeDecision.providerChain,
         error: {
           code: "INTERNAL_ERROR",
           message: safeErrMsg,
@@ -342,6 +453,260 @@ export async function generateSpeech(
       },
     };
   }
+}
+
+async function generateFishSpeech(
+  req: GenerateSpeechRequest,
+  requestId: string,
+  sourceContext: SourceContext,
+  routeDecision: ReturnType<typeof selectGenerationRoute>,
+  outputFormat: AudioFormat,
+): Promise<GenerateSpeechResult> {
+  const db = getDb();
+  const settingsRow = db.select().from(settings).where(eq(settings.id, 1)).get();
+  const maxChars = settingsRow?.maxCharsPerRequest || 5000;
+  const maxConcurrent = settingsRow?.maxConcurrentJobs || 2;
+  const canonicalVoice = canonicalizeVoice(req.voice);
+  const createdAt = new Date();
+
+  if (req.input.length > maxChars) {
+    const jobId = uuidv4();
+    db.insert(generationJob).values({
+      id: jobId,
+      model: readNestedOption(req.providerOptions, ["fish", "model"]) ?? "speech-1.5",
+      voice: canonicalVoice,
+      responseFormat: outputFormat,
+      input: req.input,
+      inputCharCount: req.input.length,
+      status: "failed",
+      errorCode: "TEXT_TOO_LONG",
+      errorMessage: `Input text exceeds maximum length of ${maxChars} characters (got ${req.input.length}).`,
+      generationRoute: routeDecision.route,
+      providerChainJson: JSON.stringify(routeDecision.providerChain),
+      voiceAssetId: routeDecision.voiceAssetId ?? null,
+      licenseRecordId: routeDecision.licenseRecordId ?? null,
+      routeDecisionJson: JSON.stringify(routeDecision),
+      complianceJson: JSON.stringify({ blocked: false, warnings: routeDecision.licenseGate?.warnings ?? [] }),
+      source: sourceContext.source,
+      agentConversationId: sourceContext.agentConversationId ?? null,
+      agentActionLogId: sourceContext.agentActionLogId ?? null,
+      createdAt,
+      completedAt: createdAt,
+    }).run();
+    return {
+      status: 400,
+      body: {
+        ok: false,
+        requestId,
+        jobId,
+        status: "failed",
+        generationRoute: routeDecision.route,
+        providerChain: routeDecision.providerChain,
+        error: { code: "TEXT_TOO_LONG", message: `Input text exceeds maximum length of ${maxChars} characters (got ${req.input.length}).`, category: "validation" as const, retryable: false },
+        charCount: req.input.length,
+        createdAt: createdAt.toISOString(),
+      },
+    };
+  }
+
+  const slotResult = acquireSlot(maxConcurrent);
+  if (!slotResult.allowed) {
+    return {
+      status: 503,
+      body: { ok: false, requestId, jobId: null, status: "failed", generationRoute: routeDecision.route, providerChain: routeDecision.providerChain, error: slotResult.error, charCount: req.input.length, createdAt: createdAt.toISOString() },
+    };
+  }
+
+  const jobId = uuidv4();
+  const model = readNestedOption(req.providerOptions, ["fish", "model"]) ?? "speech-1.5";
+  const responseFormat = normalizeExternalFormat(readNestedOption(req.providerOptions, ["fish", "format"]) ?? outputFormat);
+  const estimatedUsd = Number((Buffer.byteLength(req.input, "utf8") * 0.000015).toFixed(8));
+  db.insert(generationJob).values({
+    id: jobId,
+    model,
+    voice: routeDecision.fishReferenceId ?? canonicalVoice,
+    responseFormat,
+    input: req.input,
+    inputCharCount: req.input.length,
+    status: "running",
+    estimatedCost: `$${estimatedUsd.toFixed(4)}`,
+    providerOptions: req.providerOptions ? JSON.stringify(req.providerOptions) : null,
+    directorSnapshot: req.directorSnapshot ? JSON.stringify(req.directorSnapshot) : null,
+    generationRoute: routeDecision.route,
+    providerChainJson: JSON.stringify(routeDecision.providerChain),
+    voiceAssetId: routeDecision.voiceAssetId ?? null,
+    licenseRecordId: routeDecision.licenseRecordId ?? null,
+    routeDecisionJson: JSON.stringify(routeDecision),
+    costMetadataJson: JSON.stringify({ estimatedUsd, inputBytes: Buffer.byteLength(req.input, "utf8"), route: routeDecision.route }),
+    complianceJson: JSON.stringify({ blocked: false, warnings: routeDecision.licenseGate?.warnings ?? [] }),
+    source: sourceContext.source,
+    agentConversationId: sourceContext.agentConversationId ?? null,
+    agentActionLogId: sourceContext.agentActionLogId ?? null,
+    createdAt,
+  }).run();
+
+  try {
+    const provider = new FishAudioProvider(requireProviderApiKey("fish-audio"));
+    const result = await provider.generateSpeech({
+      text: req.input,
+      referenceId: routeDecision.fishReferenceId ?? "",
+      model,
+      format: responseFormat,
+    });
+    const now = new Date();
+    if (!result.ok || !result.audioBuffer) {
+      db.update(generationJob).set({
+        status: "failed",
+        errorCode: result.ok ? "UNEXPECTED_RESPONSE_TYPE" : result.errorCode,
+        errorMessage: result.ok ? "Fish response did not include audio." : sanitizeText(result.errorMessage),
+        errorMetadata: JSON.stringify(result.safeMetadata ?? {}),
+        completedAt: now,
+      }).where(eq(generationJob.id, jobId)).run();
+      releaseSlot(slotResult.slotId);
+      return {
+        status: result.ok ? 502 : providerHttpStatus(result.statusCode),
+        body: {
+          ok: false,
+          requestId,
+          jobId,
+          status: "failed",
+          generationRoute: routeDecision.route,
+          providerChain: routeDecision.providerChain,
+          voiceAssetId: routeDecision.voiceAssetId,
+          licenseRecordId: routeDecision.licenseRecordId,
+          compliance: { blocked: false, warnings: routeDecision.licenseGate?.warnings ?? [] },
+          error: {
+            code: result.ok ? "UNEXPECTED_RESPONSE_TYPE" : result.errorCode,
+            message: result.ok ? "Fish response did not include audio." : sanitizeText(result.errorMessage),
+            category: result.ok ? "upstream" as const : classifyErrorCategory(result.errorCode),
+            retryable: result.ok ? false : result.retryable,
+            metadata: result.ok ? undefined : result.safeMetadata,
+          },
+          charCount: req.input.length,
+          createdAt: now.toISOString(),
+        },
+      };
+    }
+
+    const extension = responseFormat === "mp3" ? "mp3" : responseFormat === "pcm" ? "pcm" : "wav";
+    const filePath = writeAudioFile(jobId, extension, result.audioBuffer, now);
+    const sha256 = computeSha256(result.audioBuffer);
+    const audioAnalysis: WavAnalysisResult = extension === "wav" ? analyzeWavBuffer(result.audioBuffer) : { ok: false, code: "UNSUPPORTED_CONTAINER", message: "Non-WAV output is not analyzed as WAV." };
+    const usableAudioAnalysis = getUsableAudioAnalysis(audioAnalysis);
+    const duration = usableAudioAnalysis ? `${usableAudioAnalysis.durationSeconds.toFixed(1)}s` : `${Math.max(0.5, req.input.length * 0.007).toFixed(1)}s`;
+    const providerChain = attachLatencyToFinalStage(routeDecision.providerChain, result.latencyMs, result.providerRequestId ?? null);
+    db.update(generationJob).set({
+      status: "succeeded",
+      generationId: result.providerRequestId ?? null,
+      actualCost: `$${estimatedUsd.toFixed(4)}`,
+      providerChainJson: JSON.stringify(providerChain),
+      completedAt: now,
+    }).where(eq(generationJob.id, jobId)).run();
+    const assetResult = db.insert(audioAsset).values({
+      jobId,
+      fileName: `${jobId}.${extension}`,
+      filePath,
+      mimeType: result.contentType ?? mimeForFormat(responseFormat),
+      sizeBytes: result.audioBuffer.length,
+      sha256,
+      duration,
+      sampleRate: usableAudioAnalysis ? usableAudioAnalysis.sampleRate : null,
+      bitDepth: usableAudioAnalysis ? usableAudioAnalysis.bitsPerSample : null,
+      channels: usableAudioAnalysis ? usableAudioAnalysis.channels : null,
+      pipelineStage: "final",
+      provider: "fish-audio",
+      model,
+      voiceAssetId: routeDecision.voiceAssetId ?? null,
+      aiDisclosureJson: JSON.stringify({ aiGenerated: true, providerChain, route: routeDecision.route, safeProviderMetadata: result.safeMetadata }),
+      createdAt: now,
+    }).run();
+    releaseSlot(slotResult.slotId);
+    const assetId = Number(assetResult.lastInsertRowid);
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        requestId,
+        jobId,
+        status: "succeeded",
+        generationId: result.providerRequestId,
+        generationRoute: routeDecision.route,
+        providerChain: attachAssetToFinalStage(providerChain, assetId),
+        voiceAssetId: routeDecision.voiceAssetId,
+        licenseRecordId: routeDecision.licenseRecordId,
+        compliance: { blocked: false, warnings: routeDecision.licenseGate?.warnings ?? [] },
+        cost: { estimatedUsd, actualUsd: estimatedUsd, budgetStatus: "within_budget" },
+        assetId,
+        audioUrl: `/api/audio/${assetId}`,
+        contentType: result.contentType ?? mimeForFormat(responseFormat),
+        duration,
+        sizeBytes: result.audioBuffer.length,
+        charCount: req.input.length,
+        estimatedCost: `$${estimatedUsd.toFixed(4)}`,
+        createdAt: now.toISOString(),
+      },
+    };
+  } catch (error) {
+    releaseSlot(slotResult.slotId);
+    const now = new Date();
+    const safeMessage = sanitizeText(error instanceof Error ? error.message : "Fish generation failed.");
+    db.update(generationJob).set({ status: "failed", errorCode: "PROVIDER_ERROR", errorMessage: safeMessage, completedAt: now }).where(eq(generationJob.id, jobId)).run();
+    return {
+      status: 502,
+      body: { ok: false, requestId, jobId, status: "failed", generationRoute: routeDecision.route, providerChain: routeDecision.providerChain, error: { code: "PROVIDER_ERROR", message: safeMessage, category: "upstream" as const, retryable: true }, charCount: req.input.length, createdAt: now.toISOString() },
+    };
+  }
+}
+
+function buildRouteNotImplementedResult(
+  req: GenerateSpeechRequest,
+  requestId: string,
+  sourceContext: SourceContext,
+  routeDecision: ReturnType<typeof selectGenerationRoute>,
+  canonicalVoice: string,
+  outputFormat: AudioFormat,
+): GenerateSpeechResult {
+  const jobId = uuidv4();
+  const now = new Date();
+  getDb().insert(generationJob).values({
+    id: jobId,
+    model: req.model,
+    voice: canonicalVoice,
+    responseFormat: outputFormat,
+    input: req.input,
+    inputCharCount: req.input.length,
+    status: "failed",
+    errorCode: "ROUTE_NOT_ENABLED",
+    errorMessage: "Gemini + ElevenLabs STS generation route is not enabled in this backend foundation slice.",
+    generationRoute: routeDecision.route,
+    providerChainJson: JSON.stringify(routeDecision.providerChain),
+    voiceAssetId: routeDecision.voiceAssetId ?? null,
+    licenseRecordId: routeDecision.licenseRecordId ?? null,
+    routeDecisionJson: JSON.stringify(routeDecision),
+    complianceJson: JSON.stringify({ blocked: false, warnings: routeDecision.licenseGate?.warnings ?? [] }),
+    source: sourceContext.source,
+    agentConversationId: sourceContext.agentConversationId ?? null,
+    agentActionLogId: sourceContext.agentActionLogId ?? null,
+    createdAt: now,
+    completedAt: now,
+  }).run();
+  return {
+    status: 501,
+    body: {
+      ok: false,
+      requestId,
+      jobId,
+      status: "failed",
+      generationRoute: routeDecision.route,
+      providerChain: routeDecision.providerChain,
+      voiceAssetId: routeDecision.voiceAssetId,
+      licenseRecordId: routeDecision.licenseRecordId,
+      compliance: { blocked: false, warnings: routeDecision.licenseGate?.warnings ?? [] },
+      error: { code: "ROUTE_NOT_ENABLED", message: "Gemini + ElevenLabs STS generation route is not enabled in this backend foundation slice.", category: "validation" as const, retryable: false },
+      charCount: req.input.length,
+      createdAt: now.toISOString(),
+    },
+  };
 }
 
 function buildEffectiveProviderOptions(
@@ -463,4 +828,40 @@ export function classifyErrorCategory(code: string): "validation" | "auth" | "th
     default:
       return "unknown";
   }
+}
+
+function readNestedOption(source: Record<string, unknown> | null | undefined, path: string[]): string | null {
+  let current: unknown = source;
+  for (const key of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return null;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return typeof current === "string" && current.trim().length > 0 ? current : null;
+}
+
+function normalizeExternalFormat(value: string): "wav" | "pcm" | "mp3" {
+  return value === "mp3" || value === "pcm" || value === "wav" ? value : "wav";
+}
+
+function mimeForFormat(value: "wav" | "pcm" | "mp3"): string {
+  if (value === "mp3") return "audio/mpeg";
+  if (value === "pcm") return "audio/L16";
+  return "audio/wav";
+}
+
+function providerHttpStatus(statusCode: number): 400 | 401 | 402 | 429 | 502 | 504 {
+  if (statusCode === 400 || statusCode === 404) return 400;
+  if (statusCode === 401 || statusCode === 403) return 401;
+  if (statusCode === 402) return 402;
+  if (statusCode === 429) return 429;
+  if (statusCode === 504) return 504;
+  return 502;
+}
+
+function attachLatencyToFinalStage(chain: ProviderChainEntry[], latencyMs: number, requestId: string | null): ProviderChainEntry[] {
+  return chain.map((entry, index) => index === chain.length - 1 ? { ...entry, latencyMs, requestId } : entry);
+}
+
+function attachAssetToFinalStage(chain: ProviderChainEntry[], assetId: number): ProviderChainEntry[] {
+  return chain.map((entry, index) => index === chain.length - 1 ? { ...entry, assetId } : entry);
 }

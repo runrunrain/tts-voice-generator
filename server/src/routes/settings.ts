@@ -44,6 +44,8 @@ const app = new Hono();
 
 const SettingsSchema = z.object({
   openRouterApiKey: z.string().optional(),
+  elevenLabsApiKey: z.string().optional(),
+  fishAudioApiKey: z.string().optional(),
   defaultModel: z.string().optional(),
   defaultVoice: z.string().optional(),
   defaultFormat: z.enum(["wav", "pcm", "mp3"]).optional(),
@@ -119,6 +121,16 @@ function agentSettingsPayload(row: typeof settings.$inferSelect | undefined) {
   };
 }
 
+function hasStoredKey(value: string | null | undefined): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function maskStoredKey(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const decrypted = decryptApiKey(value);
+  return maskApiKey(decrypted ?? value);
+}
+
 function localCapabilityError(capabilities: OpenCodeRuntimeCapabilities) {
   return {
     ok: false,
@@ -159,7 +171,10 @@ app.get("/api/settings", (c) => {
   if (!row) {
     return c.json({
       hasOpenRouterApiKey: false,
+      hasElevenLabsApiKey: false,
+      hasFishAudioApiKey: false,
       keyMask: null,
+      providerKeyMasks: { openrouter: null, elevenlabs: null, fishAudio: null },
       defaultModel: "google/gemini-3.1-flash-tts-preview",
       defaultVoice: "Zephyr",
       defaultFormat: "wav",
@@ -189,7 +204,14 @@ app.get("/api/settings", (c) => {
 
   return c.json({
     hasOpenRouterApiKey: hasKey,
+    hasElevenLabsApiKey: hasStoredKey(row.elevenLabsApiKey),
+    hasFishAudioApiKey: hasStoredKey(row.fishAudioApiKey),
     keyMask,
+    providerKeyMasks: {
+      openrouter: keyMask,
+      elevenlabs: maskStoredKey(row.elevenLabsApiKey),
+      fishAudio: maskStoredKey(row.fishAudioApiKey),
+    },
     // Backward compat: also return openRouterApiKey field for older frontend
     openRouterApiKey: hasKey ? keyMask : null,
     defaultModel: row.defaultModel,
@@ -230,6 +252,12 @@ app.put("/api/settings", async (c) => {
       updateValues.openRouterApiKey = null;
     }
   }
+  if (data.elevenLabsApiKey !== undefined) {
+    updateValues.elevenLabsApiKey = data.elevenLabsApiKey.trim().length > 0 ? encryptApiKey(data.elevenLabsApiKey.trim()) : null;
+  }
+  if (data.fishAudioApiKey !== undefined) {
+    updateValues.fishAudioApiKey = data.fishAudioApiKey.trim().length > 0 ? encryptApiKey(data.fishAudioApiKey.trim()) : null;
+  }
   if (data.defaultModel !== undefined) updateValues.defaultModel = data.defaultModel;
   if (data.defaultVoice !== undefined) updateValues.defaultVoice = canonicalizeVoice(data.defaultVoice);
   if (data.defaultFormat !== undefined) updateValues.defaultFormat = normalizeFormat(data.defaultFormat);
@@ -266,6 +294,8 @@ app.put("/api/settings", async (c) => {
   return c.json({
     ok: true,
     openRouterKeySaved: !!data.openRouterApiKey,
+    elevenLabsKeySaved: !!data.elevenLabsApiKey,
+    fishAudioKeySaved: !!data.fishAudioApiKey,
     localPluginToken: rotatedToken ?? undefined,
   });
 });

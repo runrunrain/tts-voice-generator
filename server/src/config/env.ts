@@ -14,6 +14,10 @@ interface EnvConfig {
   port: number;
   openRouterApiKey: string | null;
   openRouterBaseUrl: string;
+  elevenLabsApiKey: string | null;
+  elevenLabsBaseUrl: string;
+  fishAudioApiKey: string | null;
+  fishAudioBaseUrl: string;
   audioOutputDir: string;
   dbPath: string;
   dataDir: string;
@@ -28,6 +32,10 @@ function loadEnv(): EnvConfig {
     port: parseInt(process.env.PORT || "3001", 10),
     openRouterApiKey: process.env.OPENROUTER_API_KEY || null,
     openRouterBaseUrl: process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1",
+    elevenLabsApiKey: process.env.ELEVENLABS_API_KEY || null,
+    elevenLabsBaseUrl: process.env.ELEVENLABS_BASE_URL || "https://api.elevenlabs.io",
+    fishAudioApiKey: process.env.FISH_AUDIO_API_KEY || null,
+    fishAudioBaseUrl: process.env.FISH_AUDIO_BASE_URL || "https://api.fish.audio",
     audioOutputDir: process.env.AUDIO_OUTPUT_DIR || "./data/audio",
     dbPath: process.env.DB_PATH || "./data/db/tts-generator.db",
     dataDir: process.env.DATA_DIR || "./data",

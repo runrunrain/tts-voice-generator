@@ -75,6 +75,175 @@ export interface VoiceAuditionOptions {
   forceRefresh?: boolean;
 }
 
+// ─── Voice Asset Registry / Route Gate ───────────────────────────────────────
+
+export type ProviderId = "openrouter-gemini" | "elevenlabs" | "fish-audio";
+export type GenerationRoute = "gemini_only" | "gemini_elevenlabs_sts" | "fish_audio_tts";
+export type PipelineStage = "base_tts" | "voice_conversion" | "final" | "audition";
+export type VoiceAssetType = "gemini_preset" | "fish_platform" | "custom_cloned" | "custom_designed" | "custom_imported";
+export type VoiceAssetStatus = "draft" | "license_pending" | "legal_review_required" | "ready_for_model_creation" | "model_creating" | "active" | "revoked" | "failed";
+export type LicenseStatus = "pending" | "approved" | "revoked" | "expired" | "legal_review_required";
+
+export interface ProviderChainEntry {
+  stage: PipelineStage;
+  provider: ProviderId;
+  model?: string;
+  assetId?: number;
+  latencyMs?: number;
+  requestId?: string | null;
+}
+
+export interface VoiceAsset {
+  id: string;
+  name: string;
+  type: VoiceAssetType;
+  status: VoiceAssetStatus;
+  provider: ProviderId | null;
+  providerVoiceId: string | null;
+  fishReferenceId: string | null;
+  licenseRecordId: string | null;
+  sourceTermsSnapshotId: string | null;
+  metadata: unknown;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface VoiceLicenseRecord {
+  id: string;
+  voiceAssetId: string | null;
+  status: LicenseStatus;
+  scope: unknown;
+  validFrom: string | null;
+  validUntil: string | null;
+  revokedAt: string | null;
+  evidenceUri: string | null;
+  crossPlatformCloneAllowed: boolean;
+  notes: string | null;
+}
+
+export interface VoiceReferenceAsset {
+  id: string;
+  voiceAssetId: string;
+  audioAssetId: number | null;
+  provider: ProviderId | string | null;
+  referenceId: string | null;
+  qualityStatus: string | null;
+  transcriptStatus: string | null;
+  metadata: unknown;
+  createdAt: string | null;
+}
+
+export interface SourceTermsSnapshot {
+  id: string;
+  sourceType: string;
+  sourceTool: string | null;
+  termsVersion: string | null;
+  termsTextHash: string | null;
+  contractUri: string | null;
+  capturedAt: string | null;
+  metadata: unknown;
+}
+
+export interface VoiceAssetDetail {
+  voiceAsset: VoiceAsset;
+  licenses: VoiceLicenseRecord[];
+  references: VoiceReferenceAsset[];
+}
+
+export interface VoiceAssetListResult {
+  items: VoiceAsset[];
+  total: number;
+}
+
+export interface VoiceAssetCapabilities {
+  providers: {
+    openrouterGemini: { configured: boolean; routes: GenerationRoute[] };
+    elevenlabs: { configured: boolean; routes: GenerationRoute[]; endpoints?: string[] };
+    fishAudio: { configured: boolean; routes: GenerationRoute[]; endpoints?: string[]; modelVisibilityDefault?: string };
+  };
+  routes: GenerationRoute[];
+  licenseGate: { enforcedBackend: boolean; defaultBlocks: string[] };
+}
+
+export interface LicenseGateBlock {
+  code: string;
+  message?: string;
+  [key: string]: unknown;
+}
+
+export interface LicenseGateResult {
+  allowed: boolean;
+  blocks: LicenseGateBlock[];
+  warnings: LicenseGateBlock[];
+  licenseRecordId?: string | null;
+}
+
+export interface VoiceRouteDecision {
+  route: GenerationRoute;
+  requestedRoute?: GenerationRoute;
+  voiceAssetId?: string;
+  licenseRecordId?: string | null;
+  providerVoiceId?: string;
+  fishReferenceId?: string;
+  providerChain: ProviderChainEntry[];
+  reasons: string[];
+  complianceBlocks: string[];
+  licenseGate?: LicenseGateResult | null;
+  blocked: boolean;
+}
+
+export interface VoiceRoutePreviewRequest {
+  generationRoute?: GenerationRoute;
+  characterVoiceMappingId?: string;
+  voiceAssetId?: string;
+  transcript: string;
+  directorSnapshot?: Record<string, unknown>;
+  providerOptions?: Record<string, unknown>;
+}
+
+export interface VoiceRoutePreviewResult {
+  requestId: string;
+  decision: VoiceRouteDecision;
+}
+
+export interface CreateVoiceAssetRequest {
+  name: string;
+  type: VoiceAssetType;
+  provider?: ProviderId;
+  providerVoiceId?: string;
+  fishReferenceId?: string;
+  licenseRecordId?: string;
+  sourceTermsSnapshotId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface UpdateVoiceAssetRequest {
+  name?: string;
+  status?: VoiceAssetStatus;
+  licenseRecordId?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface CreateLicenseRecordRequest {
+  voiceAssetId?: string;
+  status: LicenseStatus;
+  scope: Record<string, unknown>;
+  validFrom?: string;
+  validUntil?: string;
+  evidenceUri?: string;
+  crossPlatformCloneAllowed?: boolean;
+  notes?: string;
+}
+
+export interface CreateSourceTermsRequest {
+  sourceType: string;
+  sourceTool?: string;
+  termsVersion?: string;
+  contractUri?: string;
+  termsTextHash?: string;
+  metadata?: Record<string, unknown>;
+}
+
 // ─── Generation Request / Result ─────────────────────────────────────────────
 
 export type AudioFormat = "wav" | "pcm" | "mp3";
@@ -83,6 +252,16 @@ export interface GenerateRequest {
   text: string;
   voice: string;
   format: AudioFormat;
+  generationRoute?: GenerationRoute;
+  voiceAssetId?: string;
+  characterVoiceMappingId?: string;
+  providerOptions?: Record<string, unknown>;
+  /** Gemini audio tags/style guidance metadata. Must not mutate transcript text. */
+  promptAssembly?: {
+    geminiAudioTags?: string[];
+    styleGuidance?: string;
+    source?: string;
+  };
   style?: string;
   /** Optional speaker config for Director mode */
   speakers?: SpeakerConfig[];
@@ -117,7 +296,15 @@ export interface GenerateResult {
   error?: {
     code: string;
     message: string;
+    category?: string;
+    retryable?: boolean;
+    metadata?: unknown;
   };
+  generationRoute?: GenerationRoute;
+  providerChain?: ProviderChainEntry[];
+  voiceAssetId?: string | null;
+  licenseRecordId?: string | null;
+  compliance?: { blocked?: boolean; blocks?: string[]; warnings?: unknown[] };
   timestamp: string;
   /** Demo flag -- true means this is not real output */
   isDemo: boolean;
@@ -1073,6 +1260,16 @@ export interface TtsServiceAdapter {
   generateSpeech(req: GenerateRequest): Promise<GenerateResult>;
   auditionVoice?(voiceName: string, options?: VoiceAuditionOptions): Promise<VoiceAuditionResult>;
   probeVoice(voiceName: string, force?: boolean): Promise<{ status: VoiceStatus; latency: string; cached?: boolean; cacheTtlSeconds?: number | null; lastVerified?: string | null; error?: string }>;
+  getVoiceAssetCapabilities?(): Promise<VoiceAssetCapabilities>;
+  listVoiceAssets?(filters?: { type?: VoiceAssetType | "all"; status?: VoiceAssetStatus | "all"; provider?: ProviderId | "all"; q?: string }): Promise<VoiceAssetListResult>;
+  getVoiceAsset?(id: string): Promise<VoiceAssetDetail>;
+  createVoiceAsset?(payload: CreateVoiceAssetRequest): Promise<{ voiceAsset: VoiceAsset; compliance?: unknown }>;
+  updateVoiceAsset?(id: string, payload: UpdateVoiceAssetRequest): Promise<{ voiceAsset: VoiceAsset }>;
+  activateVoiceAsset?(id: string): Promise<{ voiceAsset: VoiceAsset; compliance?: LicenseGateResult }>;
+  revokeVoiceAsset?(id: string, reason: string): Promise<{ voiceAsset: VoiceAsset }>;
+  createLicenseRecord?(payload: CreateLicenseRecordRequest): Promise<{ licenseRecord: VoiceLicenseRecord }>;
+  createSourceTerms?(payload: CreateSourceTermsRequest): Promise<{ sourceTermsSnapshot: SourceTermsSnapshot }>;
+  previewVoiceRoute?(payload: VoiceRoutePreviewRequest): Promise<VoiceRoutePreviewResult>;
   testConnection(): Promise<ConnectionStatus>;
   listVoices(): VoiceProfile[];
   /** Async voice list for backend-backed adapters */

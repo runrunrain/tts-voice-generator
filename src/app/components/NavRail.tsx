@@ -1,5 +1,5 @@
 import { Link, useLocation } from "react-router";
-import { Mic, History, Settings, Clapperboard, Bell, Factory, Bot } from "lucide-react";
+import { Mic, History, Settings, Clapperboard, Bell, Factory, Bot, LibraryBig } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 interface NavRailProps {
@@ -24,6 +24,7 @@ const taskNavItems: NavRailLinkItem[] = [
 
 const libraryNavItems: NavRailLinkItem[] = [
   { path: "/voices", label: "音色", icon: Mic },
+  { path: "/voice-assets", label: "资产", icon: LibraryBig },
   { path: "/history", label: "历史", icon: History },
 ];
 

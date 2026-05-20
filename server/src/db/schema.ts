@@ -17,6 +17,8 @@ import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 export const settings = sqliteTable("settings", {
   id: integer("id").primaryKey(),
   openRouterApiKey: text("open_router_api_key"),
+  elevenLabsApiKey: text("elevenlabs_api_key"),
+  fishAudioApiKey: text("fish_audio_api_key"),
   defaultModel: text("default_model").notNull().default("google/gemini-3.1-flash-tts-preview"),
   defaultVoice: text("default_voice").notNull().default("Zephyr"),
   defaultFormat: text("default_format").notNull().default("wav"),
@@ -67,6 +69,14 @@ export const generationJob = sqliteTable("generation_job", {
   errorCode: text("error_code"),
   errorMessage: text("error_message"),
   errorMetadata: text("error_metadata"), // JSON string
+  generationRoute: text("generation_route").notNull().default("gemini_only"),
+  providerChainJson: text("provider_chain_json"),
+  voiceAssetId: text("voice_asset_id"),
+  licenseRecordId: text("license_record_id"),
+  intermediateAudioAssetId: integer("intermediate_audio_asset_id"),
+  routeDecisionJson: text("route_decision_json"),
+  costMetadataJson: text("cost_metadata_json"),
+  complianceJson: text("compliance_json"),
   source: text("source").notNull().default("user"), // user | agent | cli
   agentConversationId: text("agent_conversation_id"),
   agentActionLogId: integer("agent_action_log_id"),
@@ -88,7 +98,108 @@ export const audioAsset = sqliteTable("audio_asset", {
   sampleRate: integer("sample_rate"),
   bitDepth: integer("bit_depth"),
   channels: integer("channels"),
+  parentAssetId: integer("parent_asset_id"),
+  pipelineStage: text("pipeline_stage"),
+  provider: text("provider"),
+  model: text("model"),
+  voiceAssetId: text("voice_asset_id"),
+  aiDisclosureJson: text("ai_disclosure_json"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+// ─── Voice Asset Registry And Provenance ─────────────────────────────────────
+
+export const voiceAsset = sqliteTable("voice_asset", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  type: text("type").notNull(),
+  status: text("status").notNull().default("draft"),
+  provider: text("provider"),
+  providerVoiceId: text("provider_voice_id"),
+  fishReferenceId: text("fish_reference_id"),
+  licenseRecordId: text("license_record_id"),
+  sourceTermsSnapshotId: text("source_terms_snapshot_id"),
+  metadataJson: text("metadata_json").notNull().default("{}"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const voiceLicenseRecord = sqliteTable("voice_license_record", {
+  id: text("id").primaryKey(),
+  assetId: text("asset_id"),
+  status: text("status").notNull().default("pending"),
+  scopeJson: text("scope_json").notNull().default("{}"),
+  validFrom: integer("valid_from", { mode: "timestamp" }),
+  validUntil: integer("valid_until", { mode: "timestamp" }),
+  revokedAt: integer("revoked_at", { mode: "timestamp" }),
+  evidenceUri: text("evidence_uri"),
+  crossPlatformCloneAllowed: integer("cross_platform_clone_allowed", { mode: "boolean" }).notNull().default(false),
+  notes: text("notes"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const voiceReferenceAsset = sqliteTable("voice_reference_asset", {
+  id: text("id").primaryKey(),
+  voiceAssetId: text("voice_asset_id").notNull(),
+  audioAssetId: integer("audio_asset_id"),
+  provider: text("provider").notNull(),
+  referenceId: text("reference_id"),
+  qualityStatus: text("quality_status").notNull().default("pending"),
+  transcriptStatus: text("transcript_status").notNull().default("pending"),
+  metadataJson: text("metadata_json").notNull().default("{}"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const sourceTermsSnapshot = sqliteTable("source_terms_snapshot", {
+  id: text("id").primaryKey(),
+  sourceType: text("source_type").notNull(),
+  sourceTool: text("source_tool"),
+  termsVersion: text("terms_version"),
+  termsTextHash: text("terms_text_hash"),
+  contractUri: text("contract_uri"),
+  capturedAt: integer("captured_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  metadataJson: text("metadata_json").notNull().default("{}"),
+});
+
+export const fishVoiceModel = sqliteTable("fish_voice_model", {
+  id: text("id").primaryKey(),
+  voiceAssetId: text("voice_asset_id").notNull(),
+  fishModelId: text("fish_model_id"),
+  referenceId: text("reference_id"),
+  trainMode: text("train_mode").notNull().default("fast"),
+  visibility: text("visibility").notNull().default("private"),
+  status: text("status").notNull().default("pending"),
+  errorJson: text("error_json"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const audioToVoiceBuild = sqliteTable("audio_to_voice_build", {
+  id: text("id").primaryKey(),
+  sourceAudioAssetId: integer("source_audio_asset_id").notNull(),
+  voiceAssetId: text("voice_asset_id"),
+  state: text("state").notNull().default("draft"),
+  qualityJson: text("quality_json").notNull().default("{}"),
+  transcriptText: text("transcript_text"),
+  transcriptMode: text("transcript_mode"),
+  licenseRecordId: text("license_record_id"),
+  errorJson: text("error_json"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
+export const characterVoiceMapping = sqliteTable("character_voice_mapping", {
+  id: text("id").primaryKey(),
+  characterId: text("character_id"),
+  characterName: text("character_name").notNull(),
+  defaultGenerationRoute: text("default_generation_route").notNull().default("gemini_only"),
+  voiceAssetId: text("voice_asset_id"),
+  providerVoiceId: text("provider_voice_id"),
+  fishReferenceId: text("fish_reference_id"),
+  routeOptionsJson: text("route_options_json").notNull().default("{}"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 });
 
 // ─── Agent Action Log (reserved for Phase 6) ────────────────────────────────

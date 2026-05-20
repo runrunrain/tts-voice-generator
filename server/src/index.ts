@@ -41,6 +41,7 @@ import productionListRoutes from "./routes/production-list.js";
 import directorProfilesRoutes from "./routes/director-profiles.js";
 import agentButtonsRoutes from "./routes/agent-buttons.js";
 import agentChatRoutes from "./routes/agent-chat.js";
+import voiceAssetsRoutes from "./routes/voice-assets.js";
 
 const DEFAULT_CORS_ORIGINS = [
   "http://localhost:5173",
@@ -220,6 +221,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.route("/", directorProfilesRoutes);
   app.route("/", agentButtonsRoutes);
   app.route("/", agentChatRoutes);
+  app.route("/", voiceAssetsRoutes);
 
 // Keep API semantics JSON-only. Static SPA fallback is registered after this
 // guard so missing /api/* routes never return index.html.
