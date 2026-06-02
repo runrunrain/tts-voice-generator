@@ -79,6 +79,11 @@ module.exports = {
       to: "build",
       filter: ["tray-icon.ico", "tray-iconTemplate.png"],
     },
+    {
+      from: path.resolve(appDir, "opencode-runtime"),
+      to: "opencode-runtime",
+      filter: ["**/*"],
+    },
   ],
   publish: [
     {

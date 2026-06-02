@@ -273,6 +273,10 @@ export async function createOpenCodeInstallPlan(): Promise<OpenCodeInstallPlanRe
     const expiresAt = Date.now() + NONCE_TTL_MS;
     nonces.set(nonce, expiresAt);
     const packageManagers = emptyPackageManagersAvailability();
+    const isBundled = currentAvailability.runtimeSource === "bundled";
+    const warningMessage = isBundled
+      ? "OpenCode 内嵌运行时已可用，无需手动安装。如需使用本地版本，可通过 npm/pnpm/bun 全局安装。"
+      : "OpenCode CLI 已安装且可执行，无需重新安装。";
     return {
       ok: true,
       controlledInstallAvailable: false,
@@ -284,7 +288,7 @@ export async function createOpenCodeInstallPlan(): Promise<OpenCodeInstallPlanRe
       npm: packageManagers.npm,
       packageManagers,
       installCandidates: [],
-      warnings: ["OpenCode CLI 已安装且可执行，无需重新安装。"],
+      warnings: [warningMessage],
     };
   }
 
