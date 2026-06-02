@@ -30,6 +30,8 @@ import {
   resolveOpenCodeProcessContextAsync,
   type OpenCodeInstallMethod,
   type OpenCodePathState,
+  type OpenCodeRuntimeSource,
+  type OpenCodeBundledRuntimeDiagnostics,
 } from "./opencode-platform.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -548,6 +550,12 @@ export interface OpenCodeAvailability {
   probeExecutionMode?: string | null;
   /** Non-sensitive metadata about detected provider configuration */
   providerMetadata?: ProviderConfigMetadata;
+  /** Runtime source: explicit, local, bundled, or missing */
+  runtimeSource?: OpenCodeRuntimeSource;
+  /** Non-sensitive bundled runtime diagnostics */
+  bundledRuntime?: OpenCodeBundledRuntimeDiagnostics;
+  /** Error from local-only resolution (before bundled fallback) */
+  localResolutionError?: string | null;
 }
 
 export interface OpenCodeRunResult {
@@ -1322,6 +1330,9 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
         runResolutionError: diagnostics.runResolutionError,
         probeExecutionMode: diagnostics.probeExecutionMode,
         providerMetadata: configMeta,
+        runtimeSource: diagnostics.runtimeSource,
+        bundledRuntime: diagnostics.bundledRuntime,
+        localResolutionError: diagnostics.localResolutionError,
       };
     } else {
       const error = !hasProviderCredentials
@@ -1340,6 +1351,9 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
         runResolutionError: diagnostics.runResolutionError,
         probeExecutionMode: diagnostics.probeExecutionMode,
         providerMetadata: configMeta,
+        runtimeSource: diagnostics.runtimeSource,
+        bundledRuntime: diagnostics.bundledRuntime,
+        localResolutionError: diagnostics.localResolutionError,
       };
     }
   } catch (err) {
@@ -1368,6 +1382,9 @@ export async function checkOpenCodeAvailability(): Promise<OpenCodeAvailability>
       resolutionError: diagnostics?.resolutionError ?? safeMessage,
       runResolutionError: diagnostics?.runResolutionError ?? null,
       probeExecutionMode: diagnostics?.probeExecutionMode ?? null,
+      runtimeSource: diagnostics?.runtimeSource ?? "missing",
+      bundledRuntime: diagnostics?.bundledRuntime ?? undefined,
+      localResolutionError: diagnostics?.localResolutionError ?? null,
     };
   }
 

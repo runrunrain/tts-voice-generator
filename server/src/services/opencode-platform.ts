@@ -7,8 +7,9 @@ import { promisify } from "node:util";
 type PlatformLike = NodeJS.Platform | string;
 
 export type PackageManagerName = "npm" | "pnpm" | "bun" | "corepack";
-export type OpenCodeInstallMethod = "npm" | "chocolatey" | "scoop" | "path" | "unknown";
-export type OpenCodePathState = "system-path" | "augmented-path" | "not-found";
+export type OpenCodeInstallMethod = "npm" | "chocolatey" | "scoop" | "path" | "bundled" | "unknown";
+export type OpenCodePathState = "system-path" | "augmented-path" | "bundled" | "not-found";
+export type OpenCodeRuntimeSource = "explicit" | "local" | "bundled" | "missing";
 
 export interface ResolvedExecutable {
   command: string;
@@ -21,6 +22,7 @@ export interface OpenCodeProcessContext {
   env: Record<string, string | undefined>;
   resolved: boolean;
   executionMode: "plain" | "native-executable" | "windows-node-shim" | "windows-cmd-shim-probe";
+  runtimeSource: OpenCodeRuntimeSource;
   shimPath?: string;
   restrictedToReadOnlyProbe?: boolean;
 }
@@ -35,6 +37,14 @@ export interface ResolvedNpmCommand {
 
 export type ResolvedPackageManagerCommand = ResolvedNpmCommand;
 
+export interface OpenCodeBundledRuntimeDiagnostics {
+  candidateRoots: string[];
+  executablePath: string | null;
+  manifestPath: string | null;
+  version: string | null;
+  missingReason: string | null;
+}
+
 export interface OpenCodePathDiagnostics {
   pathState: OpenCodePathState;
   installMethod: OpenCodeInstallMethod | null;
@@ -42,7 +52,10 @@ export interface OpenCodePathDiagnostics {
   effectivePathCandidates: string[];
   resolutionError: string | null;
   runResolutionError: string | null;
+  localResolutionError: string | null;
   probeExecutionMode: OpenCodeProcessContext["executionMode"] | null;
+  runtimeSource: OpenCodeRuntimeSource;
+  bundledRuntime: OpenCodeBundledRuntimeDiagnostics;
 }
 
 const execFileAsync = promisify(execFile);
@@ -730,6 +743,7 @@ function resolveWindowsCommandShimProbeContext(
     env,
     resolved: true,
     executionMode: "windows-cmd-shim-probe",
+    runtimeSource: "local",
     shimPath,
     restrictedToReadOnlyProbe: true,
   };
@@ -744,26 +758,94 @@ export function appendReadOnlyProbeArgs(
   return ["/d", "/s", "/c", buildRestrictedWindowsShimProbeCommand(context.shimPath, probeArgs)];
 }
 
+// ─── Explicit OPENCODE_BIN_PATH Resolution (M2) ───────────────────────────────
+
+/**
+ * Resolve OpenCode binary from OPENCODE_BIN_PATH environment variable.
+ *
+ * Acceptance criteria:
+ * - Only absolute paths.
+ * - Only native `opencode` / `opencode.exe`, rejects `.cmd` / `.bat`.
+ * - File must exist and pass safe target check.
+ * - Source = explicit, takes priority over local/bundled.
+ */
+function resolveExplicitBinPath(
+  safeEnv: Record<string, string | undefined>,
+  platform: PlatformLike,
+): OpenCodeProcessContext | null {
+  const rawPath = (safeEnv.OPENCODE_BIN_PATH ?? process.env.OPENCODE_BIN_PATH)?.trim();
+  if (!rawPath) return null;
+
+  // Must be an absolute path
+  if (!isAbsoluteForPlatform(rawPath, platform)) return null;
+  // Reject control characters
+  if (/[\0\r\n]/.test(rawPath)) return null;
+
+  const normalizedPath = normalizeForBase(rawPath);
+
+  // Reject .cmd / .bat
+  const ext = extnameFor(normalizedPath).toLowerCase();
+  if (ext === ".cmd" || ext === ".bat") return null;
+
+  // Must pass safe native executable check
+  if (!isSafeOpenCodeNativeExecutableTarget(normalizedPath, platform)) return null;
+
+  return {
+    file: normalizedPath,
+    argsPrefix: [],
+    env: safeEnv as Record<string, string | undefined>,
+    resolved: true,
+    executionMode: "native-executable",
+    runtimeSource: "explicit",
+  };
+}
+
 export function resolveOpenCodeProcessContext(
   safeEnv: Record<string, string | undefined>,
   platform: PlatformLike = process.platform,
   nodeExecPath: string = process.execPath,
 ): OpenCodeProcessContext {
+  // Step 0: Explicit OPENCODE_BIN_PATH override
+  const explicit = resolveExplicitBinPath(safeEnv, platform);
+  if (explicit) return explicit;
+
   const env = buildOpenCodeChildEnv(safeEnv, platform);
   if (!isWindows(platform)) {
     const resolved = resolveExecutableOnPath("opencode", env, platform);
+    if (resolved.resolved) {
+      return {
+        file: resolved.command,
+        argsPrefix: [],
+        env,
+        resolved: true,
+        executionMode: "native-executable",
+        runtimeSource: "local",
+      };
+    }
+    // Try bundled fallback
+    const bundled = resolveBundledRuntime(safeEnv, platform);
+    if (bundled.context) return bundled.context;
     return {
       file: resolved.command,
       argsPrefix: [],
       env,
-      resolved: resolved.resolved,
-      executionMode: resolved.resolved ? "native-executable" : "plain",
+      resolved: false,
+      executionMode: "plain",
+      runtimeSource: "missing",
     };
   }
   const resolved = resolveExecutableOnPath("opencode", env, platform);
   if (resolved.resolved && isWindowsCommandShim(resolved.command)) {
     const shimTarget = resolveOpenCodeShimTarget(resolved.command, platform);
     if (!shimTarget) {
+      // Cannot safely resolve shim target -> try bundled run fallback
+      const bundled = resolveBundledRuntime(safeEnv, platform);
+      if (bundled.context) {
+        return {
+          ...bundled.context,
+          env,
+        };
+      }
       throw new Error(
         `Unable to resolve safe native OpenCode target from Windows command shim at ${resolved.command}; refusing to execute .cmd/.bat through cmd.exe /c`,
       );
@@ -775,11 +857,20 @@ export function resolveOpenCodeProcessContext(
         env,
         resolved: true,
         executionMode: "native-executable",
+        runtimeSource: "local",
         shimPath: resolved.command,
       };
     }
     const nodeCommand = resolveSafeNodeExecutableForShim(resolved.command, env, platform, nodeExecPath);
     if (!nodeCommand) {
+      // Cannot safely resolve node for shim -> try bundled run fallback
+      const bundled = resolveBundledRuntime(safeEnv, platform);
+      if (bundled.context) {
+        return {
+          ...bundled.context,
+          env,
+        };
+      }
       throw new Error(
         `Unable to resolve safe Node executable for OpenCode Windows command shim at ${resolved.command}; refusing to execute .cmd/.bat through cmd.exe /c`,
       );
@@ -790,15 +881,30 @@ export function resolveOpenCodeProcessContext(
       env,
       resolved: true,
       executionMode: "windows-node-shim",
+      runtimeSource: "local",
       shimPath: resolved.command,
     };
   }
+  if (resolved.resolved) {
+    return {
+      file: resolved.command,
+      argsPrefix: [],
+      env,
+      resolved: true,
+      executionMode: "native-executable",
+      runtimeSource: "local",
+    };
+  }
+  // Local not resolved, try bundled fallback
+  const bundled = resolveBundledRuntime(safeEnv, platform);
+  if (bundled.context) return bundled.context;
   return {
     file: resolved.command,
     argsPrefix: [],
     env,
-    resolved: resolved.resolved,
-    executionMode: resolved.resolved ? "native-executable" : "plain",
+    resolved: false,
+    executionMode: "plain",
+    runtimeSource: "missing",
   };
 }
 
@@ -807,21 +913,47 @@ export async function resolveOpenCodeProcessContextAsync(
   platform: PlatformLike = process.platform,
   nodeExecPath: string = process.execPath,
 ): Promise<OpenCodeProcessContext> {
+  // Step 0: Explicit OPENCODE_BIN_PATH override
+  const explicit = resolveExplicitBinPath(safeEnv, platform);
+  if (explicit) return explicit;
+
   const env = await buildOpenCodeChildEnvAsync(safeEnv, platform);
   if (!isWindows(platform)) {
     const resolved = resolveExecutableOnPath("opencode", env, platform);
+    if (resolved.resolved) {
+      return {
+        file: resolved.command,
+        argsPrefix: [],
+        env,
+        resolved: true,
+        executionMode: "native-executable",
+        runtimeSource: "local",
+      };
+    }
+    // Try bundled fallback
+    const bundled = resolveBundledRuntime(safeEnv, platform);
+    if (bundled.context) return bundled.context;
     return {
       file: resolved.command,
       argsPrefix: [],
       env,
-      resolved: resolved.resolved,
-      executionMode: resolved.resolved ? "native-executable" : "plain",
+      resolved: false,
+      executionMode: "plain",
+      runtimeSource: "missing",
     };
   }
   const resolved = resolveExecutableOnPath("opencode", env, platform);
   if (resolved.resolved && isWindowsCommandShim(resolved.command)) {
     const shimTarget = resolveOpenCodeShimTarget(resolved.command, platform);
     if (!shimTarget) {
+      // Cannot safely resolve shim target -> try bundled run fallback
+      const bundled = resolveBundledRuntime(safeEnv, platform);
+      if (bundled.context) {
+        return {
+          ...bundled.context,
+          env,
+        };
+      }
       throw new Error(
         `Unable to resolve safe native OpenCode target from Windows command shim at ${resolved.command}; refusing to execute .cmd/.bat through cmd.exe /c`,
       );
@@ -833,11 +965,20 @@ export async function resolveOpenCodeProcessContextAsync(
         env,
         resolved: true,
         executionMode: "native-executable",
+        runtimeSource: "local",
         shimPath: resolved.command,
       };
     }
     const nodeCommand = resolveSafeNodeExecutableForShim(resolved.command, env, platform, nodeExecPath);
     if (!nodeCommand) {
+      // Cannot safely resolve node for shim -> try bundled run fallback
+      const bundled = resolveBundledRuntime(safeEnv, platform);
+      if (bundled.context) {
+        return {
+          ...bundled.context,
+          env,
+        };
+      }
       throw new Error(
         `Unable to resolve safe Node executable for OpenCode Windows command shim at ${resolved.command}; refusing to execute .cmd/.bat through cmd.exe /c`,
       );
@@ -848,15 +989,30 @@ export async function resolveOpenCodeProcessContextAsync(
       env,
       resolved: true,
       executionMode: "windows-node-shim",
+      runtimeSource: "local",
       shimPath: resolved.command,
     };
   }
+  if (resolved.resolved) {
+    return {
+      file: resolved.command,
+      argsPrefix: [],
+      env,
+      resolved: true,
+      executionMode: "native-executable",
+      runtimeSource: "local",
+    };
+  }
+  // Local not resolved, try bundled fallback
+  const bundled = resolveBundledRuntime(safeEnv, platform);
+  if (bundled.context) return bundled.context;
   return {
     file: resolved.command,
     argsPrefix: [],
     env,
-    resolved: resolved.resolved,
-    executionMode: resolved.resolved ? "native-executable" : "plain",
+    resolved: false,
+    executionMode: "plain",
+    runtimeSource: "missing",
   };
 }
 
@@ -874,7 +1030,10 @@ export async function resolveOpenCodeProbeContextAsync(
       throw buildNonAsciiWindowsShimProbeError(strictError, shimPath);
     }
     const probeContext = resolveWindowsCommandShimProbeContext(env, platform);
-    if (probeContext) return probeContext;
+    if (probeContext) return { ...probeContext, runtimeSource: "local" };
+    // Try bundled fallback before re-throwing
+    const bundled = resolveBundledRuntime(safeEnv, platform);
+    if (bundled.context) return bundled.context;
     throw strictError;
   }
 }
@@ -1032,9 +1191,21 @@ function pushAbsoluteCandidate(candidates: string[], candidate: string | undefin
   candidates.push(normalizeForBase(trimmed));
 }
 
-export function detectInstallMethod(executablePath: string | null | undefined): OpenCodeInstallMethod | null {
+export function detectInstallMethod(
+  executablePath: string | null | undefined,
+  runtimeSource?: OpenCodeRuntimeSource | null,
+): OpenCodeInstallMethod | null {
+  if (!executablePath && runtimeSource !== "bundled") return null;
+  // When runtime source is bundled, always report bundled regardless of path
+  if (runtimeSource === "bundled") return "bundled";
   if (!executablePath) return null;
   const normalized = normalizePathForDetection(executablePath);
+  if (
+    normalized.includes("/opencode-runtime/") ||
+    normalized.includes("\\opencode-runtime\\")
+  ) {
+    return "bundled";
+  }
   if (
     normalized.includes("/node_modules/") ||
     normalized.includes("/appdata/roaming/npm/") ||
@@ -1080,6 +1251,10 @@ export async function getOpenCodePathDiagnostics(
   const effectivePathCandidates = getEffectiveOpenCodePathCandidates(safeEnv, platform, prefix);
   let resolutionError: string | null = null;
   let runResolutionError: string | null = null;
+  let localResolutionError: string | null = null;
+
+  // Always resolve bundled runtime diagnostics for reporting
+  const bundled = resolveBundledRuntime(safeEnv, platform);
 
   try {
     const context = await resolveOpenCodeProbeContextAsync(safeEnv, platform);
@@ -1087,33 +1262,75 @@ export async function getOpenCodePathDiagnostics(
       await resolveOpenCodeProcessContextAsync(safeEnv, platform);
     } catch (error) {
       runResolutionError = error instanceof Error ? error.message : String(error);
+      localResolutionError = runResolutionError;
     }
     const executablePath = context.shimPath ?? (context.resolved ? context.file : null);
-    const pathState: OpenCodePathState = systemResolved.resolved
-      ? "system-path"
-      : context.resolved
-        ? "augmented-path"
-        : "not-found";
+    const runtimeSource: OpenCodeRuntimeSource = context.runtimeSource;
+    const pathState: OpenCodePathState = context.runtimeSource === "bundled"
+      ? "bundled"
+      : systemResolved.resolved
+        ? "system-path"
+        : context.resolved
+          ? "augmented-path"
+          : "not-found";
+    // m1-R2: When resolved runtime source is "bundled" but a local OpenCode
+    // was found on PATH (typically a Windows .cmd shim), record the reason
+    // local was rejected so diagnostics can report it.
+    if (runtimeSource === "bundled" && systemResolved.resolved && !localResolutionError) {
+      if (isWindows(platform) && isWindowsCommandShim(systemResolved.command)) {
+        const shimTarget = resolveOpenCodeShimTarget(systemResolved.command, platform);
+        if (!shimTarget) {
+          localResolutionError = `Local OpenCode at ${systemResolved.command} is a Windows .cmd shim whose target could not be safely resolved; bundled runtime used instead`;
+        } else {
+          const nodeCommand = resolveSafeNodeExecutableForShim(
+            systemResolved.command,
+            buildOpenCodeChildEnv(safeEnv, platform),
+            platform,
+          );
+          if (!nodeCommand) {
+            localResolutionError = `Local OpenCode at ${systemResolved.command} requires a Node.js shim but no safe node executable found; bundled runtime used instead`;
+          }
+        }
+      } else if (systemResolved.resolved) {
+        // Non-Windows local found but runtime source ended up as bundled --
+        // this shouldn't normally happen; log it anyway for diagnostics.
+        localResolutionError = `Local OpenCode found at ${systemResolved.command} but bundled runtime was selected`;
+      }
+    }
     return {
       pathState,
-      installMethod: detectInstallMethod(executablePath),
+      installMethod: detectInstallMethod(executablePath, runtimeSource),
       executablePath,
       effectivePathCandidates,
       resolutionError,
       runResolutionError,
+      localResolutionError,
       probeExecutionMode: context.executionMode,
+      runtimeSource,
+      bundledRuntime: bundled.diagnostics,
     };
   } catch (error) {
     resolutionError = error instanceof Error ? error.message : String(error);
     const executablePath = systemResolved.resolved ? systemResolved.command : null;
+    const runtimeSource: OpenCodeRuntimeSource = bundled.context ? "bundled" : "missing";
+    const pathState: OpenCodePathState = runtimeSource === "bundled"
+      ? "bundled"
+      : systemResolved.resolved
+        ? "system-path"
+        : "not-found";
     return {
-      pathState: systemResolved.resolved ? "system-path" : "not-found",
-      installMethod: detectInstallMethod(executablePath),
-      executablePath,
+      pathState,
+      installMethod: detectInstallMethod(executablePath, runtimeSource),
+      executablePath: runtimeSource === "bundled" && bundled.diagnostics.executablePath
+        ? bundled.diagnostics.executablePath
+        : executablePath,
       effectivePathCandidates,
       resolutionError,
       runResolutionError: null,
+      localResolutionError: resolutionError,
       probeExecutionMode: null,
+      runtimeSource,
+      bundledRuntime: bundled.diagnostics,
     };
   }
 }
@@ -1178,4 +1395,177 @@ export function chooseOpenCodeConfigPath(
   }
   const candidates = getOpenCodeConfigPathCandidates(env, platform);
   return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+}
+
+// ─── Bundled Runtime Resolution ──────────────────────────────────────────────
+
+/**
+ * Get the expected binary name for the current platform.
+ * Windows: bin/opencode.exe, others: bin/opencode
+ */
+function bundledBinaryName(platform: PlatformLike): string {
+  return isWindows(platform) ? "opencode.exe" : "opencode";
+}
+
+/**
+ * Build the target ID string (e.g. "win32-x64", "darwin-arm64") used to
+ * locate platform-specific bundled resources.
+ */
+export function getBundledTargetId(platform: PlatformLike = process.platform): string {
+  const arch = process.arch;
+  return `${platform}-${arch}`;
+}
+
+/**
+ * Return an ordered list of candidate root directories for the bundled
+ * OpenCode runtime. Each candidate root should contain either:
+ *   - manifest.json + bin/opencode(.exe)  (per-platform subdirectory), or
+ *   - manifest.json + bin/opencode(.exe)  (flat layout)
+ *
+ * Resolution order:
+ * 1. OPENCODE_BUNDLED_RUNTIME_DIR env override (dev/test/fallback)
+ * 2. Electron packaged: process.resourcesPath/opencode-runtime
+ * 3. Desktop stage app: process.cwd()/opencode-runtime
+ * 4. Development: process.cwd()/resources/opencode-runtime/<targetId>
+ */
+export function getBundledRuntimeCandidateRoots(
+  safeEnv: Record<string, string | undefined> = process.env,
+  platform: PlatformLike = process.platform,
+): string[] {
+  const candidates: string[] = [];
+
+  // 1. Explicit environment override
+  const envDir = (safeEnv.OPENCODE_BUNDLED_RUNTIME_DIR ?? process.env.OPENCODE_BUNDLED_RUNTIME_DIR)?.trim();
+  if (envDir && isAbsoluteForPlatform(envDir, platform) && !/[\0\r\n]/.test(envDir)) {
+    candidates.push(normalizeForBase(envDir));
+  }
+
+  // 2. Electron packaged resources
+  const resourcesPath = (typeof process !== "undefined" && typeof (process as any).resourcesPath === "string")
+    ? (process as any).resourcesPath as string
+    : undefined;
+  if (resourcesPath && isAbsoluteForPlatform(resourcesPath, platform)) {
+    candidates.push(joinForBase(normalizeForBase(resourcesPath), "opencode-runtime"));
+  }
+
+  // 3. Desktop stage app
+  const cwd = process.cwd();
+  candidates.push(joinForBase(cwd, "opencode-runtime"));
+
+  // 4. Development: resources/opencode-runtime/<targetId>
+  const targetId = getBundledTargetId(platform);
+  candidates.push(joinForBase(cwd, "resources", "opencode-runtime", targetId));
+
+  return Array.from(new Set(candidates));
+}
+
+/**
+ * Resolve the bundled OpenCode executable from candidate root directories.
+ * Returns diagnostics with all candidate roots, the found executable path,
+ * manifest path, and version (from manifest if available).
+ */
+export function resolveBundledRuntime(
+  safeEnv: Record<string, string | undefined> = process.env,
+  platform: PlatformLike = process.platform,
+): {
+  context: OpenCodeProcessContext | null;
+  diagnostics: OpenCodeBundledRuntimeDiagnostics;
+} {
+  const candidateRoots = getBundledRuntimeCandidateRoots(safeEnv, platform);
+  const binaryName = bundledBinaryName(platform);
+
+  let executablePath: string | null = null;
+  let manifestPath: string | null = null;
+  let version: string | null = null;
+  let missingReason: string | null = null;
+  let foundRoot: string | null = null;
+
+  for (const root of candidateRoots) {
+    // Try flat layout: root/bin/opencode(.exe)
+    const binPath = joinForBase(root, "bin", binaryName);
+    if (fileExists(binPath)) {
+      executablePath = binPath;
+      foundRoot = root;
+      break;
+    }
+
+    // Try root as a direct path (already target-specific directory)
+    const directBinPath = joinForBase(root, binaryName);
+    if (fileExists(directBinPath)) {
+      executablePath = directBinPath;
+      foundRoot = root;
+      break;
+    }
+  }
+
+  if (executablePath) {
+    // Validate the executable is a safe native binary
+    if (!isSafeOpenCodeNativeExecutableTarget(executablePath, platform)) {
+      missingReason = `Bundled binary at ${executablePath} failed native executable safety check`;
+      executablePath = null;
+    }
+  }
+
+  if (!executablePath) {
+    missingReason = candidateRoots.length > 0
+      ? `No bundled opencode binary found in ${candidateRoots.length} candidate root(s)`
+      : "No bundled runtime candidate directories available";
+  }
+
+  // Try to read manifest from found root
+  if (foundRoot) {
+    const manifestCandidate = joinForBase(foundRoot, "manifest.json");
+    if (fileExists(manifestCandidate)) {
+      manifestPath = manifestCandidate;
+      const rawManifest = readTextFile(manifestCandidate);
+      if (rawManifest) {
+        try {
+          const parsed = JSON.parse(rawManifest) as Record<string, unknown>;
+          if (typeof parsed.version === "string") version = parsed.version;
+        } catch {
+          // manifest not parseable, keep version null
+        }
+      }
+    }
+  }
+
+  const diagnostics: OpenCodeBundledRuntimeDiagnostics = {
+    candidateRoots,
+    executablePath,
+    manifestPath,
+    version,
+    missingReason,
+  };
+
+  if (!executablePath) {
+    return { context: null, diagnostics };
+  }
+
+  return {
+    context: {
+      file: executablePath,
+      argsPrefix: [],
+      env: safeEnv as Record<string, string | undefined>,
+      resolved: true,
+      executionMode: "native-executable",
+      runtimeSource: "bundled",
+    },
+    diagnostics,
+  };
+}
+
+/**
+ * Empty bundled runtime diagnostics for default/missing state.
+ */
+export function emptyBundledRuntimeDiagnostics(
+  candidateRoots: string[] = [],
+  missingReason: string | null = null,
+): OpenCodeBundledRuntimeDiagnostics {
+  return {
+    candidateRoots,
+    executablePath: null,
+    manifestPath: null,
+    version: null,
+    missingReason: missingReason ?? "Bundled runtime not probed",
+  };
 }

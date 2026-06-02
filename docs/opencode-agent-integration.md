@@ -514,6 +514,254 @@ curl -s -X POST http://localhost:3001/api/agent/generate-speech \
   - Default max requests: 10 per session
 - Long-running conversations may need higher limits. Adjust via Settings API before creating the session.
 
+## OpenCode Runtime
+
+This section describes how the desktop application resolves and executes OpenCode. It covers the runtime selection strategy, resource layout, build configuration, and troubleshooting.
+
+### Runtime Selection Order
+
+The application resolves the OpenCode runtime in the following priority order. The first source that produces a usable runtime wins.
+
+```
+1. explicit  -- OPENCODE_BIN_PATH environment variable
+2. local     -- User's locally installed OpenCode (PATH, npm, pnpm, bun, scoop, chocolatey, homebrew)
+3. bundled   -- OpenCode binary embedded in the desktop application package
+4. missing   -- No runtime found; diagnostics returned
+```
+
+**Local-first guarantee**: If the user has installed OpenCode on their machine, that installation is always preferred. The bundled runtime is only used when no local installation is found or when the local installation cannot safely execute `opencode run`.
+
+### How It Works for Users
+
+| User scenario | What happens |
+|---------------|--------------|
+| User has OpenCode installed via npm/pnpm/bun/scoop/chocolatey/homebrew | Application detects and uses the local version. Bundled runtime is ignored. |
+| User has not installed OpenCode | Application falls back to the bundled runtime embedded in the desktop package. No manual installation required. |
+| User sets `OPENCODE_BIN_PATH` | That path takes absolute priority over all other sources. |
+| Neither local nor bundled is available | Application reports `runtimeSource: "missing"` with diagnostic details. Agent features are unavailable. |
+
+### Checking Runtime Status
+
+The runtime source and diagnostics are available through the status endpoint:
+
+```bash
+curl http://localhost:3001/api/settings/opencode/status
+```
+
+Response fields related to runtime resolution:
+
+```json
+{
+  "availability": {
+    "available": true,
+    "installMethod": "bundled",
+    "pathState": "bundled",
+    "runtimeSource": "bundled",
+    "bundledRuntime": {
+      "candidateRoots": ["C:\\Program Files\\TTS Voice Generator\\resources\\opencode-runtime"],
+      "executablePath": "C:\\Program Files\\TTS Voice Generator\\resources\\opencode-runtime\\bin\\opencode.exe",
+      "manifestPath": "C:\\Program Files\\TTS Voice Generator\\resources\\opencode-runtime\\manifest.json",
+      "version": "v1.x.x",
+      "missingReason": null
+    },
+    "localResolutionError": null
+  }
+}
+```
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `runtimeSource` | `"explicit"`, `"local"`, `"bundled"`, `"missing"` | Which source provided the OpenCode runtime |
+| `installMethod` | `"npm"`, `"chocolatey"`, `"scoop"`, `"path"`, `"bundled"`, `"unknown"` | How OpenCode was installed |
+| `pathState` | `"system-path"`, `"augmented-path"`, `"bundled"`, `"not-found"` | Where in the resolution chain OpenCode was found |
+| `bundledRuntime.candidateRoots` | Array of paths | All directories searched for bundled runtime |
+| `bundledRuntime.executablePath` | String or null | Path to the found bundled binary |
+| `bundledRuntime.missingReason` | String or null | Why bundled resolution failed, if applicable |
+| `localResolutionError` | String or null | Why local resolution failed, if applicable |
+
+### Resource Layout
+
+The bundled runtime follows a consistent directory structure across development, staging, and production environments.
+
+**Source directory (repository):**
+
+```
+resources/opencode-runtime/
+  win32-x64/
+    manifest.json
+    bin/
+      opencode.exe
+  darwin-x64/
+    manifest.json
+    bin/
+      opencode
+  darwin-arm64/
+    manifest.json
+    bin/
+      opencode
+```
+
+**Desktop stage directory (after `prepare-desktop-runtime`):**
+
+```
+dist-desktop/app-win32-x64/
+  opencode-runtime/
+    manifest.json
+    bin/
+      opencode.exe
+```
+
+**Electron packaged application (production):**
+
+```
+process.resourcesPath/
+  opencode-runtime/
+    manifest.json
+    bin/
+      opencode(.exe)
+```
+
+The `manifest.json` file tracks the bundled runtime metadata:
+
+```json
+{
+  "name": "opencode",
+  "source": "opencode reference repo or release artifact",
+  "version": "v1.x.x",
+  "target": "win32-x64",
+  "binary": "bin/opencode.exe",
+  "referenceHead": "8a17bc4de",
+  "preparedAt": "2026-06-02T00:00:00.000Z"
+}
+```
+
+Key points:
+- Only the current platform's runtime is included in the package (not all platforms).
+- The binary is placed outside the asar archive via `extraResources` in electron-builder configuration, ensuring it can be spawned directly.
+- The manifest is required at build/package time -- `manifest.target` must match the target platform-arch for the build to succeed. At runtime, the binary works without the manifest, but the manifest provides version tracking for auditing and verification.
+
+### Bundled Candidate Paths
+
+At runtime, the resolver checks candidate directories in this order:
+
+| Priority | Source | Path pattern | When used |
+|----------|--------|-------------|-----------|
+| 1 | `OPENCODE_BUNDLED_RUNTIME_DIR` env var | User-specified absolute path | Testing, development override, or manual fallback |
+| 2 | Electron `process.resourcesPath` | `<resourcesPath>/opencode-runtime` | Production packaged app |
+| 3 | Desktop stage app | `<cwd>/opencode-runtime` | Running from stage directory |
+| 4 | Development source | `<cwd>/resources/opencode-runtime/<platform>-<arch>` | Development mode |
+
+The `OPENCODE_BUNDLED_RUNTIME_DIR` environment variable only accepts absolute paths. Relative paths are silently skipped.
+
+### Build and Packaging
+
+#### Environment Variables
+
+| Variable | Purpose | Required |
+|----------|---------|----------|
+| `OPENCODE_BUNDLED_RUNTIME_DIR` | Override source directory for the bundled runtime during build or at runtime | No |
+| `OPENCODE_BUNDLED_RUNTIME_OPTIONAL` | Set to `true` to skip bundled runtime with a warning instead of failing the build | No (never set for release builds) |
+| `OPENCODE_REFERENCE_REPO` | Path to the OpenCode reference repository for copying build artifacts | No (dev only) |
+
+#### Prepare Script
+
+`scripts/prepare-desktop-runtime.js` copies the bundled runtime into the stage directory. It searches for the runtime in this order:
+
+1. `OPENCODE_BUNDLED_RUNTIME_DIR` (if set and exists)
+2. `resources/opencode-runtime/<targetId>` (repository source directory)
+3. `OPENCODE_REFERENCE_REPO/packages/opencode/dist/...` (dev build from reference repo)
+
+If no runtime is found, the script fails with a clear error listing all searched locations. Set `OPENCODE_BUNDLED_RUNTIME_OPTIONAL=true` for development builds that do not need OpenCode.
+
+#### Verify Script
+
+`scripts/verify-opencode-runtime.js` validates the bundled runtime structure:
+
+```bash
+# Verify a specific stage directory
+node scripts/verify-opencode-runtime.js --stage dist-desktop/app-win32-x64 --platform win32 --arch x64
+
+# Verify a specific runtime directory
+node scripts/verify-opencode-runtime.js --dir ./opencode-runtime --platform win32 --arch x64
+```
+
+The script checks:
+- `manifest.json` exists and is valid JSON
+- `manifest.target` is present, is a non-blank string, and matches the expected platform-arch
+- Binary exists at `bin/opencode(.exe)` (or flat layout)
+- Binary is not a `.cmd`/`.bat` file
+- Runtime directory is not inside an asar archive
+
+#### Electron Builder Configuration
+
+`electron-builder.config.cjs` includes the runtime as an `extraResources` entry:
+
+```js
+extraResources: [
+  // ... other resources ...
+  {
+    from: path.resolve(appDir, "opencode-runtime"),
+    to: "opencode-runtime",
+    filter: ["**/*"],
+  },
+]
+```
+
+This ensures the runtime binary is placed in `process.resourcesPath/opencode-runtime/`, outside the asar archive.
+
+### Install Plan Behavior
+
+When the bundled runtime is available, the install plan response changes:
+
+- `controlledInstallAvailable` is `false`
+- The warning message reads: "OpenCode 内嵌运行时已可用，无需手动安装。如需使用本地版本，可通过 npm/pnpm/bun 全局安装。"
+- The user is not prompted to install OpenCode globally
+
+When a local installation is found (not bundled), the warning reads: "OpenCode CLI 已安装且可执行，无需重新安装。"
+
+### Security
+
+The bundled runtime preserves all existing security boundaries:
+
+- All `spawn()` calls use `shell: false`. No `cmd.exe /c` wrappers.
+- The bundled binary must pass `isSafeOpenCodeNativeExecutableTarget()` validation: on Windows it must be named `opencode.exe`, on other platforms `opencode`. `.cmd` and `.bat` files are never accepted as bundled binaries.
+- Child process environment uses the safe env filter -- no API keys, tokens, or secrets are passed through.
+- The bundled runtime does not manage user credentials. Provider credentials (API keys) must still be configured separately.
+
+### Troubleshooting
+
+#### Local OpenCode is not used despite being installed
+
+| Symptom | Cause | Resolution |
+|---------|-------|------------|
+| Status shows `runtimeSource: "bundled"` but user has OpenCode installed | Local OpenCode is on PATH but the Windows `.cmd` shim cannot be safely resolved to a native executable | Check `localResolutionError` in the status response for the specific reason the local shim was rejected (e.g., shim target could not be resolved, or no safe Node executable found for the shim). The bundled runtime is used as a fallback. |
+| Status shows `runtimeSource: "missing"` but `opencode --version` works in terminal | The application's PATH augmentation does not cover the installation location | Check `effectivePathCandidates` in the diagnostics. The install directory may not be in the augmented PATH (e.g., custom npm prefix, non-standard scoop directory). |
+
+#### Bundled runtime is not found
+
+| Symptom | Cause | Resolution |
+|---------|-------|------------|
+| Desktop app shows `runtimeSource: "missing"`, `bundledRuntime.missingReason` is not null | The `opencode-runtime` directory is missing from the packaged resources | This indicates a build/packaging issue. Verify that `scripts/prepare-desktop-runtime.js` completed successfully and that `electron-builder.config.cjs` includes the `opencode-runtime` extraResources entry. |
+| `bundledRuntime.candidateRoots` is empty | The application is not running in Electron context and no env override is set | Set `OPENCODE_BUNDLED_RUNTIME_DIR` to the directory containing `bin/opencode(.exe)`. This is expected in development or non-Electron server mode. |
+| Binary exists but fails safety check | The file at the expected path is not a valid native `opencode`/`opencode.exe` binary | Check that the binary is the correct platform-native executable. `.cmd`, `.bat`, and files with wrong names are rejected. |
+
+#### Provider credentials are missing
+
+| Symptom | Cause | Resolution |
+|---------|-------|------------|
+| Status shows `cliAvailable: true`, `runAvailable: true` but `available: false` | The bundled (or local) OpenCode CLI is present but no provider credentials are configured | This is expected behavior. The runtime provides the CLI; credentials are a separate concern. Configure provider credentials (API keys) through the Settings UI or OpenCode's own `auth.json`. The bundled runtime does not auto-configure credentials. |
+| `opencode run` fails with provider error | OpenCode CLI is working but the configured provider rejected the request | Check the provider API key, account status, and model access. Use the Settings UI connection test to validate. |
+
+### Version Updates
+
+The bundled OpenCode version is fixed at application build time and ships with each release. It does not auto-update at runtime. To upgrade the bundled OpenCode:
+
+1. Update the runtime files in `resources/opencode-runtime/<targetId>/`
+2. Update `manifest.json` with the new version and `referenceHead`
+3. Build and release a new version of the desktop application
+
+Users who prefer the latest OpenCode version can install it locally -- the local version always takes priority over the bundled version.
+
 ## Limitations
 
 1. **No streaming**: Audio is generated synchronously and returned as a complete file. Large inputs may take several seconds.

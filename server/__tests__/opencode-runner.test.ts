@@ -36,6 +36,10 @@ import {
   parseOpenCodeCredentialCount,
 } from "../src/services/opencode-runner.js";
 import {
+  _resetInstallServiceForTests,
+  createOpenCodeInstallPlan,
+} from "../src/services/opencode-install-service.js";
+import {
   _resetOpenCodePlatformCachesForTests,
   _setNpmGlobalPrefixRunnerForTests,
   buildOpenCodeChildEnv,
@@ -49,7 +53,12 @@ import {
   getOpenCodeConfigPathCandidates,
   resolveOpenCodeProbeContextAsync,
   resolveOpenCodeProcessContext,
+  resolveOpenCodeProcessContextAsync,
   resolvePackageManagerCommand,
+  resolveBundledRuntime,
+  getBundledRuntimeCandidateRoots,
+  getBundledTargetId,
+  emptyBundledRuntimeDiagnostics,
 } from "../src/services/opencode-platform.js";
 
 // ─── Test Helpers ──────────────────────────────────────────────────────────────
@@ -2177,5 +2186,1082 @@ describe("spawn runner stdin/timeout/parse behavior", () => {
         exitCode: 7,
       });
     }
+  });
+});
+
+// ─── Bundled Runtime Resolution Tests ──────────────────────────────────────────
+
+describe("Bundled runtime resolution", () => {
+  let fixtureDir: string | null = null;
+
+  afterEach(() => {
+    _resetOpenCodePlatformCachesForTests();
+    if (fixtureDir) {
+      cleanupDir(fixtureDir);
+      fixtureDir = null;
+    }
+  });
+
+  function createBundledRuntimeFixture(root: string, platform: NodeJS.Platform): { runtimeDir: string; binPath: string; manifestPath: string } {
+    const runtimeDir = root;
+    const binDir = path.join(runtimeDir, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    const binaryName = platform === "win32" ? "opencode.exe" : "opencode";
+    const binPath = path.join(binDir, binaryName);
+    fs.writeFileSync(binPath, "fake-opencode-binary", "utf8");
+    const manifestPath = path.join(runtimeDir, "manifest.json");
+    fs.writeFileSync(manifestPath, JSON.stringify({
+      name: "opencode",
+      version: "v1.14.30",
+      target: `${platform}-${process.arch}`,
+      binary: `bin/${binaryName}`,
+      referenceHead: "8a17bc4de",
+      preparedAt: new Date().toISOString(),
+    }), "utf8");
+    return { runtimeDir, binPath, manifestPath };
+  }
+
+  it("resolves bundled runtime from OPENCODE_BUNDLED_RUNTIME_DIR on Linux", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-linux-"));
+    const { runtimeDir, binPath, manifestPath } = createBundledRuntimeFixture(fixtureDir, "linux");
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: runtimeDir, PATH: "/nonexistent" };
+
+    const result = resolveBundledRuntime(env, "linux");
+
+    expect(result.context).not.toBeNull();
+    expect(result.context!.file).toBe(binPath);
+    expect(result.context!.argsPrefix).toEqual([]);
+    expect(result.context!.executionMode).toBe("native-executable");
+    expect(result.context!.runtimeSource).toBe("bundled");
+    expect(result.context!.resolved).toBe(true);
+    expect(result.diagnostics.executablePath).toBe(binPath);
+    expect(result.diagnostics.manifestPath).toBe(manifestPath);
+    expect(result.diagnostics.version).toBe("v1.14.30");
+    expect(result.diagnostics.missingReason).toBeNull();
+    expect(result.diagnostics.candidateRoots.length).toBeGreaterThanOrEqual(1);
+    expect(result.diagnostics.candidateRoots[0]).toBe(runtimeDir);
+  });
+
+  it("resolves bundled runtime from OPENCODE_BUNDLED_RUNTIME_DIR on Windows", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-win-"));
+    const { runtimeDir, binPath } = createBundledRuntimeFixture(fixtureDir, "win32");
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: runtimeDir, PATH: "C:\\nonexistent" };
+
+    const result = resolveBundledRuntime(env, "win32");
+
+    expect(result.context).not.toBeNull();
+    expect(result.context!.file).toBe(binPath);
+    expect(result.context!.file.toLowerCase()).toMatch(/opencode\.exe$/);
+    expect(result.context!.runtimeSource).toBe("bundled");
+    expect(result.diagnostics.missingReason).toBeNull();
+  });
+
+  it("returns null context with diagnostics when bundled binary is missing", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-missing-"));
+    const missingDir = path.join(fixtureDir, "no-runtime-here");
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: missingDir, PATH: "/nonexistent" };
+
+    const result = resolveBundledRuntime(env, "linux");
+
+    expect(result.context).toBeNull();
+    expect(result.diagnostics.executablePath).toBeNull();
+    expect(result.diagnostics.missingReason).toBeTruthy();
+    expect(result.diagnostics.candidateRoots).toContain(missingDir);
+  });
+
+  it("returns null context when no candidate roots are available", () => {
+    const env = { PATH: "/nonexistent" };
+    const result = resolveBundledRuntime(env, "linux");
+
+    expect(result.context).toBeNull();
+    expect(result.diagnostics.missingReason).toBeTruthy();
+  });
+
+  it("rejects .cmd/.bat files as bundled binary even if named opencode.cmd", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-unsafe-shim-"));
+    const binDir = path.join(fixtureDir, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    // Create a .cmd file in the bin dir -- bundled resolution only looks for opencode.exe on Windows
+    // so it should NOT find opencode.cmd as a valid binary. The .cmd should be skipped entirely.
+    const cmdPath = path.join(binDir, "opencode.cmd");
+    fs.writeFileSync(cmdPath, "@echo off\r\necho unsafe\r\n", "utf8");
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: fixtureDir, PATH: "C:\\nonexistent" };
+
+    const result = resolveBundledRuntime(env, "win32");
+
+    // The bundled resolver only looks for opencode.exe on Windows, not opencode.cmd
+    // So it should not find any binary
+    expect(result.context).toBeNull();
+    expect(result.diagnostics.executablePath).toBeNull();
+    expect(result.diagnostics.missingReason).toBeTruthy();
+    // The .cmd file should never be used as the bundled binary
+    expect(result.diagnostics.executablePath).not.toBe(cmdPath);
+  });
+
+  it("reads version from manifest.json when available", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-manifest-"));
+    createBundledRuntimeFixture(fixtureDir, "linux");
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: fixtureDir, PATH: "/nonexistent" };
+
+    const result = resolveBundledRuntime(env, "linux");
+
+    expect(result.diagnostics.version).toBe("v1.14.30");
+    expect(result.diagnostics.manifestPath).toBe(path.join(fixtureDir, "manifest.json"));
+  });
+
+  it("tolerates missing manifest.json gracefully", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-no-manifest-"));
+    const binDir = path.join(fixtureDir, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(path.join(binDir, "opencode"), "fake-binary", "utf8");
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: fixtureDir, PATH: "/nonexistent" };
+
+    const result = resolveBundledRuntime(env, "linux");
+
+    expect(result.context).not.toBeNull();
+    expect(result.context!.runtimeSource).toBe("bundled");
+    expect(result.diagnostics.version).toBeNull();
+    expect(result.diagnostics.manifestPath).toBeNull();
+  });
+
+  it("local opencode takes priority over bundled runtime", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-local-priority-"));
+    // Create local opencode on PATH
+    const localBinDir = path.join(fixtureDir, "local-bin");
+    fs.mkdirSync(localBinDir, { recursive: true });
+    fs.writeFileSync(path.join(localBinDir, "opencode"), "#!/usr/bin/env node\n", "utf8");
+    // Create bundled runtime
+    createBundledRuntimeFixture(path.join(fixtureDir, "bundled"), "linux");
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled"), PATH: localBinDir, HOME: fixtureDir };
+
+    const context = resolveOpenCodeProcessContext(env, "linux");
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("local");
+    expect(context.executionMode).toBe("native-executable");
+    expect(context.file).toContain("local-bin");
+  });
+
+  it("falls back to bundled when local opencode is not on PATH", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-fallback-"));
+    createBundledRuntimeFixture(path.join(fixtureDir, "bundled"), "linux");
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled"), PATH: "/nonexistent", HOME: fixtureDir };
+
+    const context = resolveOpenCodeProcessContext(env, "linux");
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("bundled");
+    expect(context.executionMode).toBe("native-executable");
+    expect(context.file).toContain("bundled");
+    expect(context.file).toContain("opencode");
+  });
+
+  it("falls back to bundled when local opencode is not on PATH (async)", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-fallback-async-"));
+    createBundledRuntimeFixture(path.join(fixtureDir, "bundled"), "linux");
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled"), PATH: "/nonexistent", HOME: fixtureDir };
+
+    const context = await resolveOpenCodeProcessContextAsync(env, "linux");
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("bundled");
+    expect(context.executionMode).toBe("native-executable");
+  });
+
+  it("returns runtimeSource=missing when both local and bundled are unavailable", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-none-"));
+    const missingDir = path.join(fixtureDir, "no-runtime");
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: missingDir, PATH: "/nonexistent", HOME: fixtureDir };
+
+    const context = resolveOpenCodeProcessContext(env, "linux");
+
+    expect(context.resolved).toBe(false);
+    expect(context.runtimeSource).toBe("missing");
+  });
+
+  it("Windows bundled fallback when local is missing", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-win-fallback-"));
+    createBundledRuntimeFixture(path.join(fixtureDir, "bundled"), "win32");
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled"), PATH: "C:\\nonexistent", HOME: fixtureDir };
+
+    const context = resolveOpenCodeProcessContext(env, "win32");
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("bundled");
+    expect(context.executionMode).toBe("native-executable");
+    expect(context.file.toLowerCase()).toMatch(/opencode\.exe$/);
+    expect(context.file.toLowerCase()).not.toMatch(/\.cmd$|\.bat$|cmd\.exe/);
+  });
+
+  it("Windows local opencode.exe takes priority over bundled runtime", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-win-local-priority-"));
+    const localBinDir = path.join(fixtureDir, "local-bin");
+    fs.mkdirSync(localBinDir, { recursive: true });
+    const localExe = path.join(localBinDir, "opencode.exe");
+    fs.writeFileSync(localExe, "fake-local-exe", "utf8");
+    createBundledRuntimeFixture(path.join(fixtureDir, "bundled"), "win32");
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled"), PATH: localBinDir, HOME: fixtureDir };
+
+    const context = resolveOpenCodeProcessContext(env, "win32");
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("local");
+    expect(context.file).toBe(localExe);
+  });
+
+  it("probe context falls back to bundled when local run-safe resolution fails", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-probe-fallback-"));
+    createBundledRuntimeFixture(path.join(fixtureDir, "bundled"), "linux");
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled"), PATH: "/nonexistent", HOME: fixtureDir };
+
+    const context = await resolveOpenCodeProbeContextAsync(env, "linux");
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("bundled");
+  });
+
+  it("detectInstallMethod identifies bundled paths", () => {
+    expect(detectInstallMethod("C:\\app\\opencode-runtime\\bin\\opencode.exe")).toBe("bundled");
+    expect(detectInstallMethod("/opt/app/opencode-runtime/bin/opencode")).toBe("bundled");
+    expect(detectInstallMethod("C:\\Users\\me\\AppData\\Roaming\\npm\\opencode.cmd")).toBe("npm");
+    expect(detectInstallMethod("/usr/local/bin/opencode")).toBe("path");
+  });
+
+  it("getBundledTargetId returns platform-arch string", () => {
+    const targetId = getBundledTargetId("win32");
+    expect(targetId).toMatch(/^win32-/);
+
+    const darwinTarget = getBundledTargetId("darwin");
+    expect(darwinTarget).toMatch(/^darwin-/);
+  });
+
+  it("getBundledRuntimeCandidateRoots includes OPENCODE_BUNDLED_RUNTIME_DIR as first candidate", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-candidates-"));
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: fixtureDir, PATH: "/nonexistent" };
+
+    const roots = getBundledRuntimeCandidateRoots(env, "linux");
+
+    expect(roots.length).toBeGreaterThanOrEqual(1);
+    expect(roots[0]).toBe(fixtureDir);
+  });
+
+  it("getBundledRuntimeCandidateRoots skips non-absolute OPENCODE_BUNDLED_RUNTIME_DIR", () => {
+    const env = { OPENCODE_BUNDLED_RUNTIME_DIR: "relative/path", PATH: "/nonexistent" };
+
+    const roots = getBundledRuntimeCandidateRoots(env, "linux");
+
+    expect(roots).not.toContain("relative/path");
+  });
+
+  it("emptyBundledRuntimeDiagnostics returns safe defaults", () => {
+    const diag = emptyBundledRuntimeDiagnostics();
+    expect(diag.candidateRoots).toEqual([]);
+    expect(diag.executablePath).toBeNull();
+    expect(diag.manifestPath).toBeNull();
+    expect(diag.version).toBeNull();
+    expect(diag.missingReason).toBeTruthy();
+
+    const diagWithRoots = emptyBundledRuntimeDiagnostics(["/a", "/b"], "test reason");
+    expect(diagWithRoots.candidateRoots).toEqual(["/a", "/b"]);
+    expect(diagWithRoots.missingReason).toBe("test reason");
+  });
+});
+
+// ─── Bundled Availability Integration Tests ────────────────────────────────────
+
+describe("Bundled runtime availability integration", () => {
+  const originalHome = process.env.HOME;
+  const originalXdg = process.env.XDG_CONFIG_HOME;
+  const originalXdgData = process.env.XDG_DATA_HOME;
+  const originalUserProfile = process.env.USERPROFILE;
+  const originalOpenCodeConfig = process.env.OPENCODE_CONFIG;
+  const originalPath = process.env.PATH;
+  const originalAppData = process.env.APPDATA;
+  const originalLocalAppData = process.env.LOCALAPPDATA;
+  const originalBundledDir = process.env.OPENCODE_BUNDLED_RUNTIME_DIR;
+  let fixtureDir: string | null = null;
+
+  beforeEach(() => {
+    invalidateAvailabilityCache();
+    delete process.env.OPENCODE_CONFIG;
+    delete process.env.APPDATA;
+    delete process.env.LOCALAPPDATA;
+    process.env.PATH = "";
+  });
+
+  afterEach(() => {
+    _resetExecRunner();
+    _resetOpenCodePlatformCachesForTests();
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = originalXdg;
+    if (originalXdgData === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = originalXdgData;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
+    if (originalOpenCodeConfig === undefined) delete process.env.OPENCODE_CONFIG;
+    else process.env.OPENCODE_CONFIG = originalOpenCodeConfig;
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalAppData === undefined) delete process.env.APPDATA;
+    else process.env.APPDATA = originalAppData;
+    if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = originalLocalAppData;
+    if (originalBundledDir === undefined) delete process.env.OPENCODE_BUNDLED_RUNTIME_DIR;
+    else process.env.OPENCODE_BUNDLED_RUNTIME_DIR = originalBundledDir;
+    if (fixtureDir) {
+      cleanupDir(fixtureDir);
+      fixtureDir = null;
+    }
+  });
+
+  function createBundledFixture(root: string, platform: NodeJS.Platform): string {
+    const binDir = path.join(root, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    const binaryName = platform === "win32" ? "opencode.exe" : "opencode";
+    const binPath = path.join(binDir, binaryName);
+    fs.writeFileSync(binPath, "fake-opencode-binary", "utf8");
+    fs.writeFileSync(path.join(root, "manifest.json"), JSON.stringify({
+      name: "opencode",
+      version: "v1.14.30-bundled",
+      target: `${platform}-${process.arch}`,
+      binary: `bin/${binaryName}`,
+    }), "utf8");
+    return binPath;
+  }
+
+  it("checkOpenCodeAvailability returns runtimeSource=bundled when bundled is available", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "avail-bundled-"));
+    // Use a directory name containing "opencode-runtime" so detectInstallMethod recognizes it as bundled
+    const bundledDir = path.join(fixtureDir, "opencode-runtime");
+    fs.mkdirSync(bundledDir, { recursive: true });
+    const binPath = createBundledFixture(bundledDir, "linux");
+
+    process.env.OPENCODE_BUNDLED_RUNTIME_DIR = bundledDir;
+    process.env.PATH = "/nonexistent";
+    process.env.HOME = fixtureDir;
+    process.env.XDG_CONFIG_HOME = "";
+
+    const captured: Array<{ file: string; args: string[] }> = [];
+    _setExecRunner(async (file: string, args: string[]) => {
+      captured.push({ file, args });
+      if (args.join(" ") === "--version") return { stdout: "v1.14.30-bundled\n", stderr: "" };
+      if (args.join(" ") === "providers list") return { stdout: "1 credentials configured", stderr: "" };
+      throw new Error(`Unexpected args: ${JSON.stringify(args)}`);
+    });
+
+    const result = await withProcessPlatformAsync("linux", () => checkOpenCodeAvailability());
+
+    expect(result.available).toBe(true);
+    expect(result.runtimeSource).toBe("bundled");
+    expect(result.installMethod).toBe("bundled");
+    expect(result.pathState).toBe("bundled");
+    expect(result.version).toBe("v1.14.30-bundled");
+    expect(result.bundledRuntime).toBeDefined();
+    expect(result.bundledRuntime?.executablePath).toBeTruthy();
+    expect(result.bundledRuntime?.missingReason).toBeNull();
+    expect(captured.length).toBeGreaterThan(0);
+    expect(captured[0].file).toBe(binPath);
+  });
+
+  it("checkOpenCodeAvailability returns runtimeSource=missing when nothing is available", async () => {
+    _setExecRunner(async () => {
+      throw new Error("spawn opencode ENOENT");
+    });
+
+    const isolatedHome = path.join(os.tmpdir(), "nohome-" + Date.now());
+    const missingBundled = path.join(os.tmpdir(), "no-bundled-" + Date.now());
+    process.env.PATH = "";
+    process.env.HOME = isolatedHome;
+    process.env.XDG_CONFIG_HOME = "";
+    delete process.env.XDG_DATA_HOME;
+    process.env.OPENCODE_BUNDLED_RUNTIME_DIR = missingBundled;
+
+    const result = await withProcessPlatformAsync("linux", () => checkOpenCodeAvailability());
+
+    expect(result.available).toBe(false);
+    expect(result.cliAvailable).toBe(false);
+    expect(result.bundledRuntime?.missingReason).toBeTruthy();
+  });
+
+  it("checkOpenCodeAvailability returns runtimeSource=local when local opencode is on PATH", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "avail-local-"));
+    const localBin = path.join(fixtureDir, "local-bin");
+    fs.mkdirSync(localBin, { recursive: true });
+    fs.writeFileSync(path.join(localBin, "opencode"), "#!/usr/bin/env node\n", "utf8");
+    const bundledDir = path.join(fixtureDir, "bundled");
+    fs.mkdirSync(bundledDir, { recursive: true });
+    createBundledFixture(bundledDir, "linux");
+
+    process.env.OPENCODE_BUNDLED_RUNTIME_DIR = bundledDir;
+    process.env.PATH = localBin;
+    process.env.HOME = fixtureDir;
+    process.env.XDG_CONFIG_HOME = "";
+
+    _setExecRunner(async (file: string, args: string[]) => {
+      if (args.join(" ") === "--version") return { stdout: "v1.15.0-local\n", stderr: "" };
+      if (args.join(" ") === "providers list") return { stdout: "1 credentials configured", stderr: "" };
+      throw new Error(`Unexpected args: ${JSON.stringify(args)}`);
+    });
+
+    const result = await withProcessPlatformAsync("linux", () => checkOpenCodeAvailability());
+
+    expect(result.available).toBe(true);
+    expect(result.runtimeSource).toBe("local");
+    expect(result.version).toBe("v1.15.0-local");
+  });
+
+  it("getOpenCodePathDiagnostics includes bundledRuntime diagnostics", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "diagnostics-bundled-"));
+    const bundledDir = path.join(fixtureDir, "bundled");
+    fs.mkdirSync(bundledDir, { recursive: true });
+    createBundledFixture(bundledDir, "linux");
+
+    const diag = await getOpenCodePathDiagnostics(
+      { OPENCODE_BUNDLED_RUNTIME_DIR: bundledDir, PATH: "/nonexistent", HOME: fixtureDir },
+      "linux",
+    );
+
+    expect(diag.bundledRuntime).toBeDefined();
+    expect(diag.bundledRuntime.executablePath).toBeTruthy();
+    expect(diag.bundledRuntime.manifestPath).toBeTruthy();
+    expect(diag.bundledRuntime.version).toBe("v1.14.30-bundled");
+    expect(diag.bundledRuntime.candidateRoots.length).toBeGreaterThanOrEqual(1);
+    expect(diag.bundledRuntime.missingReason).toBeNull();
+  });
+
+  it("getOpenCodePathDiagnostics reports missing bundled with reason", async () => {
+    const missingDir = path.join(os.tmpdir(), "no-bundled-diag-" + Date.now());
+    const diag = await getOpenCodePathDiagnostics(
+      { OPENCODE_BUNDLED_RUNTIME_DIR: missingDir, PATH: "/nonexistent" },
+      "linux",
+    );
+
+    expect(diag.bundledRuntime).toBeDefined();
+    expect(diag.bundledRuntime.executablePath).toBeNull();
+    expect(diag.bundledRuntime.missingReason).toBeTruthy();
+    expect(diag.bundledRuntime.candidateRoots).toContain(missingDir);
+  });
+
+  it("bundled runtime spawn args do not contain cmd.exe or /c", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-spawn-safety-"));
+    const bundledDir = path.join(fixtureDir, "bundled");
+    fs.mkdirSync(bundledDir, { recursive: true });
+    const binPath = createBundledFixture(bundledDir, "linux");
+
+    process.env.OPENCODE_BUNDLED_RUNTIME_DIR = bundledDir;
+    process.env.PATH = "/nonexistent";
+    process.env.HOME = fixtureDir;
+    process.env.XDG_CONFIG_HOME = "";
+
+    const captured: Array<{ file: string; args: string[] }> = [];
+    _setExecRunner(async (file: string, args: string[]) => {
+      captured.push({ file, args });
+      if (args.join(" ") === "--version") return { stdout: "v1.0.0\n", stderr: "" };
+      if (args.join(" ") === "providers list") return { stdout: "1 credentials configured", stderr: "" };
+      throw new Error(`Unexpected args: ${JSON.stringify(args)}`);
+    });
+
+    const result = await withProcessPlatformAsync("linux", () => checkOpenCodeAvailability());
+
+    expect(result.available).toBe(true);
+    expect(result.runtimeSource).toBe("bundled");
+    expect(captured.length).toBeGreaterThan(0);
+    // Verify the file is the bundled binary, not cmd.exe or a .cmd shim
+    expect(captured[0].file).toBe(binPath);
+    expect(captured[0].file.toLowerCase()).not.toMatch(/cmd\.exe|\.cmd|\.bat|\/c/);
+  });
+
+  it("Windows .cmd shim does not regress when bundled runtime is also available", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "win-bundled-no-regress-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    // Create local .cmd shim with real target
+    const cmdShim = path.join(appDataNpm, "opencode.cmd");
+    const jsBin = createOpenCodePackageFixture(appDataNpm);
+    fs.writeFileSync(cmdShim, `@echo off\r\nnode "%~dp0\\node_modules\\opencode-ai\\bin\\opencode.js" %*\r\n`, "utf8");
+    const nodeExe = path.join(appDataNpm, "node.exe");
+    fs.writeFileSync(nodeExe, "", "utf8");
+    // Create bundled runtime
+    const bundledDir = path.join(fixtureDir, "bundled");
+    fs.mkdirSync(bundledDir, { recursive: true });
+    const bundledBin = path.join(bundledDir, "bin", "opencode.exe");
+    fs.mkdirSync(path.join(bundledDir, "bin"), { recursive: true });
+    fs.writeFileSync(bundledBin, "fake-bundled-exe", "utf8");
+
+    process.env.APPDATA = appData;
+    delete process.env.LOCALAPPDATA;
+    process.env.PATH = "C:\\Windows\\System32";
+    process.env.OPENCODE_BUNDLED_RUNTIME_DIR = bundledDir;
+
+    const plan = resolveOpenCodeProcessContext({ PATH: "C:\\Windows\\System32", APPDATA: appData, OPENCODE_BUNDLED_RUNTIME_DIR: bundledDir }, "win32", nodeExe);
+
+    // Local should win over bundled
+    expect(plan.resolved).toBe(true);
+    expect(plan.runtimeSource).toBe("local");
+    expect(plan.file).toBe(nodeExe);
+    expect(plan.argsPrefix).toEqual([jsBin]);
+    expect(plan.executionMode).toBe("windows-node-shim");
+    expect(plan.shimPath).toBe(cmdShim);
+    // Verify no cmd.exe, no /c, no .cmd in the execution file
+    expect(plan.file.toLowerCase()).not.toMatch(/cmd\.exe$|\.cmd$|\.bat$/);
+    expect(plan.argsPrefix.join(" ")).not.toContain("/c");
+  });
+});
+
+// ─── Bundled Install Plan Tests ────────────────────────────────────────────────
+
+describe("Bundled runtime install plan", () => {
+  const originalEnv = { ...process.env };
+  let tmpDir = "";
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-install-plan-"));
+    process.env.XDG_CONFIG_HOME = path.join(tmpDir, "xdg");
+    process.env.HOME = path.join(tmpDir, "home");
+    process.env.USERPROFILE = path.join(tmpDir, "home");
+    process.env.APPDATA = path.join(tmpDir, "AppData", "Roaming");
+    process.env.LOCALAPPDATA = path.join(tmpDir, "AppData", "Local");
+    process.env.NODE_ENV = "test";
+    delete process.env.OPENCODE_CONFIG;
+    delete process.env.OPENCODE_LOCAL_CAPABILITIES;
+    delete process.env.ELECTRON_MODE;
+    delete process.env.DESKTOP_API_TOKEN;
+  });
+
+  afterEach(() => {
+    _resetInstallServiceForTests();
+    _resetExecRunner();
+    _resetOpenCodePlatformCachesForTests();
+    process.env = { ...originalEnv };
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns bundled no-install plan when bundled runtime is available", async () => {
+    const bundledDir = path.join(tmpDir, "opencode-runtime");
+    fs.mkdirSync(path.join(bundledDir, "bin"), { recursive: true });
+    fs.writeFileSync(path.join(bundledDir, "bin", "opencode"), "fake-binary", "utf8");
+    fs.writeFileSync(path.join(bundledDir, "manifest.json"), JSON.stringify({ name: "opencode", version: "v1.0.0" }), "utf8");
+
+    process.env.OPENCODE_BUNDLED_RUNTIME_DIR = bundledDir;
+    process.env.PATH = "";
+
+    // Mock the availability check to return bundled
+    _setExecRunner(async (file: string, args: string[]) => {
+      if (args.join(" ") === "--version") return { stdout: "v1.0.0\n", stderr: "" };
+      if (args.join(" ") === "providers list") return { stdout: "1 credentials configured", stderr: "" };
+      throw new Error(`Unexpected args: ${JSON.stringify(args)}`);
+    });
+
+    const plan = await withProcessPlatformAsync("linux", async () => createOpenCodeInstallPlan());
+
+    expect(plan.ok).toBe(true);
+    expect(plan.controlledInstallAvailable).toBe(false);
+    // Strict assertion: bundled message must explicitly say embedded runtime is available
+    // and no manual install is needed (not just a generic "already installed" message).
+    expect(plan.warnings.join(" ")).toMatch(/内嵌运行时已可用/);
+    expect(plan.warnings.join(" ")).toMatch(/无需手动安装/);
+  });
+});
+
+// ─── M1: Windows unsafe .cmd shim + bundled runtime fallback ────────────────────
+
+describe("M1: Windows unsafe .cmd shim falls back to bundled run context", () => {
+  let fixtureDir: string | null = null;
+
+  afterEach(() => {
+    _resetOpenCodePlatformCachesForTests();
+    if (fixtureDir) {
+      cleanupDir(fixtureDir);
+      fixtureDir = null;
+    }
+  });
+
+  function createBundledRuntimeWin32(root: string): { runtimeDir: string; binPath: string } {
+    const runtimeDir = root;
+    const binDir = path.join(runtimeDir, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    const binPath = path.join(binDir, "opencode.exe");
+    fs.writeFileSync(binPath, "fake-bundled-exe", "utf8");
+    fs.writeFileSync(path.join(runtimeDir, "manifest.json"), JSON.stringify({
+      name: "opencode",
+      version: "v1.14.30",
+      target: "win32-x64",
+      binary: "bin/opencode.exe",
+    }), "utf8");
+    return { runtimeDir, binPath };
+  }
+
+  it("falls back to bundled when .cmd shim target cannot be resolved (sync)", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "m1-unresolved-shim-bundled-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    // Create a .cmd shim that cannot be resolved to a safe target
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\necho unknown shim\r\n", "utf8");
+    // Create bundled runtime
+    const { binPath: bundledBin } = createBundledRuntimeWin32(path.join(fixtureDir, "bundled"));
+
+    const env = { PATH: "C:\\Windows\\System32", APPDATA: appData, OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled") };
+    const context = resolveOpenCodeProcessContext(env, "win32");
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("bundled");
+    expect(context.file).toBe(bundledBin);
+    expect(context.executionMode).toBe("native-executable");
+    // Verify no cmd.exe, no /c, no .cmd/.bat in the execution context
+    expect(context.file.toLowerCase()).not.toMatch(/cmd\.exe$|\.cmd$|\.bat$/);
+    expect(context.argsPrefix).toEqual([]);
+  });
+
+  it("falls back to bundled when .cmd shim target cannot be resolved (async)", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "m1-unresolved-shim-bundled-async-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\necho unknown shim\r\n", "utf8");
+    const { binPath: bundledBin } = createBundledRuntimeWin32(path.join(fixtureDir, "bundled"));
+
+    const env = { PATH: "C:\\Windows\\System32", APPDATA: appData, OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled") };
+    const context = await resolveOpenCodeProcessContextAsync(env, "win32");
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("bundled");
+    expect(context.file).toBe(bundledBin);
+    expect(context.file.toLowerCase()).not.toMatch(/cmd\.exe$|\.cmd$|\.bat$/);
+  });
+
+  it("falls back to bundled when .cmd shim has no safe node executable (sync)", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "m1-no-node-bundled-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    // Create a .cmd shim that resolves to a script target but no safe node exists
+    createOpenCodePackageFixture(appDataNpm, "opencode");
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\n\"%_prog%\" \"%dp0%\\node_modules\\opencode-ai\\bin\\opencode\" %*\r\n", "utf8");
+    // Electron exe (not node) -- so no safe node available
+    const electronExe = path.join(fixtureDir, "Electron.exe");
+    fs.writeFileSync(electronExe, "", "utf8");
+    // Create bundled runtime
+    const { binPath: bundledBin } = createBundledRuntimeWin32(path.join(fixtureDir, "bundled"));
+
+    const env = { PATH: "C:\\Windows\\System32", APPDATA: appData, OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled") };
+    const context = resolveOpenCodeProcessContext(env, "win32", electronExe);
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("bundled");
+    expect(context.file).toBe(bundledBin);
+    expect(context.file.toLowerCase()).not.toMatch(/cmd\.exe$|\.cmd$|\.bat$/);
+  });
+
+  it("falls back to bundled when .cmd shim has no safe node executable (async)", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "m1-no-node-bundled-async-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    createOpenCodePackageFixture(appDataNpm, "opencode");
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\n\"%_prog%\" \"%dp0%\\node_modules\\opencode-ai\\bin\\opencode\" %*\r\n", "utf8");
+    const electronExe = path.join(fixtureDir, "Electron.exe");
+    fs.writeFileSync(electronExe, "", "utf8");
+    const { binPath: bundledBin } = createBundledRuntimeWin32(path.join(fixtureDir, "bundled"));
+
+    const env = { PATH: "C:\\Windows\\System32", APPDATA: appData, OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled") };
+    const context = await resolveOpenCodeProcessContextAsync(env, "win32", electronExe);
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("bundled");
+    expect(context.file).toBe(bundledBin);
+  });
+
+  it("probe context falls back to bundled when .cmd shim is unsafe (async)", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "m1-probe-bundled-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\necho unknown shim\r\n", "utf8");
+    const { binPath: bundledBin } = createBundledRuntimeWin32(path.join(fixtureDir, "bundled"));
+
+    const env = { PATH: "C:\\Windows\\System32", APPDATA: appData, OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled") };
+    const context = await resolveOpenCodeProbeContextAsync(env, "win32");
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("bundled");
+    expect(context.file).toBe(bundledBin);
+  });
+
+  it("reports bundled runtime as available when local shim is unsafe but bundled exists", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "m1-diagnostics-bundled-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\necho unknown shim\r\n", "utf8");
+    createBundledRuntimeWin32(path.join(fixtureDir, "bundled"));
+
+    const env: Record<string, string | undefined> = {
+      PATH: "C:\\Windows\\System32",
+      APPDATA: appData,
+      OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled"),
+    };
+    const diag = await getOpenCodePathDiagnostics(env, "win32");
+
+    // Diagnostics should report bundled as available
+    expect(diag.runtimeSource).toBe("bundled");
+    expect(diag.bundledRuntime.executablePath).toBeTruthy();
+    expect(diag.bundledRuntime.missingReason).toBeNull();
+    // Since bundled fallback succeeds, the run context resolves without error.
+    // localResolutionError is only set when the run context itself fails to resolve.
+    // With bundled fallback, the run resolves to bundled successfully, so there is no error.
+    // The probe context also falls through to bundled.
+    expect(diag.runResolutionError).toBeNull();
+    expect(diag.resolutionError).toBeNull();
+  });
+
+  it("throws only when both local shim is unsafe and bundled is unavailable", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "m1-no-bundled-throws-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\necho unknown shim\r\n", "utf8");
+    // No bundled runtime
+
+    const env = { PATH: "C:\\Windows\\System32", APPDATA: appData, OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "no-bundled-here") };
+    expect(() => resolveOpenCodeProcessContext(env, "win32"))
+      .toThrow(/Unable to resolve safe native OpenCode target/);
+  });
+
+  it("runOpenCodeNormalize uses bundled when .cmd shim is unsafe and bundled exists", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "m1-run-bundled-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\necho unknown shim\r\n", "utf8");
+    createBundledRuntimeWin32(path.join(fixtureDir, "bundled"));
+
+    const originalAppData = process.env.APPDATA;
+    const originalLocalAppData = process.env.LOCALAPPDATA;
+    const originalPath = process.env.PATH;
+    const originalBundledDir = process.env.OPENCODE_BUNDLED_RUNTIME_DIR;
+    process.env.APPDATA = appData;
+    delete process.env.LOCALAPPDATA;
+    process.env.PATH = "C:\\Windows\\System32";
+    process.env.OPENCODE_BUNDLED_RUNTIME_DIR = path.join(fixtureDir, "bundled");
+
+    const validOutput = {
+      lines: [{ id: "l1", order: 0, speaker: "narrator", text: "Bundled run", voice: "Zephyr" }],
+      speakers: [{ id: "narrator", label: "Narrator", voice: "Zephyr" }],
+    };
+    const captured: Array<{ file: string; args: string[] }> = [];
+    _setSpawnRunner(async (file: string, args: string[]) => {
+      captured.push({ file, args });
+      return { stdout: JSON.stringify({ content: JSON.stringify(validOutput) }), stderr: "" };
+    });
+
+    try {
+      const result = await withProcessPlatformAsync("win32", () => runOpenCodeNormalize({
+        documents: [{ id: "doc-1", fileName: "test.txt", content: "Bundled run test", enabled: true }],
+      }));
+
+      expect(result.runner).toBe("opencode");
+      expect(captured).toHaveLength(1);
+      // File should be the bundled opencode.exe, not a .cmd
+      expect(captured[0].file.toLowerCase()).toMatch(/opencode\.exe$/);
+      expect(captured[0].file.toLowerCase()).not.toMatch(/\.cmd$|\.bat$|cmd\.exe/);
+      expect(captured[0].args).not.toContain("/c");
+    } finally {
+      _resetSpawnRunner();
+      if (originalAppData === undefined) delete process.env.APPDATA;
+      else process.env.APPDATA = originalAppData;
+      if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+      else process.env.LOCALAPPDATA = originalLocalAppData;
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (originalBundledDir === undefined) delete process.env.OPENCODE_BUNDLED_RUNTIME_DIR;
+      else process.env.OPENCODE_BUNDLED_RUNTIME_DIR = originalBundledDir;
+    }
+  });
+});
+
+// ─── M2: OPENCODE_BIN_PATH explicit resolver ──────────────────────────────────
+
+describe("M2: OPENCODE_BIN_PATH explicit resolver", () => {
+  let fixtureDir: string | null = null;
+
+  afterEach(() => {
+    _resetOpenCodePlatformCachesForTests();
+    if (fixtureDir) {
+      cleanupDir(fixtureDir);
+      fixtureDir = null;
+    }
+  });
+
+  it("accepts absolute path to native opencode.exe on Windows", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "explicit-win-"));
+    const binDir = path.join(fixtureDir, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    const exePath = path.join(binDir, "opencode.exe");
+    fs.writeFileSync(exePath, "fake-exe", "utf8");
+
+    const env = { OPENCODE_BIN_PATH: exePath, PATH: "C:\\nonexistent" };
+    const context = resolveOpenCodeProcessContext(env, "win32");
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("explicit");
+    expect(context.file).toBe(exePath);
+    expect(context.executionMode).toBe("native-executable");
+  });
+
+  it("accepts absolute path to native opencode on Linux", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "explicit-linux-"));
+    const binDir = path.join(fixtureDir, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    const binPath = path.join(binDir, "opencode");
+    fs.writeFileSync(binPath, "fake-binary", "utf8");
+
+    const env = { OPENCODE_BIN_PATH: binPath, PATH: "/nonexistent" };
+    const context = resolveOpenCodeProcessContext(env, "linux");
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("explicit");
+    expect(context.file).toBe(binPath);
+    expect(context.executionMode).toBe("native-executable");
+  });
+
+  it("rejects relative paths", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "explicit-relative-"));
+    const env = { OPENCODE_BIN_PATH: "relative/opencode", PATH: "/nonexistent" };
+    const context = resolveOpenCodeProcessContext(env, "linux");
+
+    // Should not resolve via explicit, should fall through to missing
+    expect(context.runtimeSource).not.toBe("explicit");
+    expect(context.resolved).toBe(false);
+  });
+
+  it("rejects .cmd extension on Windows", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "explicit-cmd-"));
+    const cmdPath = path.join(fixtureDir, "opencode.cmd");
+    fs.writeFileSync(cmdPath, "@echo off\r\n", "utf8");
+
+    const env = { OPENCODE_BIN_PATH: cmdPath, PATH: "C:\\nonexistent" };
+    const context = resolveOpenCodeProcessContext(env, "win32");
+
+    expect(context.runtimeSource).not.toBe("explicit");
+    expect(context.resolved).toBe(false);
+  });
+
+  it("rejects .bat extension on Windows", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "explicit-bat-"));
+    const batPath = path.join(fixtureDir, "opencode.bat");
+    fs.writeFileSync(batPath, "@echo off\r\n", "utf8");
+
+    const env = { OPENCODE_BIN_PATH: batPath, PATH: "C:\\nonexistent" };
+    const context = resolveOpenCodeProcessContext(env, "win32");
+
+    expect(context.runtimeSource).not.toBe("explicit");
+    expect(context.resolved).toBe(false);
+  });
+
+  it("rejects missing file", () => {
+    const env = { OPENCODE_BIN_PATH: "C:\\nonexistent\\opencode.exe", PATH: "C:\\nonexistent" };
+    const context = resolveOpenCodeProcessContext(env, "win32");
+
+    expect(context.runtimeSource).not.toBe("explicit");
+    expect(context.resolved).toBe(false);
+  });
+
+  it("explicit source takes priority over local PATH opencode", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "explicit-priority-"));
+    // Create local opencode on PATH
+    const localBinDir = path.join(fixtureDir, "local-bin");
+    fs.mkdirSync(localBinDir, { recursive: true });
+    fs.writeFileSync(path.join(localBinDir, "opencode"), "#!/usr/bin/env node\n", "utf8");
+    // Create explicit binary
+    const explicitDir = path.join(fixtureDir, "explicit");
+    fs.mkdirSync(explicitDir, { recursive: true });
+    const explicitBin = path.join(explicitDir, "opencode");
+    fs.writeFileSync(explicitBin, "fake-explicit", "utf8");
+
+    const env = { OPENCODE_BIN_PATH: explicitBin, PATH: localBinDir, HOME: fixtureDir };
+    const context = resolveOpenCodeProcessContext(env, "linux");
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("explicit");
+    expect(context.file).toBe(explicitBin);
+  });
+
+  it("explicit source takes priority over bundled runtime", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "explicit-over-bundled-"));
+    // Create explicit binary
+    const explicitDir = path.join(fixtureDir, "explicit");
+    fs.mkdirSync(explicitDir, { recursive: true });
+    const explicitBin = path.join(explicitDir, "opencode");
+    fs.writeFileSync(explicitBin, "fake-explicit", "utf8");
+    // Create bundled runtime
+    const bundledDir = path.join(fixtureDir, "bundled");
+    const bundledBinDir = path.join(bundledDir, "bin");
+    fs.mkdirSync(bundledBinDir, { recursive: true });
+    fs.writeFileSync(path.join(bundledBinDir, "opencode"), "fake-bundled", "utf8");
+    fs.writeFileSync(path.join(bundledDir, "manifest.json"), JSON.stringify({ name: "opencode", version: "v1.0.0" }), "utf8");
+
+    const env = { OPENCODE_BIN_PATH: explicitBin, PATH: "/nonexistent", HOME: fixtureDir, OPENCODE_BUNDLED_RUNTIME_DIR: bundledDir };
+    const context = resolveOpenCodeProcessContext(env, "linux");
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("explicit");
+    expect(context.file).toBe(explicitBin);
+  });
+
+  it("explicit source takes priority in async context as well", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "explicit-async-"));
+    const binDir = path.join(fixtureDir, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    const binPath = path.join(binDir, "opencode");
+    fs.writeFileSync(binPath, "fake-binary", "utf8");
+
+    const env = { OPENCODE_BIN_PATH: binPath, PATH: "/nonexistent" };
+    const context = await resolveOpenCodeProcessContextAsync(env, "linux");
+
+    expect(context.resolved).toBe(true);
+    expect(context.runtimeSource).toBe("explicit");
+    expect(context.file).toBe(binPath);
+  });
+
+  it("ignores empty OPENCODE_BIN_PATH", () => {
+    const env = { OPENCODE_BIN_PATH: "", PATH: "/nonexistent" };
+    const context = resolveOpenCodeProcessContext(env, "linux");
+
+    expect(context.runtimeSource).not.toBe("explicit");
+    expect(context.resolved).toBe(false);
+  });
+
+  it("ignores whitespace-only OPENCODE_BIN_PATH", () => {
+    const env = { OPENCODE_BIN_PATH: "   ", PATH: "/nonexistent" };
+    const context = resolveOpenCodeProcessContext(env, "linux");
+
+    expect(context.runtimeSource).not.toBe("explicit");
+    expect(context.resolved).toBe(false);
+  });
+
+  it("rejects OPENCODE_BIN_PATH with control characters", () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "explicit-control-"));
+    const binDir = path.join(fixtureDir, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    const binPath = path.join(binDir, "opencode");
+    fs.writeFileSync(binPath, "fake", "utf8");
+    // Append a null character
+    const env = { OPENCODE_BIN_PATH: binPath + "\0", PATH: "/nonexistent" };
+    const context = resolveOpenCodeProcessContext(env, "linux");
+
+    expect(context.runtimeSource).not.toBe("explicit");
+  });
+});
+
+// ─── m1-R2: localResolutionError diagnostics when bundled fallback occurs ───────
+
+describe("m1-R2: localResolutionError populated when Windows unsafe shim falls back to bundled", () => {
+  let fixtureDir: string | null = null;
+
+  afterEach(() => {
+    _resetOpenCodePlatformCachesForTests();
+    if (fixtureDir) {
+      cleanupDir(fixtureDir);
+      fixtureDir = null;
+    }
+  });
+
+  function createBundledRuntimeWin32(root: string): { runtimeDir: string; binPath: string } {
+    const runtimeDir = root;
+    const binDir = path.join(runtimeDir, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    const binPath = path.join(binDir, "opencode.exe");
+    fs.writeFileSync(binPath, "fake-bundled-exe", "utf8");
+    fs.writeFileSync(path.join(runtimeDir, "manifest.json"), JSON.stringify({
+      name: "opencode",
+      version: "v1.14.30",
+      target: "win32-x64",
+      binary: "bin/opencode.exe",
+    }), "utf8");
+    return { runtimeDir, binPath };
+  }
+
+  it("populates localResolutionError when .cmd shim target cannot be safely resolved", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "m1r2-unresolved-shim-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    // Create a .cmd shim that cannot be resolved to a safe target
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\necho unknown shim\r\n", "utf8");
+    createBundledRuntimeWin32(path.join(fixtureDir, "bundled"));
+
+    // The .cmd shim must be on the base PATH for resolveExecutableOnPath to find it
+    const env: Record<string, string | undefined> = {
+      PATH: "C:\\Windows\\System32;" + appDataNpm,
+      APPDATA: appData,
+      OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled"),
+    };
+    const diag = await getOpenCodePathDiagnostics(env, "win32");
+
+    // Runtime source should be bundled (fallback succeeded)
+    expect(diag.runtimeSource).toBe("bundled");
+    // localResolutionError must describe why local was rejected
+    expect(diag.localResolutionError).not.toBeNull();
+    expect(diag.localResolutionError).toContain(".cmd shim");
+    expect(diag.localResolutionError).toMatch(/could not be safely resolved|bundled runtime used instead/);
+  });
+
+  it("populates localResolutionError when .cmd shim requires node but no safe node exists", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "m1r2-no-safe-node-"));
+    const appData = path.join(fixtureDir, "Roaming");
+    const appDataNpm = path.join(appData, "npm");
+    fs.mkdirSync(appDataNpm, { recursive: true });
+    // Create a .cmd shim that resolves to a script target but no safe node exists
+    createOpenCodePackageFixture(appDataNpm, "opencode");
+    fs.writeFileSync(path.join(appDataNpm, "opencode.cmd"), "@echo off\r\n\"%_prog%\" \"%dp0%\\node_modules\\opencode-ai\\bin\\opencode\" %*\r\n", "utf8");
+    // No node.exe available (Electron exe is not node)
+    const electronExe = path.join(fixtureDir, "Electron.exe");
+    fs.writeFileSync(electronExe, "", "utf8");
+    createBundledRuntimeWin32(path.join(fixtureDir, "bundled"));
+
+    // The .cmd shim must be on the base PATH for resolveExecutableOnPath to find it
+    const env: Record<string, string | undefined> = {
+      PATH: "C:\\Windows\\System32;" + appDataNpm,
+      APPDATA: appData,
+      OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled"),
+    };
+
+    // Need to override process.execPath for the node resolution to fail
+    const origExecPath = Object.getOwnPropertyDescriptor(process, "execPath");
+    Object.defineProperty(process, "execPath", { value: electronExe });
+    try {
+      const diag = await getOpenCodePathDiagnostics(env, "win32");
+
+      expect(diag.runtimeSource).toBe("bundled");
+      expect(diag.localResolutionError).not.toBeNull();
+      expect(diag.localResolutionError).toMatch(/no safe node executable found|bundled runtime used instead/);
+    } finally {
+      if (origExecPath) Object.defineProperty(process, "execPath", origExecPath);
+    }
+  });
+
+  it("does not populate localResolutionError when local opencode is native exe (not a shim)", async () => {
+    fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "m1r2-native-exe-"));
+    const localBinDir = path.join(fixtureDir, "local-bin");
+    fs.mkdirSync(localBinDir, { recursive: true });
+    const localExe = path.join(localBinDir, "opencode.exe");
+    fs.writeFileSync(localExe, "fake-local-exe", "utf8");
+    // Also create bundled, but local should win
+    createBundledRuntimeWin32(path.join(fixtureDir, "bundled"));
+
+    const env: Record<string, string | undefined> = {
+      PATH: localBinDir,
+      OPENCODE_BUNDLED_RUNTIME_DIR: path.join(fixtureDir, "bundled"),
+    };
+    const diag = await getOpenCodePathDiagnostics(env, "win32");
+
+    // Local should win over bundled
+    expect(diag.runtimeSource).toBe("local");
+    // No localResolutionError because local resolved fine
+    expect(diag.localResolutionError).toBeNull();
   });
 });
